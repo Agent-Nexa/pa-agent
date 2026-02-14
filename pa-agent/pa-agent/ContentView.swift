@@ -736,11 +736,23 @@ struct ContentView: View {
                 List {
                     ForEach(filteredTasks) { task in
                         HStack {
+                            Button {
+                                if let index = tasks.firstIndex(where: { $0.id == task.id }) {
+                                    withAnimation { tasks[index].isDone.toggle() }
+                                }
+                            } label: {
+                                Image(systemName: task.isDone ? "checkmark.circle.fill" : "circle")
+                                    .font(.title2)
+                                    .foregroundStyle(task.isDone ? .green : Color.secondary)
+                            }
+                            .buttonStyle(.plain)
+
                             VStack(alignment: .leading) {
                                 Text(task.title)
                                     .font(.headline)
                                     .strikethrough(task.isDone)
-                                Text("Due: \(task.dueDate.formatted(date: .abbreviated, time: .shortened))")
+                                    .foregroundStyle(task.isDone ? .secondary : .primary)
+                                Text("\(task.type == .calendar ? "📅 " : "")Due: \(task.dueDate.formatted(date: .abbreviated, time: .shortened))")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -752,14 +764,26 @@ struct ContentView: View {
                                 .foregroundStyle(priorityColor(task.priority))
                                 .cornerRadius(4)
                         }
+                        .swipeActions(edge: .trailing) {
+                            Button(role: .destructive) {
+                                if let index = tasks.firstIndex(where: { $0.id == task.id }) {
+                                    tasks.remove(at: index)
+                                }
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
                         .swipeActions(edge: .leading) {
                             Button(task.isDone ? "Undo" : "Done") {
                                 if let index = tasks.firstIndex(where: { $0.id == task.id }) {
-                                    tasks[index].isDone.toggle()
+                                    withAnimation { tasks[index].isDone.toggle() }
                                 }
                             }
                             .tint(.green)
                         }
+                        .listRowBackground(
+                            (task.dueDate < Date() && !task.isDone) ? Color.red.opacity(0.15) : nil
+                        )
                     }
                 }
                 .navigationTitle("Tasks")
