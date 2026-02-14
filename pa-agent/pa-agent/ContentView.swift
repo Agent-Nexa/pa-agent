@@ -12,21 +12,29 @@ import UserNotifications
 import AVFoundation
 import EventKit
 import NaturalLanguage
+import Contacts
+import MessageUI
 
 // MARK: - Intent models & heuristics
 
 struct IntentResult: Codable {
-    var title: String
-    var startDate: Date
-    var dueDate: Date
-    var priority: Int
-    var tag: String
+    var title: String?
+    var startDate: Date?
+    var dueDate: Date?
+    var priority: Int?
+    var tag: String?
+    
+    // Action fields
+    var action: String? = "task" // "task" or "sendMessage"
+    var recipient: String?
+    var messageBody: String?
 }
 
 struct IntentAnalyzer {
     private let calendar = Calendar.current
 
     func infer(from raw: String) -> IntentResult? {
+        // Fallback always assumes task
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
 
@@ -41,7 +49,8 @@ struct IntentAnalyzer {
             startDate: dates.start,
             dueDate: dates.due,
             priority: priority,
-            tag: tag
+            tag: tag,
+            action: "task"
         )
     }
 
@@ -198,7 +207,7 @@ final class IntentService {
             "temperature": 0,
             "response_format": ["type": "json_object"],
             "messages": [
-                ["role": "system", "content": "You are a task router. Current local time is \(nowString). Reply ONLY valid JSON (no code fences) with keys: title (short), startDate (ISO8601), dueDate (ISO8601), priority (1-3 where 1=high), tag (single word). If a specific time is mentioned (e.g. 'at 8am', 'tomorrow 9:30'), use it as the startDate and set dueDate 1 hour later. If a specific 'due' time is requested, set startDate 1 hour before that due time. If only a date is given (no time), use 09:00 for start and 17:00 for due."],
+                ["role": "system", "content": "You are a personal assistant. Determine the user's intent: 'task' or 'sendMessage'. \n1. If Task: Return JSON with action='task', title, startDate, dueDate, priority, tag. Use current time \(nowString). \n2. If Send Message: Return JSON with action='sendMessage', recipient (extract name or number), messageBody (content). \nReply ONLY valid JSON."],
                 ["role": "user", "content": text]
             ]
         ]
@@ -339,6 +348,11 @@ final class IntentService {
         let title = (dict["title"] as? String).flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let priority = dict["priority"] as? Int ?? 2
         let tag = (dict["tag"] as? String ?? "Inbox").capitalized
+        
+        // Check action
+        let action = dict["action"] as? String ?? "task"
+        let recipient = dict["recipient"] as? String
+        let messageBody = dict["messageBody"] as? String
 
         func parseDate(_ value: Any?) -> Date? {
             guard let s = value as? String else { return nil }
@@ -358,15 +372,22 @@ final class IntentService {
 
         let start = parseDate(dict["startDate"]) ?? Calendar.current.startOfDay(for: Date()).addingTimeInterval(9*3600)
         let due = parseDate(dict["dueDate"]) ?? Calendar.current.startOfDay(for: Date().addingTimeInterval(86400)).addingTimeInterval(17*3600)
-
-        guard let taskTitle = title, !taskTitle.isEmpty else { return nil }
+        
+        if action == "sendMessage" {
+            return IntentResult(
+                action: "sendMessage",
+                recipient: recipient,
+                messageBody: messageBody
+            )
+        }
 
         return IntentResult(
-            title: taskTitle,
+            title: title ?? "New Task",
             startDate: start,
             dueDate: due,
             priority: min(max(priority, 1), 3),
-            tag: tag
+            tag: tag,
+            action: "task"
         )
     }
 
@@ -397,6 +418,63 @@ struct TaskDraft {
     var dueDate: Date = .now.addingTimeInterval(60 * 60 * 24)
     var priority: Int = 2
     var tag: String = "Inbox"
+}
+
+struct MessageDraft {
+    var recipient: String = ""
+    var body: String = ""
+}
+
+enum InteractionState: Equatable {
+    case idle
+    case collectingMessageRecipient
+    case collectingMessageBody
+    case clarifyingContact(candidates: [SimpleContact])
+}
+
+struct SimpleContact: Identifiable, Hashable {
+    var id = UUID()
+    var name: String
+    var number: String
+    var label: String
+}
+
+class ContactHelpers {
+    private let store = CNContactStore()
+    
+    func requestAccess() async -> Bool {
+        do {
+            return try await store.requestAccess(for: .contacts)
+        } catch {
+            return false
+        }
+    }
+    
+    func find(name: String) async -> [SimpleContact] {
+        guard await requestAccess() else { return [] }
+        
+        let keys = [CNContactGivenNameKey, CNContactFamilyNameKey, CNContactPhoneNumbersKey] as [CNKeyDescriptor]
+        let predicate = CNContact.predicateForContacts(matchingName: name)
+        
+        do {
+            let contacts = try store.unifiedContacts(matching: predicate, keysToFetch: keys)
+            var results: [SimpleContact] = []
+            
+            for c in contacts {
+                let fullName = "\(c.givenName) \(c.familyName)".trimmingCharacters(in: .whitespaces)
+                for num in c.phoneNumbers {
+                    results.append(SimpleContact(
+                        name: fullName,
+                        number: num.value.stringValue,
+                        label: CNLabeledValue<NSString>.localizedString(forLabel: num.label ?? "Mobile")
+                    ))
+                }
+            }
+            return results
+        } catch {
+            return []
+        }
+    }
 }
 
 // MARK: - Speech recognizer
@@ -479,6 +557,8 @@ struct ContentView: View {
     ]
     @State private var draft: String = ""
     @State private var pendingDraft: TaskDraft = .init(title: "")
+    @State private var pendingMessage: MessageDraft = .init()
+    @State private var interactionState: InteractionState = .idle
     @State private var showTaskDetailSheet = false
     @State private var showNotificationAlert = false
     @State private var showCalendarAlert = false
@@ -487,6 +567,7 @@ struct ContentView: View {
     @State private var showKeySheet = false
     @State private var showSettingsSheet = false
     @State private var showTasksList = false
+    @State private var showMessageComposer = false
     @AppStorage("OPENAI_API_KEY") private var storedApiKey: String = ""
     @AppStorage("OPENAI_MODEL") private var storedModel: String = "gpt-5.2"
     @AppStorage("OPENAI_USE_AZURE") private var useAzure: Bool = true
@@ -516,6 +597,20 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showTasksList) {
                 TasksListSheet(tasks: $tasks)
+            }
+            .sheet(isPresented: $showMessageComposer) {
+                MessageComposerView(recipients: [pendingMessage.recipient], body: pendingMessage.body) { result in
+                    if result == .sent {
+                        // Mark as done immediately
+                        recordSentMessageAsTask(recipient: pendingMessage.recipient, body: pendingMessage.body)
+                        messages.append(.init(isUser: false, text: "Message sent and logged."))
+                    } else if result == .cancelled {
+                        messages.append(.init(isUser: false, text: "Message cancelled."))
+                    } else {
+                        messages.append(.init(isUser: false, text: "Message failed."))
+                    }
+                    pendingMessage = .init()
+                }
             }
             .alert("Reminder not scheduled", isPresented: $showNotificationAlert, actions: {
                 Button("OK", role: .cancel) {}
@@ -583,6 +678,33 @@ struct ContentView: View {
                         messageBubble(for: message)
                             .id(message.id)
                     }
+
+                    if case .clarifyingContact(let candidates) = interactionState {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Select a contact:")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            ForEach(candidates) { contact in
+                                Button {
+                                    Task { await confirmContact(contact) }
+                                } label: {
+                                    HStack {
+                                        Text(contact.name)
+                                            .foregroundStyle(.primary)
+                                        Spacer()
+                                        Text(contact.label).font(.caption).foregroundStyle(.secondary)
+                                        Text(contact.number).font(.caption).foregroundStyle(.secondary)
+                                    }
+                                    .padding()
+                                    .background(Color.white)
+                                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                                    .shadow(color: .black.opacity(0.05), radius: 2, x: 0, y: 1)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 4)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 16)
@@ -590,6 +712,14 @@ struct ContentView: View {
                     if let last = newValue.last?.id {
                         withAnimation(.easeOut(duration: 0.2)) {
                             proxy.scrollTo(last, anchor: .bottom)
+                        }
+                    }
+                }
+                .onChange(of: interactionState) { _, newState in
+                    if case .clarifyingContact = newState {
+                        // Scroll to bottom when options appear
+                        if let last = messages.last?.id {
+                            withAnimation { proxy.scrollTo(last, anchor: .bottom) }
                         }
                     }
                 }
@@ -921,19 +1051,104 @@ struct ContentView: View {
 
         Task { await handleIntent(for: trimmed) }
     }
+    
+    private func confirmContact(_ contact: SimpleContact) async {
+        pendingMessage.recipient = contact.number
+        messages.append(.init(isUser: true, text: "Selected: \(contact.name) (\(contact.label))"))
+        await checkMessageCompleteness()
+    }
+    
+    private func resolveAndProceed(recipient: String) async {
+        let digits = recipient.components(separatedBy: CharacterSet.decimalDigits.inverted).joined()
+        // If it looks like a number (at least 7 digits), just use it
+        if digits.count >= 7 {
+            pendingMessage.recipient = recipient
+            await checkMessageCompleteness()
+            return
+        }
+        
+        let candidates = await ContactHelpers().find(name: recipient)
+        if candidates.isEmpty { 
+            // Fallback: use raw input
+            pendingMessage.recipient = recipient
+            await checkMessageCompleteness()
+        } else if candidates.count == 1 {
+            let c = candidates.first!
+            withAnimation {
+                messages.append(.init(isUser: false, text: "Found \(c.name)."))
+            }
+            pendingMessage.recipient = c.number
+            await checkMessageCompleteness()
+        } else {
+            interactionState = .clarifyingContact(candidates: candidates)
+            withAnimation {
+                messages.append(.init(isUser: false, text: "I found multiple contacts for '\(recipient)'. Please pick one:"))
+            }
+        }
+    }
+    
+    private func checkMessageCompleteness() async {
+        if pendingMessage.recipient.isEmpty {
+            interactionState = .collectingMessageRecipient
+            withAnimation { messages.append(.init(isUser: false, text: "Who would you like to message?")) }
+            return
+        }
+        if pendingMessage.body.isEmpty {
+            interactionState = .collectingMessageBody
+            withAnimation { messages.append(.init(isUser: false, text: "What's the message?")) }
+            return
+        }
+        await finalizeMessage()
+    }
 
     private func handleIntent(for text: String) async {
+        // 0. Check disambiguation
+        if case .clarifyingContact(let candidates) = interactionState {
+            if let match = candidates.first(where: { $0.name.localizedCaseInsensitiveContains(text) }) {
+                await confirmContact(match)
+            } else {
+                pendingMessage.recipient = text
+                await checkMessageCompleteness()
+            }
+            return
+        }
+    
+        // 1. Check if we are filling a slot
+        if interactionState == .collectingMessageRecipient {
+            await resolveAndProceed(recipient: text)
+            return
+        }
+        
+        if interactionState == .collectingMessageBody {
+            pendingMessage.body = text
+            await checkMessageCompleteness()
+            return
+        }
+    
         let activeKey = storedApiKey.isEmpty ? ProcessInfo.processInfo.environment["OPENAI_API_KEY"] : storedApiKey
 
         if let draft = await intentService.infer(from: text, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint) ?? intentAnalyzer.infer(from: text) {
             lastIntentSource = intentService.usedOpenAI ? "openai" : "fallback"
             lastIntentReason = intentService.lastReason
+            
+            if draft.action == "sendMessage" {
+                pendingMessage = MessageDraft(recipient: "", body: draft.messageBody ?? "")
+                
+                if let raw = draft.recipient, !raw.isEmpty {
+                    await resolveAndProceed(recipient: raw)
+                } else {
+                    await checkMessageCompleteness()
+                }
+                return
+            }
+            
+            // Task Logic
             pendingDraft = TaskDraft(
-                title: draft.title,
-                startDate: draft.startDate,
-                dueDate: draft.dueDate,
-                priority: draft.priority,
-                tag: draft.tag
+                title: draft.title ?? "New Task",
+                startDate: draft.startDate ?? Date(),
+                dueDate: draft.dueDate ?? Date().addingTimeInterval(86400),
+                priority: draft.priority ?? 2,
+                tag: draft.tag ?? "Inbox"
             )
             showTaskDetailSheet = true
         } else {
@@ -941,6 +1156,43 @@ struct ContentView: View {
             lastIntentReason = intentService.lastReason
             promptForTaskDetails(from: text)
         }
+    }
+
+    private func finalizeMessage() async {
+        interactionState = .idle
+        await MainActor.run {
+            if MFMessageComposeViewController.canSendText() {
+                showMessageComposer = true
+            } else {
+                #if targetEnvironment(simulator)
+                // Simulate success for testing on Simulator
+                messages.append(.init(isUser: false, text: "Simulating SMS send (Simulator mode)..."))
+                recordSentMessageAsTask(recipient: pendingMessage.recipient, body: pendingMessage.body)
+                messages.append(.init(isUser: false, text: "Message sent and logged."))
+                pendingMessage = .init()
+                #else
+                messages.append(.init(isUser: false, text: "This device cannot send messages. Make sure you are on a phone with a SIM card."))
+                pendingMessage = .init()
+                #endif
+            }
+        }
+    }
+    
+    private func recordSentMessageAsTask(recipient: String, body: String) {
+        // Add a "completed" task for the message
+        let task = TaskItem(
+            title: "Sent message to \(recipient)",
+            isDone: true,
+            tag: "Personal",
+            startDate: Date(),
+            dueDate: Date(),
+            priority: 3 // Low priority for log/history
+        )
+        // We insert it directly. "insertTask" does calendar stuff which we might not want for a just-completed log.
+        // But the user said "add that as a complete tasks". 
+        // Let's just append and sort.
+        tasks.append(task)
+        reprioritize()
     }
 
     private func promptForTaskDetails(from text: String) {
@@ -1206,6 +1458,40 @@ struct ContentView: View {
     private func clearTasks() {
         withAnimation(.easeInOut) {
             tasks.removeAll()
+        }
+    }
+}
+
+struct MessageComposerView: UIViewControllerRepresentable {
+    var recipients: [String]
+    var body: String
+    var completion: (MessageComposeResult) -> Void
+
+    func makeUIViewController(context: Context) -> MFMessageComposeViewController {
+        let controller = MFMessageComposeViewController()
+        controller.recipients = recipients
+        controller.body = body
+        controller.messageComposeDelegate = context.coordinator
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: MFMessageComposeViewController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(completion: completion)
+    }
+
+    class Coordinator: NSObject, MFMessageComposeViewControllerDelegate {
+        var completion: (MessageComposeResult) -> Void
+
+        init(completion: @escaping (MessageComposeResult) -> Void) {
+            self.completion = completion
+        }
+
+        func messageComposeViewController(_ controller: MFMessageComposeViewController, didFinishWith result: MessageComposeResult) {
+            controller.dismiss(animated: true) {
+                self.completion(result)
+            }
         }
     }
 }
