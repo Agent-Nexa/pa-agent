@@ -644,6 +644,8 @@ struct ContentView: View {
     @AppStorage("OPENAI_USE_AZURE") private var useAzure: Bool = true
     @AppStorage("OPENAI_AZURE_ENDPOINT") private var azureEndpoint: String = "https://admin-mev0a1yu-eastus2.openai.azure.com/openai/deployments/gpt-5.2/chat/completions?api-version=2024-12-01-preview"
     @AppStorage("AGENT_NAME") private var agentName: String = "Nexa"
+    @AppStorage("AGENT_ICON") private var agentIcon: String = "waveform.circle.fill"
+    @AppStorage("USER_ICON") private var userIcon: String = "person.circle.fill"
     @StateObject private var speechManager = SpeechManager()
     @Namespace private var scrollSpace
     private let eventStore = EKEventStore()
@@ -878,12 +880,25 @@ struct ContentView: View {
     }
 
     private func messageBubble(for message: ChatMessage) -> some View {
-        HStack {
-            if message.isUser { Spacer() }
-            VStack(alignment: .leading, spacing: 4) {
-                Text(message.isUser ? "You" : agentName)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        HStack(alignment: .bottom, spacing: 8) {
+            if message.isUser {
+                Spacer()
+            } else {
+                Image(systemName: agentIcon)
+                    .font(.title2)
+                    .foregroundStyle(.purple)
+                    .frame(width: 32, height: 32)
+                    .background(Color.purple.opacity(0.1))
+                    .clipShape(Circle())
+            }
+
+            VStack(alignment: message.isUser ? .trailing : .leading, spacing: 4) {
+                if !message.isUser {
+                    Text(agentName)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 4)
+                }
                 Text(message.text)
                     .padding()
                     .background(message.isUser ? Color.accentColor.opacity(0.15) : Color.white)
@@ -894,7 +909,17 @@ struct ContentView: View {
                             .strokeBorder(Color.primary.opacity(0.05))
                     )
             }
-            if !message.isUser { Spacer() }
+
+            if message.isUser {
+                Image(systemName: userIcon)
+                    .font(.title2)
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 32, height: 32)
+                    .background(Color.accentColor.opacity(0.1))
+                    .clipShape(Circle())
+            } else {
+                Spacer()
+            }
         }
         .transition(.move(edge: message.isUser ? .trailing : .leading).combined(with: .opacity))
     }

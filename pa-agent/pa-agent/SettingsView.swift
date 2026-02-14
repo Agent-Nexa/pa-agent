@@ -6,6 +6,8 @@ struct SettingsView: View {
     @AppStorage("OPENAI_USE_AZURE") private var useAzure: Bool = true
     @AppStorage("OPENAI_AZURE_ENDPOINT") private var azureEndpoint: String = "https://admin-mev0a1yu-eastus2.openai.azure.com/openai/deployments/gpt-5.2/chat/completions?api-version=2024-12-01-preview"
     @AppStorage("AGENT_NAME") private var storedAgentName: String = "Nexa"
+    @AppStorage("AGENT_ICON") private var agentIcon: String = "waveform.circle.fill"
+    @AppStorage("USER_ICON") private var userIcon: String = "person.circle.fill"
     
     @State private var localKey: String = ""
     @State private var localModel: String = "gpt-5.2"
@@ -18,8 +20,22 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Agent Identity") {
+                Section("Identity") {
                     TextField("Agent Name", text: $storedAgentName)
+                    HStack {
+                        TextField("Agent Icon (SF Symbol)", text: $agentIcon)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                        Image(systemName: agentIcon)
+                            .foregroundStyle(.purple)
+                    }
+                    HStack {
+                        TextField("User Icon (SF Symbol)", text: $userIcon)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                        Image(systemName: userIcon)
+                            .foregroundStyle(.blue)
+                    }
                 }
 
                 Section("OpenAI API Key") {
