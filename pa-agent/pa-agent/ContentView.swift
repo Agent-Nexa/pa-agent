@@ -106,15 +106,22 @@ struct IntentAnalyzer {
 
 // MARK: - Models
 
-struct TaskItem: Identifiable, Hashable {
-    let id = UUID()
+struct TaskItem: Identifiable, Hashable, Codable {
+    enum SourceType: String, Codable {
+        case app
+        case calendar
+        case reminder
+    }
+    
+    var id = UUID()
     var title: String
     var isDone: Bool = false
     var tag: String = "General"
     var startDate: Date = .now
     var dueDate: Date = .now.addingTimeInterval(60 * 60 * 24)
-    // 1 = high, 2 = medium, 3 = low
     var priority: Int = 2
+    var type: SourceType = .app
+    var externalId: String? = nil
 
     var priorityLabel: String {
         switch priority {
@@ -466,11 +473,7 @@ final class SpeechManager: NSObject, ObservableObject, SFSpeechRecognizerDelegat
 // MARK: - View
 
 struct ContentView: View {
-    @State private var tasks: [TaskItem] = [
-        .init(title: "Review roadmap with PM", tag: "Work", startDate: .now, dueDate: .now.addingTimeInterval(86_400.0 * 2), priority: 1),
-        .init(title: "Refine onboarding checklist", tag: "Ops", startDate: .now, dueDate: .now.addingTimeInterval(86_400.0 * 4), priority: 2),
-        .init(title: "Draft meeting notes template", isDone: true, startDate: .now.addingTimeInterval(-86_400.0), dueDate: .now.addingTimeInterval(86_400.0), priority: 3)
-    ]
+    @State private var tasks: [TaskItem] = []
     @State private var messages: [ChatMessage] = [
         .init(isUser: false, text: "Hi! I’m your project agent. Tell me what you need and I’ll track and prioritize tasks for you.")
     ]
@@ -483,6 +486,7 @@ struct ContentView: View {
     @State private var lastIntentReason: String = "not-run"
     @State private var showKeySheet = false
     @State private var showSettingsSheet = false
+    @State private var showTasksList = false
     @AppStorage("OPENAI_API_KEY") private var storedApiKey: String = ""
     @AppStorage("OPENAI_MODEL") private var storedModel: String = "gpt-5.2"
     @AppStorage("OPENAI_USE_AZURE") private var useAzure: Bool = true
@@ -500,7 +504,6 @@ struct ContentView: View {
                 Divider()
                 chatArea
                 Divider()
-                taskBoard
                 inputBar
             }
             .background(Color(.systemGroupedBackground))
@@ -510,6 +513,9 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showSettingsSheet) {
                 SettingsView()
+            }
+            .sheet(isPresented: $showTasksList) {
+                TasksListSheet(tasks: $tasks)
             }
             .alert("Reminder not scheduled", isPresented: $showNotificationAlert, actions: {
                 Button("OK", role: .cancel) {}
@@ -522,10 +528,15 @@ struct ContentView: View {
                 Text("I couldn't add the task to Calendar. Please enable calendar access in Settings.")
             })
             .onAppear {
+                loadTasks()
                 UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { _, _ in }
                 speechManager.requestPermission()
-                Task { await requestCalendarAccessIfNeeded() }
+                Task { 
+                    await requestCalendarAccessIfNeeded()
+                    await requestRemindersAccessIfNeeded()
+                }
             }
+            .onChange(of: tasks) { _, _ in saveTasks() }
         }
     }
 
@@ -548,6 +559,7 @@ struct ContentView: View {
             }
             Spacer()
             Menu {
+                Button("Tasks", action: { showTasksList = true })
                 Button("Quick reset", action: resetChat)
                 Button("Clear tasks", action: clearTasks)
                 Button("Settings") { showSettingsSheet = true }
@@ -681,6 +693,125 @@ struct ContentView: View {
         )
     }
 
+    // MARK: Task List Sheet
+    
+    struct TasksListSheet: View {
+        @Binding var tasks: [TaskItem]
+        @Environment(\.dismiss) private var dismiss
+        @State private var selectedFilter: TaskFilter = .all
+
+        enum TaskFilter: String, CaseIterable {
+            case all = "All"
+            case today = "Today"
+        case upcoming = "Upcoming"
+    }
+
+    var filteredTasks: [TaskItem] {
+        let calendar = Calendar.current
+        let now = Date()
+        let todayStart = calendar.startOfDay(for: now)
+        let tomorrowStart = calendar.date(byAdding: .day, value: 1, to: todayStart)!
+        let nextWeekStart = calendar.date(byAdding: .day, value: 7, to: todayStart)!
+
+        return tasks.filter { task in
+            let targetDate = task.dueDate
+            switch selectedFilter {
+            case .all:
+                return true
+            case .today:
+                return targetDate < tomorrowStart 
+            case .upcoming:
+                return targetDate >= tomorrowStart && targetDate < nextWeekStart
+            }
+        }
+        .sorted { 
+             // Sort by date, then priority
+             if $0.dueDate != $1.dueDate { return $0.dueDate < $1.dueDate }
+             return $0.priority < $1.priority 
+        }
+    }
+
+    var body: some View {
+            NavigationStack {
+                List {
+                    ForEach(filteredTasks) { task in
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text(task.title)
+                                    .font(.headline)
+                                    .strikethrough(task.isDone)
+                                Text("Due: \(task.dueDate.formatted(date: .abbreviated, time: .shortened))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Text(task.priorityLabel)
+                                .font(.caption2)
+                                .padding(4)
+                                .background(priorityColor(task.priority).opacity(0.2))
+                                .foregroundStyle(priorityColor(task.priority))
+                                .cornerRadius(4)
+                        }
+                        .swipeActions(edge: .leading) {
+                            Button(task.isDone ? "Undo" : "Done") {
+                                if let index = tasks.firstIndex(where: { $0.id == task.id }) {
+                                    tasks[index].isDone.toggle()
+                                }
+                            }
+                            .tint(.green)
+                        }
+                    }
+                }
+                .navigationTitle("Tasks")
+                .toolbar {
+                    ToolbarItem(placement: .principal) {
+                        Picker("Filter", selection: $selectedFilter) {
+                            ForEach(TaskFilter.allCases, id: \.self) { filter in
+                                Text(filter.rawValue).tag(filter)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 200)
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Close") { dismiss() }
+                    }
+                }
+                .safeAreaInset(edge: .bottom) {
+                    VStack {
+                        Text("Total Tasks: \(tasks.count)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Button("Reset All Tasks") {
+                            tasks.removeAll()
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                    }
+                    .padding()
+                    .background(.regularMaterial)
+                }
+                .overlay {
+                    if filteredTasks.isEmpty {
+                        ContentUnavailableView(
+                            "No tasks for \(selectedFilter.rawValue.lowercased())",
+                            systemImage: "checklist",
+                            description: Text("Add some tasks by chatting with the agent.")
+                        )
+                    }
+                }
+            }
+        }
+        
+        private func priorityColor(_ value: Int) -> Color {
+            switch value {
+            case 1: return .red
+            case 2: return .orange
+            default: return .blue
+            }
+        }
+    }
+
     // MARK: Input bar
 
     private var inputBar: some View {
@@ -780,14 +911,6 @@ struct ContentView: View {
                 priority: draft.priority,
                 tag: draft.tag
             )
-            let newTask = TaskItem(
-                title: draft.title,
-                tag: draft.tag,
-                startDate: draft.startDate,
-                dueDate: draft.dueDate,
-                priority: draft.priority
-            )
-            insertTask(newTask, announce: true)
             showTaskDetailSheet = true
         } else {
             lastIntentSource = intentService.usedOpenAI ? "openai" : "fallback"
@@ -805,16 +928,6 @@ struct ContentView: View {
 
         let title = cleaned.isEmpty ? text.trimmingCharacters(in: .whitespacesAndNewlines) : cleaned
         pendingDraft = TaskDraft(title: title)
-
-        // Immediately add with defaults so the task list updates right after the message.
-        let newTask = TaskItem(
-            title: title,
-            tag: pendingDraft.tag,
-            startDate: pendingDraft.startDate,
-            dueDate: pendingDraft.dueDate,
-            priority: pendingDraft.priority
-        )
-        insertTask(newTask, announce: true)
 
         // Keep the sheet open so the user can refine details if they want.
         showTaskDetailSheet = true
@@ -928,6 +1041,56 @@ struct ContentView: View {
         }
     }
 
+    private func requestRemindersAccessIfNeeded() async {
+        if #available(iOS 17, *) {
+           let status = EKEventStore.authorizationStatus(for: .reminder)
+           if status == .notDetermined {
+               try? await eventStore.requestFullAccessToReminders()
+           }
+        } else {
+            let status = EKEventStore.authorizationStatus(for: .reminder)
+            if status == .notDetermined {
+                try? await eventStore.requestAccess(to: .reminder)
+            }
+        }
+    }
+
+    private func fetchSystemItems() -> [TaskItem] {
+        let calendar = Calendar.current
+        var fetchedItems: [TaskItem] = []
+        
+        // Window: -1 year to +1 year
+        let now = Date()
+        let start = calendar.date(byAdding: .year, value: -1, to: now)!
+        let end = calendar.date(byAdding: .year, value: 1, to: now)!
+        
+        // Fetch only relevant calendars (exclude Holidays, Birthdays, etc.)
+        let allCalendars = eventStore.calendars(for: .event)
+        let userCalendars = allCalendars.filter { cal in
+            // Exclude subscription (Holidays) and Birthdays
+            cal.type != .subscription && cal.type != .birthday
+        }
+
+        // 1. Fetch Events
+        let predicate = eventStore.predicateForEvents(withStart: start, end: end, calendars: userCalendars)
+        let events = eventStore.events(matching: predicate)
+        for event in events {
+            fetchedItems.append(TaskItem(
+                id: UUID(), // We generate a transient ID
+                title: event.title ?? "Event",
+                isDone: false, // Events are not checkable in valid sense, but assume false
+                tag: event.calendar.title,
+                startDate: event.startDate,
+                dueDate: event.endDate,
+                priority: 2,
+                type: .calendar,
+                externalId: event.eventIdentifier
+            ))
+        }
+        
+        return fetchedItems
+    }
+
     private func reprioritize() {
         tasks.sort { lhs, rhs in
             if !Calendar.current.isDate(lhs.dueDate, inSameDayAs: rhs.dueDate) {
@@ -958,6 +1121,44 @@ struct ContentView: View {
     }
 
     // MARK: Helpers
+
+    private func saveTasks() {
+        // Only save items created within the app
+        let appTasks = tasks.filter { $0.type == .app }
+        if let data = try? JSONEncoder().encode(appTasks) {
+            UserDefaults.standard.set(data, forKey: "saved_tasks")
+        }
+    }
+
+    private func loadTasks() {
+        var baseTasks: [TaskItem] = []
+        if let data = UserDefaults.standard.data(forKey: "saved_tasks") {
+            do {
+                baseTasks = try JSONDecoder().decode([TaskItem].self, from: data)
+            } catch {
+                print("Failed to load tasks: \(error)")
+            }
+        }
+        
+        if baseTasks.isEmpty {
+           baseTasks = [
+               .init(title: "Review roadmap with PM", tag: "Work", startDate: .now, dueDate: .now.addingTimeInterval(86_400.0 * 2), priority: 1)
+           ]
+        }
+        
+        // Combine with system items
+        // Note: In a real app we would not effectively re-append system items to the 'tasks' array on every load 
+        // if 'tasks' is binding back to storage. We should separate them.
+        // However, given the current simple structure where 'tasks' is the single source of truth for the list view,
+        // we will append them transiently. 
+        // CRITICAL: We must filter out previous system items before appending new ones to avoid duplicates if we save this array back.
+        
+        let existingAppTasks = baseTasks.filter { $0.type == .app }
+        let systemItems = fetchSystemItems()
+        tasks = existingAppTasks + systemItems
+        
+        print("Loaded \(existingAppTasks.count) app tasks + \(systemItems.count) system events")
+    }
 
     private func priorityColor(_ value: Int) -> Color {
         switch value {
