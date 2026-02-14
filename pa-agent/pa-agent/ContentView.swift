@@ -489,10 +489,29 @@ final class SpeechManager: NSObject, ObservableObject, SFSpeechRecognizerDelegat
     private let audioEngine = AVAudioEngine()
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
+    
+    // TTS
+    private let synthesizer = AVSpeechSynthesizer()
 
     override init() {
         super.init()
         recognizer?.delegate = self
+        // Setup initial audio session
+        try? AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
+    }
+    
+    func speak(_ text: String) {
+        // Quick cleanup of text for speech (optional)
+        let clean = text.replacingOccurrences(of: "sms:", with: "message link")
+            
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
+        try? session.setActive(true, options: .notifyOthersOnDeactivation)
+        
+        let utterance = AVSpeechUtterance(string: clean)
+        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        synthesizer.stopSpeaking(at: .immediate)
+        synthesizer.speak(utterance)
     }
 
     func requestPermission() {
@@ -708,11 +727,17 @@ struct ContentView: View {
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 16)
-                .onChange(of: messages) { _, newValue in
+                .onChange(of: messages) { oldValue, newValue in
                     if let last = newValue.last?.id {
                         withAnimation(.easeOut(duration: 0.2)) {
                             proxy.scrollTo(last, anchor: .bottom)
                         }
+                    }
+                    // Auto-speak new agent messages
+                    if newValue.count > oldValue.count,
+                       let lastMsg = newValue.last,
+                       !lastMsg.isUser {
+                        speechManager.speak(lastMsg.text)
                     }
                 }
                 .onChange(of: interactionState) { _, newState in
@@ -1102,6 +1127,22 @@ struct ContentView: View {
     }
 
     private func handleIntent(for text: String) async {
+        // Global cancel check
+        let lower = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if ["cancel", "stop", "never mind", "abort"].contains(lower) {
+            await MainActor.run {
+                interactionState = .idle
+                pendingDraft = .init(title: "")
+                pendingMessage = .init()
+                showTaskDetailSheet = false
+                showMessageComposer = false
+                withAnimation {
+                    messages.append(.init(isUser: false, text: "Cancelled."))
+                }
+            }
+            return
+        }
+
         // 0. Check disambiguation
         if case .clarifyingContact(let candidates) = interactionState {
             if let match = candidates.first(where: { $0.name.localizedCaseInsensitiveContains(text) }) {
