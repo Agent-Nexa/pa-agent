@@ -25,9 +25,13 @@ struct IntentResult: Codable {
     var tag: String?
     
     // Action fields
-    var action: String? = "task" // "task" or "sendMessage"
+    var action: String? = "task" // "task", "sendMessage", "call"
     var recipient: String?
     var messageBody: String?
+    
+    // Delegation fields
+    var performer: String? = "user" // "user" or "agent"
+    var isScheduled: Bool? = false // inferred from presence of dates vs "now"
 }
 
 struct IntentAnalyzer {
@@ -39,6 +43,23 @@ struct IntentAnalyzer {
         guard !text.isEmpty else { return nil }
 
         let lower = text.lowercased()
+        
+        // Simple heuristics for call/message
+        if lower.starts(with: "call ") || lower.starts(with: "phone ") || lower.starts(with: "dial ") {
+            let recipient = text.replacingOccurrences(of: "call ", with: "", options: .caseInsensitive)
+                .replacingOccurrences(of: "phone ", with: "", options: .caseInsensitive)
+                .replacingOccurrences(of: "dial ", with: "", options: .caseInsensitive)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return IntentResult(action: "makePhoneCall", recipient: recipient)
+        }
+        
+        if (lower.starts(with: "message ") || lower.starts(with: "text ") || lower.starts(with: "send a message") || lower.contains("send message")) {
+             // Basic extraction is hard without NLP, but we can try
+             // "Text Mom I'm late" -> Recipient: Mom, Body: I'm late
+             // This is very rough, assumes OpenAI usually handles it.
+             return IntentResult(action: "sendMessage", recipient: "", messageBody: "")
+        }
+
         let priority = parsePriority(lower)
         let tag = parseTag(lower)
         let dates = parseDates(lower)
@@ -122,6 +143,17 @@ struct TaskItem: Identifiable, Hashable, Codable {
         case reminder
     }
     
+    enum Executor: String, Codable {
+        case user
+        case agent
+    }
+    
+    struct AgentAction: Codable, Hashable {
+        var type: String // "call", "sendMessage"
+        var recipient: String
+        var body: String? // For messages
+    }
+    
     var id = UUID()
     var title: String
     var isDone: Bool = false
@@ -131,6 +163,10 @@ struct TaskItem: Identifiable, Hashable, Codable {
     var priority: Int = 2
     var type: SourceType = .app
     var externalId: String? = nil
+    
+    // New fields for Agent delegation
+    var executor: Executor = .user
+    var actionPayload: AgentAction? = nil
 
     var priorityLabel: String {
         switch priority {
@@ -207,7 +243,7 @@ final class IntentService {
             "temperature": 0,
             "response_format": ["type": "json_object"],
             "messages": [
-                ["role": "system", "content": "You are a personal assistant. Determine the user's intent: 'task' or 'sendMessage'. \n1. If Task: Return JSON with action='task', title, startDate, dueDate, priority, tag. Use current time \(nowString). \n2. If Send Message: Return JSON with action='sendMessage', recipient (extract name or number), messageBody (content). \nReply ONLY valid JSON."],
+                ["role": "system", "content": "You are a personal assistant. Determine the user's intent: 'task', 'sendMessage' or 'makePhoneCall'. \n1. If Task: Return JSON with action='task', title, startDate, dueDate, priority, tag. Use current time \(nowString). \n2. If Send Message: Return JSON with action='sendMessage', recipient, messageBody. \n3. If Call: Return JSON with action='makePhoneCall', recipient. \n\nIMPORTANT: Determine who should perform the action ('performer'). \n- If the user says 'remind me to call' or 'I need to call', set performer='user'.\n- If the user says 'call X later' or 'send X a message at 5pm', set performer='agent' and provides dates.\n- If the user says 'call X now', set performer='agent' and isScheduled=false.\n\nReply ONLY valid JSON."],
                 ["role": "user", "content": text]
             ]
         ]
@@ -353,6 +389,12 @@ final class IntentService {
         let action = dict["action"] as? String ?? "task"
         let recipient = dict["recipient"] as? String
         let messageBody = dict["messageBody"] as? String
+        
+        // Delegation
+        let performer = dict["performer"] as? String ?? "user"
+        // Heuristic: if dates are present and action is not 'task', it might be scheduled
+        let startDateStr = dict["startDate"] as? String
+        let isScheduled = (startDateStr != nil)
 
         func parseDate(_ value: Any?) -> Date? {
             guard let s = value as? String else { return nil }
@@ -377,7 +419,9 @@ final class IntentService {
             return IntentResult(
                 action: "sendMessage",
                 recipient: recipient,
-                messageBody: messageBody
+                messageBody: messageBody,
+                performer: performer,
+                isScheduled: isScheduled
             )
         }
 
@@ -387,7 +431,11 @@ final class IntentService {
             dueDate: due,
             priority: min(max(priority, 1), 3),
             tag: tag,
-            action: "task"
+            action: action,
+            recipient: recipient,
+            messageBody: messageBody,
+            performer: performer,
+            isScheduled: isScheduled
         )
     }
 
@@ -429,7 +477,8 @@ enum InteractionState: Equatable {
     case idle
     case collectingMessageRecipient
     case collectingMessageBody
-    case clarifyingContact(candidates: [SimpleContact])
+    case collectingCallRecipient // New case
+    case clarifyingContact(candidates: [SimpleContact], forCall: Bool)
 }
 
 struct SimpleContact: Identifiable, Hashable {
@@ -577,6 +626,7 @@ struct ContentView: View {
     @State private var draft: String = ""
     @State private var pendingDraft: TaskDraft = .init(title: "")
     @State private var pendingMessage: MessageDraft = .init()
+    @State private var pendingCallRecipient: String = ""
     @State private var interactionState: InteractionState = .idle
     @State private var showTaskDetailSheet = false
     @State private var showNotificationAlert = false
@@ -596,6 +646,11 @@ struct ContentView: View {
     private let eventStore = EKEventStore()
     private let intentAnalyzer = IntentAnalyzer()
     private let intentService = IntentService()
+
+    @State private var taskTimer: Timer.TimerPublisher = Timer.publish(every: 60, on: .main, in: .common)
+    @State private var timerCancellable: Cancellable?
+    @State private var showingAgentTaskAlert = false
+    @State private var pendingAgentTask: TaskItem?
 
     var body: some View {
         NavigationStack {
@@ -621,7 +676,12 @@ struct ContentView: View {
                 MessageComposerView(recipients: [pendingMessage.recipient], body: pendingMessage.body) { result in
                     if result == .sent {
                         // Mark as done immediately
-                        recordSentMessageAsTask(recipient: pendingMessage.recipient, body: pendingMessage.body)
+                        if let t = pendingAgentTask {
+                            completeTask(t)
+                            pendingAgentTask = nil
+                        } else {
+                            recordSentMessageAsTask(recipient: pendingMessage.recipient, body: pendingMessage.body)
+                        }
                         messages.append(.init(isUser: false, text: "Message sent and logged."))
                     } else if result == .cancelled {
                         messages.append(.init(isUser: false, text: "Message cancelled."))
@@ -631,6 +691,21 @@ struct ContentView: View {
                     pendingMessage = .init()
                 }
             }
+            .alert("Time to perform task", isPresented: $showingAgentTaskAlert, actions: {
+                Button("Execute Now") {
+                    if let t = pendingAgentTask { executeAgentTask(t) }
+                }
+                Button("Snooze") {
+                    // Snooze for 1 hour
+                    if var t = pendingAgentTask, let idx = tasks.firstIndex(where: { $0.id == t.id }) {
+                        tasks[idx].startDate = Date().addingTimeInterval(3600)
+                        saveTasks()
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            }, message: {
+                Text(pendingAgentTask?.title ?? "An agent task is due.")
+            })
             .alert("Reminder not scheduled", isPresented: $showNotificationAlert, actions: {
                 Button("OK", role: .cancel) {}
             }, message: {
@@ -649,8 +724,46 @@ struct ContentView: View {
                     await requestCalendarAccessIfNeeded()
                     await requestRemindersAccessIfNeeded()
                 }
+                // Start timer
+                timerCancellable = taskTimer.connect()
+            }
+            .onReceive(taskTimer) { time in
+                checkAgentTasks(at: time)
             }
             .onChange(of: tasks) { _, _ in saveTasks() }
+        }
+    }
+
+    private func checkAgentTasks(at time: Date) {
+        let overdue = tasks.filter { 
+            !$0.isDone && 
+            $0.executor == .agent && 
+            $0.startDate <= time 
+        }
+        
+        if let first = overdue.first {
+            pendingAgentTask = first
+            showingAgentTaskAlert = true
+        }
+    }
+    
+    private func executeAgentTask(_ task: TaskItem) {
+        guard let payload = task.actionPayload else { return }
+        
+        if payload.type == "sendMessage" {
+            pendingMessage = MessageDraft(recipient: payload.recipient, body: payload.body ?? "")
+            showMessageComposer = true
+        } else if payload.type == "makePhoneCall" || payload.type == "call" {
+            Task { await triggerCall(to: payload.recipient) }
+            // For calls, we assume completion if triggering succeeds
+            completeTask(task)
+        }
+    }
+    
+    private func completeTask(_ task: TaskItem) {
+        if let idx = tasks.firstIndex(where: { $0.id == task.id }) {
+            tasks[idx].isDone = true
+            reprioritize()
         }
     }
 
@@ -698,7 +811,7 @@ struct ContentView: View {
                             .id(message.id)
                     }
 
-                    if case .clarifyingContact(let candidates) = interactionState {
+                    if case .clarifyingContact(let candidates, _) = interactionState {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Select a contact:")
                                 .font(.caption)
@@ -813,6 +926,11 @@ struct ContentView: View {
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
+                if task.executor == .agent {
+                    Image(systemName: "person.crop.circle.badge.exclamationmark")
+                         .foregroundStyle(.purple)
+                         .help("Agent Task")
+                }
                 Button {
                     toggleTask(task)
                 } label: {
@@ -1078,38 +1196,101 @@ struct ContentView: View {
     }
     
     private func confirmContact(_ contact: SimpleContact) async {
-        pendingMessage.recipient = contact.number
-        messages.append(.init(isUser: true, text: "Selected: \(contact.name) (\(contact.label))"))
-        await checkMessageCompleteness()
+        // Check state to see if it is call or message
+        var isCall = false
+        if case .clarifyingContact(_, let call) = interactionState {
+            isCall = call
+        }
+    
+        if isCall {
+            pendingCallRecipient = contact.number
+            messages.append(.init(isUser: true, text: "Selected: \(contact.name) (\(contact.label))"))
+            await triggerCall(to: pendingCallRecipient)
+        } else {
+            pendingMessage.recipient = contact.number
+            messages.append(.init(isUser: true, text: "Selected: \(contact.name) (\(contact.label))"))
+            await checkMessageCompleteness()
+        }
     }
     
-    private func resolveAndProceed(recipient: String) async {
+    private func resolveAndProceed(recipient: String, forCall: Bool = false) async {
         let digits = recipient.components(separatedBy: CharacterSet.decimalDigits.inverted).joined()
         // If it looks like a number (at least 7 digits), just use it
         if digits.count >= 7 {
-            pendingMessage.recipient = recipient
-            await checkMessageCompleteness()
+            if forCall {
+                pendingCallRecipient = recipient
+                await triggerCall(to: recipient)
+            } else {
+                pendingMessage.recipient = recipient
+                await checkMessageCompleteness()
+            }
             return
         }
         
         let candidates = await ContactHelpers().find(name: recipient)
         if candidates.isEmpty { 
             // Fallback: use raw input
-            pendingMessage.recipient = recipient
-            await checkMessageCompleteness()
+            if forCall {
+                pendingCallRecipient = recipient
+                await triggerCall(to: recipient)
+            } else {
+                pendingMessage.recipient = recipient
+                await checkMessageCompleteness()
+            }
         } else if candidates.count == 1 {
             let c = candidates.first!
             withAnimation {
                 messages.append(.init(isUser: false, text: "Found \(c.name)."))
             }
-            pendingMessage.recipient = c.number
-            await checkMessageCompleteness()
+            if forCall {
+                pendingCallRecipient = c.number
+                await triggerCall(to: c.number)
+            } else {
+                pendingMessage.recipient = c.number
+                await checkMessageCompleteness()
+            }
         } else {
-            interactionState = .clarifyingContact(candidates: candidates)
+            interactionState = .clarifyingContact(candidates: candidates, forCall: forCall)
             withAnimation {
                 messages.append(.init(isUser: false, text: "I found multiple contacts for '\(recipient)'. Please pick one:"))
             }
         }
+    }
+    
+    // MARK: - Calling Logic
+
+    private func triggerCall(to number: String) async {
+        interactionState = .idle
+        // Keep + for international calls, and digits
+        let allowed = CharacterSet.decimalDigits.union(CharacterSet(charactersIn: "+"))
+        let clean = number.components(separatedBy: allowed.inverted).joined()
+        
+        guard !clean.isEmpty, let url = URL(string: "tel:\(clean)") else {
+             await MainActor.run {
+                messages.append(.init(isUser: false, text: "Invalid number format for calling."))
+             }
+             return
+        }
+        
+        await MainActor.run {
+            // Apple docs: "The open(_:options:completionHandler:) method executes the completion handler on the main thread."
+            // We removed canOpenURL check because 'tel' scheme often returns false without Info.plist allow-listing,
+            // even though open() works fine.
+            
+            UIApplication.shared.open(url, options: [:]) { success in
+                if success {
+                     messages.append(.init(isUser: false, text: "Calling \(number)..."))
+                } else {
+                    #if targetEnvironment(simulator)
+                    messages.append(.init(isUser: false, text: "Simulating Call to \(number)... (Simulator doesn't support calls)"))
+                    #else
+                    messages.append(.init(isUser: false, text: "Could not initiate call."))
+                    #endif
+                }
+            }
+        }
+        // Cleanup
+        pendingCallRecipient = ""
     }
     
     private func checkMessageCompleteness() async {
@@ -1134,6 +1315,7 @@ struct ContentView: View {
                 interactionState = .idle
                 pendingDraft = .init(title: "")
                 pendingMessage = .init()
+                pendingCallRecipient = ""
                 showTaskDetailSheet = false
                 showMessageComposer = false
                 withAnimation {
@@ -1144,17 +1326,26 @@ struct ContentView: View {
         }
 
         // 0. Check disambiguation
-        if case .clarifyingContact(let candidates) = interactionState {
+        if case .clarifyingContact(let candidates, let forCall) = interactionState {
             if let match = candidates.first(where: { $0.name.localizedCaseInsensitiveContains(text) }) {
                 await confirmContact(match)
             } else {
-                pendingMessage.recipient = text
-                await checkMessageCompleteness()
+                if forCall {
+                    await resolveAndProceed(recipient: text, forCall: true)
+                } else {
+                    pendingMessage.recipient = text
+                    await checkMessageCompleteness()
+                }
             }
             return
         }
     
         // 1. Check if we are filling a slot
+        if interactionState == .collectingCallRecipient {
+             await resolveAndProceed(recipient: text, forCall: true)
+             return
+        }
+
         if interactionState == .collectingMessageRecipient {
             await resolveAndProceed(recipient: text)
             return
@@ -1168,22 +1359,100 @@ struct ContentView: View {
     
         let activeKey = storedApiKey.isEmpty ? ProcessInfo.processInfo.environment["OPENAI_API_KEY"] : storedApiKey
 
-        if let draft = await intentService.infer(from: text, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint) ?? intentAnalyzer.infer(from: text) {
+        if var draft = await intentService.infer(from: text, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint) ?? intentAnalyzer.infer(from: text) {
             lastIntentSource = intentService.usedOpenAI ? "openai" : "fallback"
             lastIntentReason = intentService.lastReason
             
-            if draft.action == "sendMessage" {
-                pendingMessage = MessageDraft(recipient: "", body: draft.messageBody ?? "")
-                
-                if let raw = draft.recipient, !raw.isEmpty {
-                    await resolveAndProceed(recipient: raw)
-                } else {
-                    await checkMessageCompleteness()
-                }
-                return
+            // Safety: Force 'call' action if the model returned 'task' but it looks like a call
+            // Common with GPT models that are biased towards 'task' from previous prompts
+            if (draft.action == "task" || draft.action == nil),
+               let title = draft.title?.lowercased(),
+               (title.starts(with: "call ") || title.starts(with: "phone ") || title.starts(with: "dial ")) {
+                draft.action = "makePhoneCall"
+                let name = title.replacingOccurrences(of: "call ", with: "")
+                                .replacingOccurrences(of: "phone ", with: "")
+                                .replacingOccurrences(of: "dial ", with: "")
+                draft.recipient = name.trimmingCharacters(in: .whitespacesAndNewlines)
             }
             
-            // Task Logic
+            // Call Logic
+            if draft.action == "makePhoneCall" || draft.action == "call" {
+                // If immediate
+                if draft.performer == "agent" && (draft.isScheduled == false || draft.isScheduled == nil) {
+                    if let raw = draft.recipient, !raw.isEmpty {
+                        await resolveAndProceed(recipient: raw, forCall: true)
+                    } else {
+                        interactionState = .collectingCallRecipient
+                        withAnimation { messages.append(.init(isUser: false, text: "Who do you want to call?")) }
+                    }
+                    return
+                }
+                
+                // If scheduled agent task
+                if draft.performer == "agent" && draft.isScheduled == true {
+                    pendingDraft = TaskDraft(
+                        title: draft.title ?? "Call \(draft.recipient ?? "someone")",
+                        startDate: draft.startDate ?? Date().addingTimeInterval(3600),
+                        dueDate: draft.dueDate ?? Date().addingTimeInterval(7200),
+                        priority: draft.priority ?? 2,
+                        tag: draft.tag ?? "Personal"
+                    )
+                    // We need a special confirmation for agent delegation
+                    // But for now, we'll use the standard task sheet, but we need to inject the executor context
+                    // Since TaskDraft is simple, we might just set the state to confirm this.
+                    // Let's create the task item directly if we trust the AI, or show sheet.
+                    
+                    // Let's assume we create it but set executor.
+                    let newTask = TaskItem(
+                        title: pendingDraft.title,
+                        tag: pendingDraft.tag,
+                        startDate: pendingDraft.startDate,
+                        dueDate: pendingDraft.dueDate,
+                        priority: pendingDraft.priority,
+                        executor: .agent,
+                        actionPayload: .init(type: "makePhoneCall", recipient: draft.recipient ?? "")
+                    )
+                    insertTask(newTask, announce: true)
+                    return
+                }
+            }
+
+            if draft.action == "sendMessage" {
+                if draft.performer == "agent" && (draft.isScheduled == false || draft.isScheduled == nil) {
+                    pendingMessage = MessageDraft(recipient: "", body: draft.messageBody ?? "")
+                    if let raw = draft.recipient, !raw.isEmpty {
+                        await resolveAndProceed(recipient: raw)
+                    } else {
+                        await checkMessageCompleteness()
+                    }
+                    return
+                }
+                
+                // Scheduled Message
+                 if draft.performer == "agent" && draft.isScheduled == true {
+                    pendingDraft = TaskDraft(
+                        title: draft.title ?? "Msg \(draft.recipient ?? "someone")",
+                        startDate: draft.startDate ?? Date().addingTimeInterval(3600),
+                        dueDate: draft.dueDate ?? Date().addingTimeInterval(7200),
+                        priority: draft.priority ?? 2,
+                        tag: draft.tag ?? "Personal"
+                    )
+                    
+                    let newTask = TaskItem(
+                        title: pendingDraft.title,
+                        tag: pendingDraft.tag,
+                        startDate: pendingDraft.startDate,
+                        dueDate: pendingDraft.dueDate,
+                        priority: pendingDraft.priority,
+                        executor: .agent,
+                        actionPayload: .init(type: "sendMessage", recipient: draft.recipient ?? "", body: draft.messageBody)
+                    )
+                    insertTask(newTask, announce: true)
+                    return
+                 }
+            }
+            
+            // Task Logic (User Performer)
             pendingDraft = TaskDraft(
                 title: draft.title ?? "New Task",
                 startDate: draft.startDate ?? Date(),
