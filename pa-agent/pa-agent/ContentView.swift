@@ -625,7 +625,7 @@ final class SpeechManager: NSObject, ObservableObject, SFSpeechRecognizerDelegat
 struct ContentView: View {
     @State private var tasks: [TaskItem] = []
     @State private var messages: [ChatMessage] = [
-        .init(isUser: false, text: "Hi! I’m your project agent. Tell me what you need and I’ll track and prioritize tasks for you.")
+        .init(isUser: false, text: "Hi! I’m Nexa. Tell me what you need and I’ll track and prioritize tasks for you.")
     ]
     @State private var draft: String = ""
     @State private var pendingDraft: TaskDraft = .init(title: "")
@@ -708,7 +708,7 @@ struct ContentView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             }, message: {
-                Text(pendingAgentTask?.title ?? "An agent task is due.")
+                Text(pendingAgentTask?.title ?? "A Nexa task is due.")
             })
             .alert("Reminder not scheduled", isPresented: $showNotificationAlert, actions: {
                 Button("OK", role: .cancel) {}
@@ -785,7 +785,7 @@ struct ContentView: View {
     private var header: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Agent Chat")
+                Text("Nexa")
                     .font(.title.bold())
                 Text("Speak tasks, capture details, and keep priorities tight.")
                     .font(.subheadline)
@@ -882,7 +882,7 @@ struct ContentView: View {
         HStack {
             if message.isUser { Spacer() }
             VStack(alignment: .leading, spacing: 4) {
-                Text(message.isUser ? "You" : "Agent")
+                Text(message.isUser ? "You" : "Nexa")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text(message.text)
@@ -942,7 +942,7 @@ struct ContentView: View {
                 if task.executor == .agent {
                     Image(systemName: "person.crop.circle.badge.exclamationmark")
                          .foregroundStyle(.purple)
-                         .help("Agent Task")
+                         .help("Nexa Task")
                 }
                 Button {
                     toggleTask(task)
@@ -1774,7 +1774,7 @@ struct ContentView: View {
 
     private func resetChat() {
         withAnimation(.easeInOut) {
-            messages = [.init(isUser: false, text: "Hi! I’m your project agent. Tell me what you need and I’ll track and prioritize tasks for you.")]
+            messages = [.init(isUser: false, text: "Hi! I’m Nexa. Tell me what you need and I’ll track and prioritize tasks for you.")]
         }
     }
 
