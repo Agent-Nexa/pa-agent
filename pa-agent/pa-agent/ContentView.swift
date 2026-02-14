@@ -28,6 +28,7 @@ struct IntentResult: Codable {
     var action: String? = "task" // "task", "sendMessage", "call"
     var recipient: String?
     var messageBody: String?
+    var callScript: String?
     
     // Delegation fields
     var performer: String? = "user" // "user" or "agent"
@@ -149,9 +150,10 @@ struct TaskItem: Identifiable, Hashable, Codable {
     }
     
     struct AgentAction: Codable, Hashable {
-        var type: String // "call", "sendMessage"
+        var type: String // "call", "sendMessage", "makePhoneCall"
         var recipient: String
         var body: String? // For messages
+        var script: String? // For calls
     }
     
     var id = UUID()
@@ -243,7 +245,7 @@ final class IntentService {
             "temperature": 0,
             "response_format": ["type": "json_object"],
             "messages": [
-                ["role": "system", "content": "You are a personal assistant. Determine the user's intent: 'task', 'sendMessage' or 'makePhoneCall'. \n1. If Task: Return JSON with action='task', title, startDate, dueDate, priority, tag. Use current time \(nowString). \n2. If Send Message: Return JSON with action='sendMessage', recipient, messageBody. \n3. If Call: Return JSON with action='makePhoneCall', recipient. \n\nIMPORTANT: Determine who should perform the action ('performer'). \n- If the user says 'remind me to call' or 'I need to call', set performer='user'.\n- If the user says 'call X later' or 'send X a message at 5pm', set performer='agent' and provides dates.\n- If the user says 'call X now', set performer='agent' and isScheduled=false.\n\nReply ONLY valid JSON."],
+                ["role": "system", "content": "You are a personal assistant. Determine the user's intent: 'task', 'sendMessage' or 'makePhoneCall'. \n1. If Task: Return JSON with action='task', title, startDate, dueDate, priority, tag. Use current time \(nowString). \n2. If Send Message: Return JSON with action='sendMessage', recipient, messageBody. \n3. If Call: Return JSON with action='makePhoneCall', recipient, callScript (short summary of what the user should say). \n\nIMPORTANT: Determine who should perform the action ('performer'). \n- If the user says 'remind me to call' or 'I need to call', set performer='user'.\n- If the user says 'call X later' or 'send X a message at 5pm', set performer='agent' and provides dates.\n- If the user says 'call X now', set performer='agent' and isScheduled=false.\n\nReply ONLY valid JSON."],
                 ["role": "user", "content": text]
             ]
         ]
@@ -389,6 +391,7 @@ final class IntentService {
         let action = dict["action"] as? String ?? "task"
         let recipient = dict["recipient"] as? String
         let messageBody = dict["messageBody"] as? String
+        let callScript = dict["callScript"] as? String
         
         // Delegation
         let performer = dict["performer"] as? String ?? "user"
@@ -434,6 +437,7 @@ final class IntentService {
             action: action,
             recipient: recipient,
             messageBody: messageBody,
+            callScript: callScript,
             performer: performer,
             isScheduled: isScheduled
         )
@@ -754,6 +758,15 @@ struct ContentView: View {
             pendingMessage = MessageDraft(recipient: payload.recipient, body: payload.body ?? "")
             showMessageComposer = true
         } else if payload.type == "makePhoneCall" || payload.type == "call" {
+            // Check for script
+            if let script = payload.script, !script.isEmpty {
+                 // Speak the script instruction before calling
+                let instruction = "Connecting you to \(payload.recipient). You should say: \(script)"
+                speechManager.speak(instruction)
+                // Small delay to let them hear it? 
+                // We'll trust the user listens while the call UI comes up.
+                messages.append(.init(isUser: false, text: "Script: \(script)"))
+            }
             Task { await triggerCall(to: payload.recipient) }
             // For calls, we assume completion if triggering succeeds
             completeTask(task)
@@ -1410,7 +1423,7 @@ struct ContentView: View {
                         dueDate: pendingDraft.dueDate,
                         priority: pendingDraft.priority,
                         executor: .agent,
-                        actionPayload: .init(type: "makePhoneCall", recipient: draft.recipient ?? "")
+                        actionPayload: .init(type: "makePhoneCall", recipient: draft.recipient ?? "", script: draft.callScript)
                     )
                     insertTask(newTask, announce: true)
                     return
