@@ -624,9 +624,7 @@ final class SpeechManager: NSObject, ObservableObject, SFSpeechRecognizerDelegat
 
 struct ContentView: View {
     @State private var tasks: [TaskItem] = []
-    @State private var messages: [ChatMessage] = [
-        .init(isUser: false, text: "Hi! I’m Nexa. Tell me what you need and I’ll track and prioritize tasks for you.")
-    ]
+    @State private var messages: [ChatMessage] = []
     @State private var draft: String = ""
     @State private var pendingDraft: TaskDraft = .init(title: "")
     @State private var pendingMessage: MessageDraft = .init()
@@ -645,6 +643,7 @@ struct ContentView: View {
     @AppStorage("OPENAI_MODEL") private var storedModel: String = "gpt-5.2"
     @AppStorage("OPENAI_USE_AZURE") private var useAzure: Bool = true
     @AppStorage("OPENAI_AZURE_ENDPOINT") private var azureEndpoint: String = "https://admin-mev0a1yu-eastus2.openai.azure.com/openai/deployments/gpt-5.2/chat/completions?api-version=2024-12-01-preview"
+    @AppStorage("AGENT_NAME") private var agentName: String = "Nexa"
     @StateObject private var speechManager = SpeechManager()
     @Namespace private var scrollSpace
     private let eventStore = EKEventStore()
@@ -708,7 +707,7 @@ struct ContentView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             }, message: {
-                Text(pendingAgentTask?.title ?? "A Nexa task is due.")
+                Text(pendingAgentTask?.title ?? "A \(agentName) task is due.")
             })
             .alert("Reminder not scheduled", isPresented: $showNotificationAlert, actions: {
                 Button("OK", role: .cancel) {}
@@ -721,6 +720,9 @@ struct ContentView: View {
                 Text("I couldn't add the task to Calendar. Please enable calendar access in Settings.")
             })
             .onAppear {
+                if messages.isEmpty {
+                    messages.append(.init(isUser: false, text: "Hi! I’m \(agentName). Tell me what you need and I’ll track and prioritize tasks for you."))
+                }
                 loadTasks()
                 UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { _, _ in }
                 speechManager.requestPermission()
@@ -785,13 +787,10 @@ struct ContentView: View {
     private var header: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Nexa")
+                Text(agentName)
                     .font(.title.bold())
                 Text("Speak tasks, capture details, and keep priorities tight.")
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                Text("Intent: \(lastIntentSource) (\(lastIntentReason))")
-                    .font(.caption2)
                     .foregroundStyle(.secondary)
                 Button("Settings") { showSettingsSheet = true }
                     .font(.caption)
@@ -882,7 +881,7 @@ struct ContentView: View {
         HStack {
             if message.isUser { Spacer() }
             VStack(alignment: .leading, spacing: 4) {
-                Text(message.isUser ? "You" : "Nexa")
+                Text(message.isUser ? "You" : agentName)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text(message.text)
@@ -942,7 +941,7 @@ struct ContentView: View {
                 if task.executor == .agent {
                     Image(systemName: "person.crop.circle.badge.exclamationmark")
                          .foregroundStyle(.purple)
-                         .help("Nexa Task")
+                         .help("\(agentName) Task")
                 }
                 Button {
                     toggleTask(task)
@@ -1774,7 +1773,7 @@ struct ContentView: View {
 
     private func resetChat() {
         withAnimation(.easeInOut) {
-            messages = [.init(isUser: false, text: "Hi! I’m Nexa. Tell me what you need and I’ll track and prioritize tasks for you.")]
+            messages = [.init(isUser: false, text: "Hi! I’m \(agentName). Tell me what you need and I’ll track and prioritize tasks for you.")]
         }
     }
 
