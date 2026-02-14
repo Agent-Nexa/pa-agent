@@ -702,7 +702,7 @@ struct ContentView: View {
                 }
                 Button("Snooze") {
                     // Snooze for 1 hour
-                    if var t = pendingAgentTask, let idx = tasks.firstIndex(where: { $0.id == t.id }) {
+                    if let t = pendingAgentTask, let idx = tasks.firstIndex(where: { $0.id == t.id }) {
                         tasks[idx].startDate = Date().addingTimeInterval(3600)
                         saveTasks()
                     }
