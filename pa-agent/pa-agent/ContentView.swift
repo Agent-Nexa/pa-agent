@@ -801,8 +801,6 @@ struct ContentView: View {
             Spacer()
             Menu {
                 Button("Tasks", action: { showTasksList = true })
-                Button("Quick reset", action: resetChat)
-                Button("Clear tasks", action: clearTasks)
                 Button("Settings") { showSettingsSheet = true }
             } label: {
                 Image(systemName: "ellipsis.circle")
@@ -1794,18 +1792,6 @@ struct ContentView: View {
     private func toggleTask(_ task: TaskItem) {
         guard let index = tasks.firstIndex(of: task) else { return }
         tasks[index].isDone.toggle()
-    }
-
-    private func resetChat() {
-        withAnimation(.easeInOut) {
-            messages = [.init(isUser: false, text: "Hi! I’m \(agentName). Tell me what you need and I’ll track and prioritize tasks for you.")]
-        }
-    }
-
-    private func clearTasks() {
-        withAnimation(.easeInOut) {
-            tasks.removeAll()
-        }
     }
 }
 
