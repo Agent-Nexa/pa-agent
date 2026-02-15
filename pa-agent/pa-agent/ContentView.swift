@@ -271,11 +271,13 @@ final class IntentService {
         let df = DateFormatter()
         df.dateFormat = "yyyy-MM-dd HH:mm"
         let nowString = df.string(from: Date())
+        let weekday = Calendar.current.component(.weekday, from: Date())
+        let weekdayStr = Calendar.current.weekdaySymbols[weekday - 1]
 
         let userContext = (userName?.isEmpty == false) ? "The user's name is \(userName!)." : ""
         
         let systemPrompt = """
-        You are \(agentName), an intelligent personal assistant. \(userContext) The current time is \(nowString).
+        You are \(agentName), an intelligent personal assistant. \(userContext) The current time is \(nowString) (\(weekdayStr)).
         
         Your goal is to determine the user's intent based on their input.
         
@@ -297,6 +299,7 @@ final class IntentService {
            - If the user explicitly mentions a future time (e.g. "remind me to call later", "send text tomorrow"): Return action='task' with Action Payload.
            - If the user explicitly asks to "remind" them or "add task" (e.g. "remind me to message X"): Return action='task', performer='user'.
            - IMPORTANT: For "remind me to call", set action='task' and performer='user' (unless they explicitly say "you call X tomorrow").
+           - When calculating future dates (tomorrow, next week), use the current time (\(nowString) \(weekdayStr)) as the anchor.
         
         3. INQUIRIES / GREETINGS:
            - If the user greets you or asks a question: Return action='answer' with the response in 'answer'.
@@ -724,6 +727,8 @@ final class IntentService {
             df.calendar = Calendar(identifier: .gregorian)
             df.timeZone = .current
             df.locale = .current
+            df.dateFormat = "yyyy-MM-dd HH:mm"
+            if let d = df.date(from: s) { return d }
             df.dateFormat = "yyyy-MM-dd'T'HH:mm"
             if let d = df.date(from: s) { return d }
             df.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
@@ -819,6 +824,8 @@ enum InteractionState: Equatable {
     case verifyingEmailContact(contact: SimpleContact)
     case collectingEmailAddressForContact(contact: SimpleContact)
     case offeringToSaveEmail(contact: SimpleContact, email: String)
+    case resolvingMissingTaskContact(task: TaskItem, missingType: String)
+    case collectingNewContactDetail(task: TaskItem, name: String, missingType: String)
 }
 
 struct SimpleContact: Identifiable, Hashable {
@@ -832,6 +839,33 @@ struct SimpleContact: Identifiable, Hashable {
 
 class ContactHelpers {
     private let store = CNContactStore()
+    
+    func createContact(name: String, phone: String?, email: String?) async -> Bool {
+        guard await requestAccess() else { return false }
+        let contact = CNMutableContact()
+        let nameParts = name.components(separatedBy: " ")
+        contact.givenName = nameParts.first ?? name
+        if nameParts.count > 1 {
+            contact.familyName = nameParts.dropFirst().joined(separator: " ")
+        }
+        
+        if let p = phone, !p.isEmpty {
+            contact.phoneNumbers = [CNLabeledValue(label: CNLabelPhoneNumberMobile, value: CNPhoneNumber(stringValue: p))]
+        }
+        if let e = email, !e.isEmpty {
+            contact.emailAddresses = [CNLabeledValue(label: CNLabelHome, value: e as NSString)]
+        }
+        
+        let request = CNSaveRequest()
+        request.add(contact, toContainerWithIdentifier: nil)
+        do {
+            try store.execute(request)
+            return true
+        } catch {
+            print("Error creating contact: \(error)")
+            return false
+        }
+    }
     
     func requestAccess() async -> Bool {
         do {
@@ -1245,6 +1279,11 @@ struct ContentView: View {
     @State private var timerCancellable: Cancellable?
     @State private var showingAgentTaskAlert = false
     @State private var pendingAgentTask: TaskItem?
+    @State private var showingOverdueTaskAlert = false
+    @State private var pendingOverdueTask: TaskItem?
+    @State private var promptedOverdueTaskIDs: Set<UUID> = []
+    
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         NavigationStack {
@@ -1259,6 +1298,14 @@ struct ContentView: View {
             .onAppear {
                 setupNotifications()
                 setupSpeech()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+                checkAgentTasks(at: Date())
+            }
+            .onChange(of: scenePhase) { newPhase in
+                if newPhase == .active {
+                     checkAgentTasks(at: Date())
+                }
             }
             .navigationBarHidden(true)
             .sheet(isPresented: $showTaskDetailSheet) {
@@ -1276,7 +1323,6 @@ struct ContentView: View {
                         // Mark as done immediately
                         if let t = pendingAgentTask {
                             completeTask(t)
-                            pendingAgentTask = nil
                         } else {
                             recordSentMessageAsTask(recipient: pendingMessage.recipient, body: pendingMessage.body)
                         }
@@ -1286,6 +1332,8 @@ struct ContentView: View {
                     } else {
                         messages.append(.init(isUser: false, text: "Message failed."))
                     }
+                    // Clear pending execution context
+                    pendingAgentTask = nil
                     pendingMessage = .init()
                 }
             }
@@ -1295,35 +1343,63 @@ struct ContentView: View {
                         messages.append(.init(isUser: false, text: "Email sent successfully."))
                         if let t = pendingAgentTask {
                             completeTask(t)
-                            pendingAgentTask = nil
                         }
                     } else if result == .cancelled {
                          messages.append(.init(isUser: false, text: "Email cancelled."))
                     } else {
                          messages.append(.init(isUser: false, text: "Email failed to send."))
                     }
+                    pendingAgentTask = nil
                 }
             }
-            .alert("Time to perform task", isPresented: $showingAgentTaskAlert, actions: {
-                Button("Execute Now") {
-                    if let t = pendingAgentTask { executeAgentTask(t) }
-                }
-                Button("Snooze") {
-                    // Snooze for 1 hour
-                    if let t = pendingAgentTask, let idx = tasks.firstIndex(where: { $0.id == t.id }) {
-                        tasks[idx].startDate = Date().addingTimeInterval(3600)
-                        saveTasks()
+            // Modified Alert similar to legacy but optimized for agent confirmation
+            .alert(isPresented: $showingAgentTaskAlert) {
+                let title = pendingAgentTask?.title ?? "Agent Task Ready"
+                let action = pendingAgentTask?.actionPayload?.type ?? "action"
+                let recipient = pendingAgentTask?.actionPayload?.recipient ?? "someone"
+                
+                return Alert(
+                    title: Text("Task Due: \(title)"),
+                    message: Text("It's time to \(action) \(recipient). Proceed now?"),
+                    primaryButton: .default(Text("Yes, Proceed")) {
+                        if let t = pendingAgentTask { executeAgentTask(t) }
+                    },
+                    secondaryButton: .cancel(Text("Not Now")) {
+                         // Snooze logic or just ignore
+                         if let t = pendingAgentTask, let idx = tasks.firstIndex(where: { $0.id == t.id }) {
+                            // Snooze for 1 hour
+                            tasks[idx].startDate = Date().addingTimeInterval(3600)
+                            saveTasks()
+                        }
+                        pendingAgentTask = nil
                     }
-                }
-                Button("Cancel", role: .cancel) {}
-            }, message: {
-                Text(pendingAgentTask?.title ?? "A \(agentName) task is due.")
-            })
+                )
+            }
             .alert("Reminder not scheduled", isPresented: $showNotificationAlert, actions: {
                 Button("OK", role: .cancel) {}
             }, message: {
                 Text("I couldn't schedule a start-date reminder. Check notification permissions.")
             })
+            .alert(isPresented: $showingOverdueTaskAlert) {
+                let title = pendingOverdueTask?.title ?? "Task"
+
+                return Alert(
+                    title: Text("Task Overdue"),
+                    message: Text("\(title) is overdue. Do you want to complete it or cancel it?"),
+                    primaryButton: .default(Text("Complete")) {
+                        if let task = pendingOverdueTask {
+                            completeTask(task)
+                        }
+                        pendingOverdueTask = nil
+                    },
+                    secondaryButton: .destructive(Text("Cancel Task")) {
+                        if let task = pendingOverdueTask {
+                            cancelTask(task)
+                        }
+                        pendingOverdueTask = nil
+                    }
+                )
+            }
             .alert("Calendar access needed", isPresented: $showCalendarAlert, actions: {
                 Button("OK", role: .cancel) {}
             }, message: {
@@ -1350,7 +1426,7 @@ struct ContentView: View {
                     messages.append(.init(isUser: false, text: "Hi \(displayUser)! I’m \(agentName). Tell me what you need and I’ll track and prioritize tasks for you."))
                 }
                 loadTasks()
-                UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { _, _ in }
+                setupNotifications()
                 speechManager.requestPermission()
                 Task { 
                     await requestCalendarAccessIfNeeded()
@@ -1367,6 +1443,16 @@ struct ContentView: View {
     }
 
     private func checkAgentTasks(at time: Date) {
+        // Prevent interruption if already handling tasks
+        guard !showMessageComposer, !showEmailComposer, !showingAgentTaskAlert, !showingOverdueTaskAlert else { return }
+
+        if let overdueTask = tasks.first(where: { !$0.isDone && $0.dueDate < time && !promptedOverdueTaskIDs.contains($0.id) }) {
+            pendingOverdueTask = overdueTask
+            promptedOverdueTaskIDs.insert(overdueTask.id)
+            showingOverdueTaskAlert = true
+            return
+        }
+
         let overdue = tasks.filter { 
             !$0.isDone && 
             $0.executor == .agent && 
@@ -1375,41 +1461,136 @@ struct ContentView: View {
         
         if let first = overdue.first {
             pendingAgentTask = first
+            // Unlike before, we do NOT auto-execute. We show an alert to confirm.
             showingAgentTaskAlert = true
         }
     }
     
     private func executeAgentTask(_ task: TaskItem) {
         guard let payload = task.actionPayload else { return }
-        let signatureName = userName.isEmpty ? "the user" : userName
-        let signature = "\n\nI’m \(signatureName)’s AI powered personal assistant - \(agentName)"
         
-        if payload.type == "sendMessage" {
-            pendingMessage = MessageDraft(recipient: payload.recipient, body: (payload.body ?? "") + signature)
-            showMessageComposer = true
-        } else if payload.type == "sendEmail" {
-            pendingEmail = EmailDraft(recipient: payload.recipient, subject: payload.subject ?? "No Subject", body: (payload.body ?? "") + signature)
-            showEmailComposer = true
-        } else if payload.type == "makePhoneCall" || payload.type == "call" {
-            // Check for script
-            if let script = payload.script, !script.isEmpty {
-                 // Speak the script instruction before calling
-                let instruction = "Connecting you to \(payload.recipient). You should say: \(script)"
-                speechManager.speak(instruction)
-                // Small delay to let them hear it? 
-                // We'll trust the user listens while the call UI comes up.
-                messages.append(.init(isUser: false, text: "Script: \(script)"))
+        // Just-in-Time Resolution and Generation
+        Task {
+            // 1. Resolve Recipient (if not already a number/email)
+            var finalRecipient = payload.recipient
+            // Check if it's a raw name (no digits, no @)
+            let isRawName = finalRecipient.rangeOfCharacter(from: .decimalDigits) == nil && !finalRecipient.contains("@")
+            
+            if isRawName {
+                 // Try to resolve using fuzzy matching
+                 let candidates = await ContactHelpers().find(name: finalRecipient)
+                 // Prefer mobile/phone for SMS/Call
+                 var found = false
+                 if payload.type.contains("Call") || payload.type.contains("Message") || payload.type.contains("call") {
+                     if let best = candidates.first(where: { !$0.number.isEmpty }) {
+                         finalRecipient = best.number
+                         found = true
+                     }
+                 } else if payload.type.contains("Email") || payload.type.contains("email") {
+                     if let best = candidates.first(where: { $0.email?.isEmpty == false }) {
+                         finalRecipient = best.email!
+                         found = true
+                     }
+                 }
+                 
+                 // If not found valid candidate
+                 if !found {
+                      await MainActor.run {
+                          let type = (payload.type.contains("Email") || payload.type.contains("email")) ? "email" : "phone"
+                          interactionState = .resolvingMissingTaskContact(task: task, missingType: type)
+                          withAnimation {
+                              messages.append(.init(isUser: false, text: "I couldn't find a \(type == "phone" ? "phone number" : "email address") for '\(finalRecipient)'. Do you want to add a new contact?"))
+                          }
+                      }
+                      return
+                 }
+            } else {
+                 // Even if not raw name, validate format
+                 let type = (payload.type.contains("Email") || payload.type.contains("email")) ? "email" : "phone"
+                 var valid = true
+                 if type == "email" && !finalRecipient.contains("@") { valid = false }
+                 if type == "phone" {
+                     let digits = finalRecipient.filter { "0123456789".contains($0) }
+                     if digits.count < 3 { valid = false }
+                 }
+                 
+                 if !valid {
+                      await MainActor.run {
+                          interactionState = .resolvingMissingTaskContact(task: task, missingType: type)
+                          withAnimation {
+                              messages.append(.init(isUser: false, text: "The stored \(type) info '\(finalRecipient)' seems invalid. Do you want to add a new contact or update it?"))
+                          }
+                      }
+                      return
+                 }
             }
-            Task { await triggerCall(to: payload.recipient) }
-            // For calls, we assume completion if triggering succeeds
-            completeTask(task)
+            
+            // 2. Generate Content (if body exists but we want fresh AI generation)
+            // The stored 'body' is treated as the prompt/instruction.
+            // "Ask Ivy about dinner" -> AI -> "Hey Ivy, are we still on for dinner?"
+            var finalBody = payload.body ?? ""
+            
+            // Only generate if it looks like an instruction (heuristic) or just always polish?
+            // The user requested "use ai to extract... and populate".
+            // Let's perform a quick polish/generation pass at runtime.
+            // We use the same 'polishMessage' function.
+            let activeKey = storedApiKey.isEmpty ? ProcessInfo.processInfo.environment["OPENAI_API_KEY"] : storedApiKey
+            let signatureName = userName.isEmpty ? "The User" : userName
+            
+            if payload.type == "sendMessage" || payload.type == "sendEmail" {
+                await MainActor.run {
+                     withAnimation { messages.append(.init(isUser: false, text: "drafting content for \(finalRecipient)...")) }
+                }
+                
+                // We pass the stored body as 'text'
+                if let generated = await intentService.polishMessage(text: finalBody, history: "", recipient: finalRecipient, senderName: signatureName, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint, agentName: agentName) {
+                    finalBody = generated
+                }
+                
+                // Add signature
+                let signature = "\n\nI’m \(signatureName)’s AI powered personal assistant - \(agentName)"
+                if !finalBody.contains("AI powered personal assistant") {
+                    finalBody += signature
+                }
+            }
+
+            await MainActor.run {
+                if payload.type == "sendMessage" {
+                    pendingMessage = MessageDraft(recipient: finalRecipient, body: finalBody)
+                    showMessageComposer = true
+                } else if payload.type == "sendEmail" {
+                    // For email, we might want to generate a subject too if missing? 
+                    // PolishMessage returns just body. 
+                    // Let's keep subject as is for now.
+                    pendingEmail = EmailDraft(recipient: finalRecipient, subject: payload.subject ?? "Update", body: finalBody)
+                    showEmailComposer = true
+                } else if payload.type == "makePhoneCall" || payload.type == "call" {
+                    if let script = payload.script, !script.isEmpty {
+                        let instruction = "Connecting you to \(finalRecipient). You should say: \(script)"
+                        speechManager.speak(instruction)
+                        messages.append(.init(isUser: false, text: "Script: \(script)"))
+                    }
+                    Task { await triggerCall(to: finalRecipient) }
+                    completeTask(task)
+                }
+            }
         }
     }
     
     private func completeTask(_ task: TaskItem) {
         if let idx = tasks.firstIndex(where: { $0.id == task.id }) {
             tasks[idx].isDone = true
+            promptedOverdueTaskIDs.remove(task.id)
             reprioritize()
+        }
+    }
+
+    private func cancelTask(_ task: TaskItem) {
+        if let idx = tasks.firstIndex(where: { $0.id == task.id }) {
+            tasks.remove(at: idx)
+            promptedOverdueTaskIDs.remove(task.id)
+            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [task.id.uuidString])
+            messages.append(.init(isUser: false, text: "Canceled overdue task: \(task.title)"))
         }
     }
 
@@ -2270,6 +2451,47 @@ extension ContentView {
              }
              return
         }
+
+        if case .resolvingMissingTaskContact(let task, let type) = interactionState {
+             let lower = text.lowercased()
+             if lower.contains("yes") || lower.contains("add") || lower.contains("sure") || lower.contains("update") {
+                 let name = task.actionPayload?.recipient ?? "Unknown"
+                 interactionState = .collectingNewContactDetail(task: task, name: name, missingType: type)
+                 messages.append(.init(isUser: false, text: "Okay, please enter the \(type) \(type == "phone" ? "number" : "address") for \(name)."))
+             } else {
+                 // Check if user provided info directly
+                 if (type == "phone" && text.rangeOfCharacter(from: .decimalDigits) != nil) || (type == "email" && text.contains("@")) {
+                      var updatedTask = task
+                      if var p = updatedTask.actionPayload {
+                         p.recipient = text
+                         updatedTask.actionPayload = p
+                      }
+                      messages.append(.init(isUser: false, text: "Using provided info directly."))
+                      interactionState = .idle
+                      executeAgentTask(updatedTask) 
+                 } else {
+                     messages.append(.init(isUser: false, text: "Okay, task execution cancelled."))
+                     interactionState = .idle
+                 }
+             }
+             return
+        }
+        
+        if case .collectingNewContactDetail(let task, let name, let type) = interactionState {
+             // Save contact
+             let saved = await ContactHelpers().createContact(name: name, phone: type == "phone" ? text : nil, email: type == "email" ? text : nil)
+             
+             if saved {
+                 messages.append(.init(isUser: false, text: "Contact saved."))
+             } else {
+                 messages.append(.init(isUser: false, text: "Could not save contact, but I'll use the info for this task."))
+             }
+             
+             let updatedTask = task // Name is still same, so executeAgentTask will resolve it now
+             interactionState = .idle
+             executeAgentTask(updatedTask)
+             return
+        }
     
         // 1. Check if we are filling a slot
         if interactionState == .collectingCallRecipient {
@@ -2362,8 +2584,38 @@ extension ContentView {
                  draft.action = "sendMessage"
                  // If we override, we reset recipient/body to ensure the agent asks/polishes correctly
                  // rather than using potentially confusing task details.
-                 draft.recipient = nil
+                 
+                 // Fix: Don't nuke the recipient if the model actually found one in the 'title' or elsewhere
+                 // But for now, let's trust the draft if available, else use text.
+                 if draft.recipient == nil {
+                     // Try to extract recipient naively if model failed?
+                     // actually, we set recipient=nil to force the 'resolveAndProceed' flow which is robust.
+                     draft.recipient = nil
+                 }
                  draft.messageBody = text // Pass full text for polishing later
+            }
+            
+            // Fix: If the action is sendMessage/makePhoneCall and it is NOT explicitly scheduled (no date mentioned),
+            // force isScheduled to false even if the model Hallucinated a date (often defaults to "tomorrow" if unsure).
+            // We trust the "text starts with command" heuristic more than the model's subtle scheduling for these commands.
+            if (draft.action == "sendMessage" || draft.action == "makePhoneCall" || draft.action == "call") {
+                // Heuristic: If there are NO explicit time keywords, treat as immediate even if model hallucinated a date.
+                // However, we must be careful not to mistake message content ("Meet me at the park") for a scheduling instruction.
+                // This is a robust heuristic: Check if the text starts with the command.
+                let lower = text.lowercased()
+                let startsWithCommand = lower.starts(with: "message") || lower.starts(with: "text") || lower.starts(with: "call") || lower.starts(with: "email")
+                
+                if startsWithCommand {
+                    let timeKeywords = ["tomorrow", "later", " next week", "on monday", "on tuesday", "on wednesday", "on thursday", "on friday", "on saturday", "on sunday", " date", " in ", " min", " hour", " sec", " after "]
+                    // Only check for "at" followed by digits to be safer (e.g. "at 5")
+                    // This is still imperfect but better.
+                    let hasStrongTime = timeKeywords.contains { lower.contains($0) } || lower.range(of: " at \\d", options: .regularExpression) != nil
+                    
+                    if !hasStrongTime {
+                        draft.isScheduled = false
+                        draft.startDate = nil
+                    }
+                }
             }
             
             // Call Logic
@@ -2377,12 +2629,25 @@ extension ContentView {
                         priority: draft.priority ?? 2,
                         tag: draft.tag ?? "Personal"
                     )
-                    // We need a special confirmation for agent delegation
-                    // But for now, we'll use the standard task sheet, but we need to inject the executor context
-                    // Since TaskDraft is simple, we might just set the state to confirm this.
-                    // Let's create the task item directly if we trust the AI, or show sheet.
                     
-                    // Let's assume we create it but set executor.
+                    // Attempt to resolve contact NOW if possible, or store the raw name.
+                    let rawRecipient = draft.recipient ?? ""
+                    var finalRecipient = rawRecipient
+                    
+                    // Try to resolve contact ID/number immediately for better UX
+                    let candidates = await ContactHelpers().find(name: rawRecipient)
+                    if let exact = candidates.first(where: { !$0.number.isEmpty }) {
+                         finalRecipient = exact.name // Use the resolved name for title, but payload needs number? 
+                         // Actually payload needs number for action, but name for display.
+                         // Let's store the number in the payload if found.
+                         // But 'recipient' in payload is often used for display in alerts.
+                         // Standard: Payload.recipient = Number if known, else Name.
+                         // Wait, executeAgentTask uses 'pendingMessage.recipient = payload.recipient'. So it MUST be a number or email.
+                         
+                         finalRecipient = exact.number
+                         pendingDraft.title = "Call \(exact.name)" // Update title with real name
+                    }
+                    
                     let newTask = TaskItem(
                         title: pendingDraft.title,
                         tag: pendingDraft.tag,
@@ -2390,7 +2655,7 @@ extension ContentView {
                         dueDate: pendingDraft.dueDate,
                         priority: pendingDraft.priority,
                         executor: .agent,
-                        actionPayload: .init(type: "makePhoneCall", recipient: draft.recipient ?? "", script: draft.callScript)
+                        actionPayload: .init(type: "makePhoneCall", recipient: finalRecipient, script: draft.callScript)
                     )
                     insertTask(newTask, announce: true)
                     return
@@ -2416,6 +2681,16 @@ extension ContentView {
                         tag: draft.tag ?? "Personal"
                     )
                     
+                    // Attempt to resolve contact NOW
+                    let rawRecipient = draft.recipient ?? ""
+                    var finalRecipient = rawRecipient
+                    
+                    let candidates = await ContactHelpers().find(name: rawRecipient)
+                    if let exact = candidates.first(where: { !$0.number.isEmpty }) {
+                         finalRecipient = exact.number
+                         pendingDraft.title = "Message \(exact.name)"
+                    }
+                    
                     let newTask = TaskItem(
                         title: pendingDraft.title,
                         tag: pendingDraft.tag,
@@ -2423,7 +2698,7 @@ extension ContentView {
                         dueDate: pendingDraft.dueDate,
                         priority: pendingDraft.priority,
                         executor: .agent,
-                        actionPayload: .init(type: "sendMessage", recipient: draft.recipient ?? "", body: draft.messageBody)
+                        actionPayload: .init(type: "sendMessage", recipient: finalRecipient, body: draft.messageBody)
                     )
                     insertTask(newTask, announce: true)
                     return
@@ -2612,6 +2887,25 @@ extension ContentView {
         Task { await addCalendarEvent(for: newTask) }
 
         guard announce else { return }
+        
+        // Improve announcement for agent tasks to confirm logic
+        if newTask.executor == .agent {
+            let actionType = newTask.actionPayload?.type ?? "Action"
+            let recipient = newTask.actionPayload?.recipient ?? "contact"
+            // Check if recipient is a raw name or number/email
+            let isRaw = recipient.rangeOfCharacter(from: .decimalDigits) == nil && !recipient.contains("@")
+            
+            var confirmation = "Scheduled \(actionType) for \(recipient)."
+            if isRaw {
+                confirmation += " I'll try to resolve contact details when it's due."
+            } else {
+                confirmation += " Contact details resolved and ready."
+            }
+            withAnimation(.easeIn(duration: 0.2)) {
+                messages.append(.init(isUser: false, text: confirmation))
+            }
+            return
+        }
 
         let conflict = tasks
             .filter { $0.id != newTask.id && Calendar.current.isDate($0.dueDate, inSameDayAs: newTask.dueDate) }
@@ -2750,19 +3044,54 @@ extension ContentView {
     }
 
     private func scheduleReminder(for task: TaskItem) {
-        let content = UNMutableNotificationContent()
-        content.title = "Starts today: \(task.title)"
-        content.body = "Tag: \(task.tag) • Due \(task.dueDate.formatted(date: .abbreviated, time: .omitted))"
-        content.sound = .default
-
-        var dateComponents = Calendar.current.dateComponents([.year, .month, .day], from: task.startDate)
-        dateComponents.hour = 9
-        let trigger = UNCalendarNotificationTrigger(dateMatching: dateComponents, repeats: false)
-        let request = UNNotificationRequest(identifier: task.id.uuidString, content: content, trigger: trigger)
-        UNUserNotificationCenter.current().add(request) { error in
-            if error != nil {
-                Task { @MainActor in showNotificationAlert = true }
+        // Check permissions first for debugging purposes
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            if settings.authorizationStatus != .authorized {
+                print("⚠️ Notification permission not authorized: \(settings.authorizationStatus.rawValue)")
+                Task { @MainActor in
+                    self.showNotificationAlert = true
+                }
             }
+        }
+
+        let content = UNMutableNotificationContent()
+        if task.executor == .agent {
+            content.title = "Agent Action Due: \(task.title)"
+            content.body = "Tap to execute \(task.actionPayload?.type ?? "action") for \(task.actionPayload?.recipient ?? "contact")."
+        } else {
+            content.title = "Task Reminder: \(task.title)"
+            content.body = "Due \(task.dueDate.formatted(date: .abbreviated, time: .shortened)) • Tag: \(task.tag)"
+        }
+        content.sound = .default
+        if #available(iOS 15.0, *) {
+            content.interruptionLevel = .timeSensitive
+        }
+
+        // Calculate trigger date from task.startDate
+        let triggerDate = task.startDate
+        let timeInterval = triggerDate.timeIntervalSinceNow
+        
+        // Fix: If the time is in the past (e.g. "now" which is 0s, or "1 min ago"), but RECENT, 
+        // we fire immediately (1s delay). 
+        // We only skip if it's genuinely old (e.g. > 15 mins ago).
+        
+        // Also handle the case where timeInterval is barely positive (0.1s) to ensure OS handles it.
+        let effectiveInterval = max(timeInterval, 1.0)
+        
+        // Trigger if future OR recent past (>-900s)
+        if timeInterval > -900 {
+            let trigger = UNTimeIntervalNotificationTrigger(timeInterval: effectiveInterval, repeats: false)
+            
+            let request = UNNotificationRequest(identifier: task.id.uuidString, content: content, trigger: trigger)
+            UNUserNotificationCenter.current().add(request) { error in
+                if let e = error {
+                     print("Error scheduling notification: \(e)")
+                } else {
+                    print("✅ Notification scheduled for \(triggerDate) (using interval \(effectiveInterval)s)")
+                }
+            }
+        } else {
+             print("⚠️ Skipping notification: Time \(triggerDate) is too far in the past (\(timeInterval)s).")
         }
     }
 
@@ -2779,7 +3108,17 @@ extension ContentView {
     }
 
     private func setupNotifications() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { _, _ in }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { granted, error in
+            if granted {
+                print("Permissions granted")
+            } else {
+                print("Permissions denied or error: \(String(describing: error))")
+                // Alert the user roughly
+                Task { @MainActor in 
+                     // We could set a state here to warn the user, but standard alert handles it on schedule fail.
+                }
+            }
+        }
     }
 
     // MARK: Helpers

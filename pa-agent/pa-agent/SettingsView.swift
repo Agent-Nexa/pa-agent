@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 
 struct SettingsView: View {
     @AppStorage("OPENAI_API_KEY") private var storedApiKey: String = ""
@@ -96,6 +97,29 @@ struct SettingsView: View {
                                 useAzure: localUseAzure,
                                 azureEndpoint: localEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
                             )
+                        }
+                    }
+                }
+                
+                Section("Notifications") {
+                    Button("Request Permissions") {
+                        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { granted, _ in
+                            print("Permission granted: \(granted)")
+                        }
+                    }
+                    Button("Test Notification (5s)") {
+                        let content = UNMutableNotificationContent()
+                        content.title = "Test Notification"
+                        content.body = "This is a test notification from PA-Agent."
+                        content.sound = .default
+                        
+                        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 5, repeats: false)
+                        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: trigger)
+                        
+                        UNUserNotificationCenter.current().add(request) { error in
+                            if let error = error {
+                                print("Error scheduling test notification: \(error)")
+                            }
                         }
                     }
                 }
