@@ -1741,8 +1741,12 @@ struct ContentView: View {
             .padding(.trailing, 8)
             
             Menu {
-                Button("Tasks", action: { showTasksList = true })
-                Button("Settings") { showSettingsSheet = true }
+                Button(action: { showTasksList = true }) {
+                    Label("Tasks", systemImage: "checklist")
+                }
+                Button(action: { showSettingsSheet = true }) {
+                    Label("Settings", systemImage: "gearshape")
+                }
             } label: {
                 Image(systemName: "ellipsis.circle")
                     .font(.title3)

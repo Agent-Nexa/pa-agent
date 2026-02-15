@@ -1,6 +1,9 @@
 import SwiftUI
 import UserNotifications
 import AVFoundation
+#if canImport(UIKit)
+import UIKit
+#endif
 
 struct SettingsView: View {
     @AppStorage("OPENAI_API_KEY") private var storedApiKey: String = ""
@@ -29,6 +32,7 @@ struct SettingsView: View {
     
     @State private var connectionStatus: String = "not tested"
     @State private var savedMessage: String = ""
+    @State private var referralStatusText: String = ""
     @State private var isEditing: Bool = false
     @State private var previewSynthesizer = AVSpeechSynthesizer()
     @ObservedObject var historyManager: ActivityHistoryManager
@@ -181,6 +185,29 @@ struct SettingsView: View {
                 .disabled(!isEditing)
 
                 Section("Tools") {
+                    Menu {
+                        ShareLink(item: referralMessage) {
+                            Label("Share Invite", systemImage: "square.and.arrow.up")
+                        }
+
+                        Button {
+                            copyReferralText()
+                        } label: {
+                            Label("Copy Invite Text", systemImage: "doc.on.doc")
+                        }
+                    } label: {
+                        Label("Refer a Friend", systemImage: "person.2.badge.plus")
+                    }
+
+                    if !referralStatusText.isEmpty {
+                        Text(referralStatusText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    NavigationLink("About") {
+                        AboutView()
+                    }
                     NavigationLink("View Activity History") {
                         ActivityHistoryView(historyManager: historyManager)
                     }
@@ -350,10 +377,23 @@ struct SettingsView: View {
         isProductionBuild ? .orange : .green
     }
 
+    private var referralMessage: String {
+        "I’m using Nexa to manage tasks and reminders with AI assistance. Give it a try!\n\nDownload: https://apps.apple.com/us/search?term=Nexa"
+    }
+
+    private func copyReferralText() {
+        #if canImport(UIKit)
+        UIPasteboard.general.string = referralMessage
+        referralStatusText = "Invite text copied"
+        #else
+        referralStatusText = "Copy is not available on this platform"
+        #endif
+    }
+
     private var appVersionLabel: String {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "-"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "-"
-        return "v\(version) (\(build))"
+        return "v\(version).\(build)"
     }
 
     private func previewVoice() {
