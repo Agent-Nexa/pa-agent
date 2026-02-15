@@ -46,6 +46,26 @@ struct SettingsView: View {
                 }
 
                 Section("Editable Settings") {
+                    HStack(spacing: 8) {
+                        Text("Environment")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(environmentLabel)
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(environmentColor.opacity(0.16))
+                            .foregroundStyle(environmentColor)
+                            .clipShape(Capsule())
+                    }
+                    HStack(spacing: 8) {
+                        Text("Version")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(appVersionLabel)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     Text(isEditing ? "Edit settings below, then tap Save." : "Settings are read-only. Tap Edit to make changes.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -86,47 +106,49 @@ struct SettingsView: View {
                 }
                 .disabled(!isEditing)
 
-                Section("OpenAI") {
-                    HStack(spacing: 8) {
-                        Image(systemName: isEditing ? "lock.open.fill" : "lock.fill")
-                            .foregroundStyle(isEditing ? .green : .secondary)
-                        Text(isEditing ? "Fields are unlocked" : "Fields are locked")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    SecureField("sk-...", text: $localKey)
-                        .textInputAutocapitalization(.none)
-                        .disableAutocorrection(true)
-                    Picker("Model", selection: $localModel) {
-                        Text("gpt-5.2").tag("gpt-5.2")
-                        Text("gpt-4o").tag("gpt-4o")
-                        Text("gpt-4o-mini").tag("gpt-4o-mini")
-                        Text("gpt-3.5-turbo").tag("gpt-3.5-turbo")
-                    }
-                    .pickerStyle(.segmented)
-                }
-                .disabled(!isEditing)
-                
-                Section("Azure") {
-                    HStack(spacing: 8) {
-                        Image(systemName: isEditing ? "lock.open.fill" : "lock.fill")
-                            .foregroundStyle(isEditing ? .green : .secondary)
-                        Text(isEditing ? "Fields are unlocked" : "Fields are locked")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Toggle("Use Azure", isOn: $localUseAzure)
-                    if localUseAzure {
-                        TextField("Endpoint URL", text: $localEndpoint)
+                if !isProductionBuild {
+                    Section("OpenAI") {
+                        HStack(spacing: 8) {
+                            Image(systemName: isEditing ? "lock.open.fill" : "lock.fill")
+                                .foregroundStyle(isEditing ? .green : .secondary)
+                            Text(isEditing ? "Fields are unlocked" : "Fields are locked")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        SecureField("sk-...", text: $localKey)
                             .textInputAutocapitalization(.none)
                             .disableAutocorrection(true)
-                            .font(.caption)
-                        Text("Format: https://{resource}.openai.azure.com/openai/deployments/{deployment}/chat/completions?api-version=...")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                        Picker("Model", selection: $localModel) {
+                            Text("gpt-5.2").tag("gpt-5.2")
+                            Text("gpt-4o").tag("gpt-4o")
+                            Text("gpt-4o-mini").tag("gpt-4o-mini")
+                            Text("gpt-3.5-turbo").tag("gpt-3.5-turbo")
+                        }
+                        .pickerStyle(.segmented)
                     }
+                    .disabled(!isEditing)
+                    
+                    Section("Azure") {
+                        HStack(spacing: 8) {
+                            Image(systemName: isEditing ? "lock.open.fill" : "lock.fill")
+                                .foregroundStyle(isEditing ? .green : .secondary)
+                            Text(isEditing ? "Fields are unlocked" : "Fields are locked")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Toggle("Use Azure", isOn: $localUseAzure)
+                        if localUseAzure {
+                            TextField("Endpoint URL", text: $localEndpoint)
+                                .textInputAutocapitalization(.none)
+                                .disableAutocorrection(true)
+                                .font(.caption)
+                            Text("Format: https://{resource}.openai.azure.com/openai/deployments/{deployment}/chat/completions?api-version=...")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .disabled(!isEditing)
                 }
-                .disabled(!isEditing)
 
                 Section("Voice") {
                     HStack(spacing: 8) {
@@ -279,9 +301,9 @@ struct SettingsView: View {
     }
 
     private var hasUnsavedChanges: Bool {
-        let keyChanged = localKey.trimmingCharacters(in: .whitespacesAndNewlines) != storedApiKey
-        let modelChanged = localModel != storedModel
-        let azureChanged = localUseAzure != useAzure || localEndpoint.trimmingCharacters(in: .whitespacesAndNewlines) != azureEndpoint
+        let keyChanged = !isProductionBuild && (localKey.trimmingCharacters(in: .whitespacesAndNewlines) != storedApiKey)
+        let modelChanged = !isProductionBuild && (localModel != storedModel)
+        let azureChanged = !isProductionBuild && (localUseAzure != useAzure || localEndpoint.trimmingCharacters(in: .whitespacesAndNewlines) != azureEndpoint)
         let identityChanged =
             localAgentName.trimmingCharacters(in: .whitespacesAndNewlines) != storedAgentName ||
             localUserName.trimmingCharacters(in: .whitespacesAndNewlines) != storedUserName ||
@@ -295,10 +317,12 @@ struct SettingsView: View {
     }
 
     private func saveAllSettings() {
-        storedApiKey = localKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        storedModel = localModel
-        useAzure = localUseAzure
-        azureEndpoint = localEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !isProductionBuild {
+            storedApiKey = localKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            storedModel = localModel
+            useAzure = localUseAzure
+            azureEndpoint = localEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         storedAgentName = localAgentName.trimmingCharacters(in: .whitespacesAndNewlines)
         storedUserName = localUserName.trimmingCharacters(in: .whitespacesAndNewlines)
         agentIcon = localAgentIcon.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -308,6 +332,28 @@ struct SettingsView: View {
         agentVoiceIdentifier = localAgentVoiceIdentifier
 
         savedMessage = "Saved"
+    }
+
+    private var isProductionBuild: Bool {
+        #if DEBUG
+        return false
+        #else
+        return true
+        #endif
+    }
+
+    private var environmentLabel: String {
+        isProductionBuild ? "Production" : "Debug"
+    }
+
+    private var environmentColor: Color {
+        isProductionBuild ? .orange : .green
+    }
+
+    private var appVersionLabel: String {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "-"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "-"
+        return "v\(version) (\(build))"
     }
 
     private func previewVoice() {
