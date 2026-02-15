@@ -424,6 +424,169 @@ final class IntentService {
         }
     }
 
+    func streamAnswer(
+        for text: String,
+        apiKey: String?,
+        model: String?,
+        useAzure: Bool,
+        azureEndpoint: String?,
+        userName: String?,
+        agentName: String = "Nexa",
+        appContext: String? = nil,
+        onStreamEvent: (@MainActor () -> Void)? = nil,
+        onDelta: @escaping @MainActor (String) -> Void
+    ) async -> String? {
+        guard let rawKey = apiKey, !rawKey.isEmpty else { return nil }
+        let apiKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let chosenModel = model?.isEmpty == false ? model! : "gpt-4o"
+        let endpointURL: URL
+
+        if useAzure {
+            guard var azureString = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+            if let range = azureString.range(of: "/deployments/[^/]+/", options: .regularExpression) {
+                azureString.replaceSubrange(range, with: "/deployments/\(chosenModel)/")
+            }
+            guard let scriptUrl = URL(string: azureString) else { return nil }
+            endpointURL = scriptUrl
+        } else {
+            endpointURL = URL(string: "https://api.openai.com/v1/chat/completions")!
+        }
+
+        var request = URLRequest(url: endpointURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if useAzure {
+            request.setValue(apiKey, forHTTPHeaderField: "api-key")
+        } else {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+
+        let userContext = (userName?.isEmpty == false) ? "The user's name is \(userName!)." : ""
+        let contextBlock = (appContext?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+            ? "\nAPP CONTEXT:\n\(appContext!)\n"
+            : ""
+
+        let systemPrompt = """
+        You are \(agentName), an intelligent personal assistant. \(userContext)
+        Answer naturally and helpfully in plain text.
+        Keep responses concise unless the user asks for detail.
+        Use APP CONTEXT when provided and do not claim you cannot access it.
+        \(contextBlock)
+        """
+
+        let body: [String: Any] = [
+            "model": chosenModel,
+            "temperature": 0.6,
+            "stream": true,
+            "messages": [
+                ["role": "system", "content": systemPrompt],
+                ["role": "user", "content": text]
+            ]
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        let requestText = "answer_stream userText=\(text)"
+        let provider = useAzure ? "azure-openai" : "openai"
+
+        do {
+            let (bytes, response) = try await session.bytes(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                tokenUsageManager.addEntry(
+                    feature: "answer_stream",
+                    provider: provider,
+                    model: chosenModel,
+                    promptTokens: estimateTokens(for: requestText),
+                    completionTokens: 0,
+                    success: false,
+                    errorReason: "no http response",
+                    isEstimated: true
+                )
+                return nil
+            }
+            guard 200..<300 ~= http.statusCode else {
+                tokenUsageManager.addEntry(
+                    feature: "answer_stream",
+                    provider: provider,
+                    model: chosenModel,
+                    promptTokens: estimateTokens(for: requestText),
+                    completionTokens: 0,
+                    success: false,
+                    errorReason: "HTTP \(http.statusCode)",
+                    isEstimated: true
+                )
+                return nil
+            }
+
+            var fullResponse = ""
+            var didNotifyStreamStarted = false
+
+            for try await line in bytes.lines {
+                guard line.hasPrefix("data:") else { continue }
+                let payload = line.replacingOccurrences(of: "data:", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+                if payload == "[DONE]" {
+                    break
+                }
+
+                if !didNotifyStreamStarted {
+                    didNotifyStreamStarted = true
+                    await onStreamEvent?()
+                }
+
+                guard let chunkData = payload.data(using: .utf8),
+                      let root = try? JSONSerialization.jsonObject(with: chunkData) as? [String: Any],
+                      let choices = root["choices"] as? [[String: Any]],
+                      let first = choices.first,
+                      let delta = first["delta"] as? [String: Any]
+                else {
+                    continue
+                }
+
+                if let content = delta["content"] as? String, !content.isEmpty {
+                    fullResponse += content
+                    await onDelta(fullResponse)
+                    continue
+                }
+
+                if let contentParts = delta["content"] as? [[String: Any]] {
+                    let joined = contentParts.compactMap { $0["text"] as? String }.joined()
+                    if !joined.isEmpty {
+                        fullResponse += joined
+                        await onDelta(fullResponse)
+                    }
+                }
+            }
+
+            let finalText = fullResponse.trimmingCharacters(in: .whitespacesAndNewlines)
+            let success = !finalText.isEmpty
+            tokenUsageManager.addEntry(
+                feature: "answer_stream",
+                provider: provider,
+                model: chosenModel,
+                promptTokens: estimateTokens(for: requestText),
+                completionTokens: estimateTokens(for: finalText),
+                success: success,
+                errorReason: success ? nil : "empty stream",
+                isEstimated: true
+            )
+
+            return success ? finalText : nil
+        } catch {
+            tokenUsageManager.addEntry(
+                feature: "answer_stream",
+                provider: provider,
+                model: chosenModel,
+                promptTokens: estimateTokens(for: requestText),
+                completionTokens: 0,
+                success: false,
+                errorReason: "network/error",
+                isEstimated: true
+            )
+            return nil
+        }
+    }
+
     func polishEmail(text: String, recipient: String, senderName: String, apiKey: String?, model: String?, useAzure: Bool, azureEndpoint: String?, agentName: String = "Nexa") async -> (subject: String, body: String)? {
         guard let rawKey = apiKey, !rawKey.isEmpty else { return nil }
         let apiKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -988,10 +1151,25 @@ final class IntentService {
 }
 
 struct ChatMessage: Identifiable, Hashable {
-    let id = UUID()
+    let id: UUID
     let isUser: Bool
     let text: String
-    let timestamp: Date = .init()
+    let timestamp: Date
+    let taskStatusSnapshot: TaskStatusSnapshot?
+
+    init(id: UUID = UUID(), isUser: Bool, text: String, timestamp: Date = .init(), taskStatusSnapshot: TaskStatusSnapshot? = nil) {
+        self.id = id
+        self.isUser = isUser
+        self.text = text
+        self.timestamp = timestamp
+        self.taskStatusSnapshot = taskStatusSnapshot
+    }
+}
+
+struct TaskStatusSnapshot: Hashable {
+    let completed: Int
+    let overdue: Int
+    let upcoming: Int
 }
 
 struct TaskDraft: Equatable {
@@ -1508,6 +1686,7 @@ struct ContentView: View {
     @State private var showingOverdueTaskAlert = false
     @State private var pendingOverdueTask: TaskItem?
     @State private var promptedOverdueTaskIDs: Set<UUID> = []
+    @State private var isAgentThinking = false
     
     @Environment(\.scenePhase) private var scenePhase
 
@@ -2068,6 +2247,11 @@ struct ContentView: View {
                         }
                         .padding()
                     }
+
+                    if isAgentThinking {
+                        thinkingIndicator
+                            .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    }
                     
                     // Invisible footer to scroll to
                     Color.clear
@@ -2131,15 +2315,21 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                         .padding(.leading, 4)
                 }
-                Text(message.text)
-                    .padding()
-                    .background(message.isUser ? Color.accentColor.opacity(0.15) : Color.white)
-                    .foregroundStyle(.primary)
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .strokeBorder(Color.primary.opacity(0.05))
-                    )
+                VStack(alignment: message.isUser ? .trailing : .leading, spacing: 10) {
+                    Text(message.text)
+                        .foregroundStyle(.primary)
+
+                    if let snapshot = message.taskStatusSnapshot {
+                        taskStatusChart(snapshot)
+                    }
+                }
+                .padding()
+                .background(message.isUser ? Color.accentColor.opacity(0.15) : Color.white)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.05))
+                )
             }
 
             if message.isUser {
@@ -2154,6 +2344,91 @@ struct ContentView: View {
             }
         }
         .transition(.move(edge: message.isUser ? .trailing : .leading).combined(with: .opacity))
+    }
+
+    private func taskStatusChart(_ snapshot: TaskStatusSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Task Status")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            #if canImport(Charts)
+            let rows: [(String, Int, Color)] = [
+                ("Completed", snapshot.completed, .green),
+                ("Overdue", snapshot.overdue, .orange),
+                ("Upcoming", snapshot.upcoming, .blue)
+            ]
+
+            Chart(rows, id: \.0) { row in
+                BarMark(
+                    x: .value("Status", row.0),
+                    y: .value("Count", row.1)
+                )
+                .foregroundStyle(row.2)
+            }
+            .frame(height: 130)
+            .chartYAxis {
+                AxisMarks(position: .leading)
+            }
+            #else
+            Text("Completed: \(snapshot.completed) • Overdue: \(snapshot.overdue) • Upcoming: \(snapshot.upcoming)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            #endif
+        }
+    }
+
+    private var thinkingIndicator: some View {
+        HStack(alignment: .center, spacing: 8) {
+            Image(systemName: agentIcon)
+                .font(.title2)
+                .foregroundStyle(agentAccentColor)
+                .frame(width: 32, height: 32)
+                .background(agentAccentColor.opacity(0.12))
+                .clipShape(Circle())
+
+            HStack(spacing: 8) {
+                ThinkingDotsView()
+                Text("\(agentName) is thinking…")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(Color.white)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.05))
+            )
+
+            Spacer()
+        }
+    }
+
+    private struct ThinkingDotsView: View {
+        @State private var animate = false
+
+        var body: some View {
+            HStack(spacing: 5) {
+                ForEach(0..<3, id: \.self) { index in
+                    Circle()
+                        .fill(Color.secondary)
+                        .frame(width: 6, height: 6)
+                        .scaleEffect(animate ? 0.6 : 1.0)
+                        .opacity(animate ? 0.35 : 1.0)
+                        .animation(
+                            .easeInOut(duration: 0.6)
+                            .repeatForever(autoreverses: true)
+                            .delay(Double(index) * 0.18),
+                            value: animate
+                        )
+                }
+            }
+            .onAppear {
+                animate = true
+            }
+        }
     }
 
     // MARK: Task board
@@ -3344,7 +3619,17 @@ extension ContentView {
         let activeKey = storedApiKey.isEmpty ? ProcessInfo.processInfo.environment["OPENAI_API_KEY"] : storedApiKey
         let inferred: IntentResult?
         if isAIFeatureEnabled {
+            await MainActor.run {
+                withAnimation {
+                    isAgentThinking = true
+                }
+            }
             inferred = await intentService.infer(from: text, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint, userName: userName, agentName: agentName, appContext: buildAIContextSnapshot()) ?? intentAnalyzer.infer(from: text, agentName: agentName)
+            await MainActor.run {
+                withAnimation {
+                    isAgentThinking = false
+                }
+            }
             lastIntentSource = intentService.usedOpenAI ? "openai" : "fallback"
             lastIntentReason = intentService.lastReason
         } else {
@@ -3540,9 +3825,62 @@ extension ContentView {
             }
             
             if draft.action == "greeting" || draft.action == "answer" {
-                let reply = draft.answer ?? "I'm here to help."
-                withAnimation {
-                    messages.append(.init(isUser: false, text: reply))
+                let statusSnapshot = shouldShowTaskStatusChart(for: text) ? currentTaskStatusSnapshot() : nil
+                if isAIFeatureEnabled, lastIntentSource == "openai" {
+                    let placeholderId = UUID()
+                    var didReceiveStreamEvent = false
+                    withAnimation {
+                        isAgentThinking = true
+                        messages.append(.init(id: placeholderId, isUser: false, text: "", taskStatusSnapshot: statusSnapshot))
+                    }
+
+                    let streamed = await intentService.streamAnswer(
+                        for: text,
+                        apiKey: activeKey,
+                        model: storedModel,
+                        useAzure: useAzure,
+                        azureEndpoint: azureEndpoint,
+                        userName: userName,
+                        agentName: agentName,
+                        appContext: buildAIContextSnapshot(),
+                        onStreamEvent: {
+                            if !didReceiveStreamEvent {
+                                didReceiveStreamEvent = true
+                                withAnimation {
+                                    isAgentThinking = false
+                                }
+                            }
+                        }
+                    ) { partial in
+                        if let index = messages.firstIndex(where: { $0.id == placeholderId }) {
+                            let existing = messages[index]
+                            messages[index] = .init(id: existing.id, isUser: existing.isUser, text: partial, timestamp: existing.timestamp, taskStatusSnapshot: existing.taskStatusSnapshot)
+                        }
+                    }
+
+                    if !didReceiveStreamEvent {
+                        withAnimation {
+                            isAgentThinking = false
+                        }
+                    }
+
+                    if let streamed, !streamed.isEmpty {
+                        if let index = messages.firstIndex(where: { $0.id == placeholderId }) {
+                            let existing = messages[index]
+                            messages[index] = .init(id: existing.id, isUser: existing.isUser, text: streamed, timestamp: existing.timestamp, taskStatusSnapshot: existing.taskStatusSnapshot)
+                        }
+                    } else {
+                        let reply = draft.answer ?? "I'm here to help."
+                        if let index = messages.firstIndex(where: { $0.id == placeholderId }) {
+                            let existing = messages[index]
+                            messages[index] = .init(id: existing.id, isUser: existing.isUser, text: reply, timestamp: existing.timestamp, taskStatusSnapshot: existing.taskStatusSnapshot)
+                        }
+                    }
+                } else {
+                    let reply = draft.answer ?? "I'm here to help."
+                    withAnimation {
+                        messages.append(.init(isUser: false, text: reply, taskStatusSnapshot: statusSnapshot))
+                    }
                 }
                 return
             }
@@ -3739,6 +4077,46 @@ extension ContentView {
             return "Try: “Add prep deck for Q4 review due Friday, high priority.”"
         }
         return "Noted. Should I turn that into a task?"
+    }
+
+    private func shouldShowTaskStatusChart(for text: String) -> Bool {
+        let lower = text.lowercased()
+        let hasStatusIntent =
+            lower.contains("summarize") ||
+            lower.contains("summary") ||
+            lower.contains("status") ||
+            lower.contains("progress") ||
+            lower.contains("overdue") ||
+            lower.contains("upcoming") ||
+            lower.contains("completed") ||
+            lower.contains("what did i do")
+
+        let hasTaskContext =
+            lower.contains("task") ||
+            lower.contains("tasks") ||
+            lower.contains("todo") ||
+            lower.contains("reminder")
+
+        return hasStatusIntent && (hasTaskContext || lower.contains("overdue") || lower.contains("upcoming") || lower.contains("completed"))
+    }
+
+    private func currentTaskStatusSnapshot() -> TaskStatusSnapshot {
+        let now = Date()
+        let appTasks = tasks.filter { $0.type == .app }
+
+        let completed = appTasks.filter {
+            $0.status == .completed || ($0.isDone && $0.status != .canceled)
+        }.count
+
+        let overdue = appTasks.filter {
+            !$0.isDone && $0.status == .open && $0.dueDate < now
+        }.count
+
+        let upcoming = appTasks.filter {
+            !$0.isDone && $0.status == .open && $0.dueDate >= now
+        }.count
+
+        return TaskStatusSnapshot(completed: completed, overdue: overdue, upcoming: upcoming)
     }
 
     private func commitPendingTask() {
