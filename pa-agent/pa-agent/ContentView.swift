@@ -1495,6 +1495,7 @@ struct ContentView: View {
     @State private var selectedTaskForDetail: TaskItem?
     @AppStorage("PERMISSION_SETUP_SHOWN") private var permissionSetupShown: Bool = false
     @State private var showPermissionSetupSheet = false
+    @FocusState private var isInputFocused: Bool
     @Namespace private var scrollSpace
     private let eventStore = EKEventStore()
     private let intentAnalyzer = IntentAnalyzer()
@@ -1723,6 +1724,9 @@ struct ContentView: View {
                 checkAgentTasks(at: time)
             }
             .onChange(of: tasks) { _, _ in saveTasks() }
+            .onTapGesture {
+                dismissKeyboard()
+            }
         }
     }
 
@@ -2099,6 +2103,10 @@ struct ContentView: View {
                 .onChange(of: draft) { _, _ in
                     // Optional: Scroll to bottom while typing if needed, mostly for multiline
                 }
+            }
+            .scrollDismissesKeyboard(.interactively)
+            .onTapGesture {
+                dismissKeyboard()
             }
         }
     }
@@ -2718,6 +2726,7 @@ extension ContentView {
                 }
 
                 TextField("Say or type what you need…", text: $draft, axis: .vertical)
+                    .focused($isInputFocused)
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(1...3)
                     .submitLabel(.send)
@@ -2728,6 +2737,13 @@ extension ContentView {
                         .font(.title2)
                 }
                 .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                Button(action: dismissKeyboard) {
+                    Image(systemName: "keyboard.chevron.compact.down")
+                        .font(.title2)
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityLabel("Hide keyboard")
             }
             .padding(.horizontal)
             .padding(.bottom, 10)
@@ -2792,6 +2808,7 @@ extension ContentView {
         let userMessage = ChatMessage(isUser: true, text: trimmed)
         messages.append(userMessage)
         draft = ""
+        dismissKeyboard()
 
         Task { await handleIntent(for: trimmed) }
     }
@@ -4288,6 +4305,11 @@ extension ContentView {
         #else
         return subscriptionManager.hasActiveSubscription
         #endif
+    }
+
+    private func dismissKeyboard() {
+        isInputFocused = false
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
 }
 
