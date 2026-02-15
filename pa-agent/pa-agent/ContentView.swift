@@ -13,22 +13,28 @@ import AVFoundation
 import EventKit
 import NaturalLanguage
 import Contacts
+#if canImport(MessageUI)
 import MessageUI
+#endif
+
 
 // MARK: - Intent models & heuristics
 
 struct IntentResult: Codable {
-    var title: String?
-    var startDate: Date?
-    var dueDate: Date?
-    var priority: Int?
-    var tag: String?
+    var title: String? = nil
+    var startDate: Date? = nil
+    var dueDate: Date? = nil
+    var priority: Int? = nil
+    var tag: String? = nil
     
     // Action fields
-    var action: String? = "task" // "task", "sendMessage", "call"
-    var recipient: String?
-    var messageBody: String?
-    var callScript: String?
+    var action: String? = "task" // "task", "sendMessage", "makePhoneCall", "sendEmail", "greeting", "answer"
+    var recipient: String? = nil
+    var messageBody: String? = nil
+    var subject: String? = nil
+    var callScript: String? = nil
+    var answer: String? = nil // For greetings and QA
+
     
     // Delegation fields
     var performer: String? = "user" // "user" or "agent"
@@ -38,12 +44,13 @@ struct IntentResult: Codable {
 struct IntentAnalyzer {
     private let calendar = Calendar.current
 
-    func infer(from raw: String) -> IntentResult? {
+    func infer(from raw: String, agentName: String = "Nexa") -> IntentResult? {
         // Fallback always assumes task
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
 
         let lower = text.lowercased()
+        let nameLower = agentName.lowercased()
         
         // Simple heuristics for call/message
         if lower.starts(with: "call ") || lower.starts(with: "phone ") || lower.starts(with: "dial ") {
@@ -60,6 +67,30 @@ struct IntentAnalyzer {
              // This is very rough, assumes OpenAI usually handles it.
              return IntentResult(action: "sendMessage", recipient: "", messageBody: "")
         }
+
+        if lower.starts(with: "email ") || lower.starts(with: "send email ") || lower.contains("send an email") {
+             return IntentResult(action: "sendEmail", recipient: "", messageBody: "")
+        }
+
+        var greetings = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening", "greetings"]
+        if !nameLower.isEmpty { greetings.append(nameLower) }
+        
+        // Strict greeting check: Only return greeting if the remainder is negligible.
+        // This prevents "Hi, remind me to..." being trapped as a greeting.
+        for greeting in greetings {
+             if lower == greeting {
+                 return IntentResult(action: "greeting", answer: "Hello! I'm \(agentName). How can I help you today?")
+             }
+             if lower.hasPrefix(greeting + " ") || lower.hasPrefix(greeting + ",") || lower.hasPrefix(greeting + "!") {
+                 // Check if there is substantial content after the greeting
+                 let range = lower.range(of: greeting)!
+                 let remainder = String(lower[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+                 if remainder.isEmpty {
+                      return IntentResult(action: "greeting", answer: "Hello! I'm \(agentName). How can I help you today?")
+                 }
+             }
+        }
+
 
         let priority = parsePriority(lower)
         let tag = parseTag(lower)
@@ -150,9 +181,10 @@ struct TaskItem: Identifiable, Hashable, Codable {
     }
     
     struct AgentAction: Codable, Hashable {
-        var type: String // "call", "sendMessage", "makePhoneCall"
+        var type: String // "call", "sendMessage", "makePhoneCall", "sendEmail"
         var recipient: String
-        var body: String? // For messages
+        var body: String? // For messages/emails
+        var subject: String? // For emails
         var script: String? // For calls
     }
     
@@ -191,11 +223,11 @@ final class IntentService {
 
     private let session = URLSession(configuration: .default)
 
-    func infer(from text: String, apiKey: String?, model: String?, useAzure: Bool, azureEndpoint: String?) async -> IntentResult? {
+    func infer(from text: String, apiKey: String?, model: String?, useAzure: Bool, azureEndpoint: String?, userName: String?, agentName: String = "Nexa") async -> IntentResult? {
         guard let rawKey = apiKey, !rawKey.isEmpty else {
             usedOpenAI = false
             lastReason = "missing API key"
-            return fallback.infer(from: text)
+            return fallback.infer(from: text, agentName: agentName)
         }
         let apiKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
         
@@ -207,7 +239,7 @@ final class IntentService {
             guard var azureString = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines) else {
                 usedOpenAI = false
                 lastReason = "invalid Azure URL"
-                return fallback.infer(from: text)
+                return fallback.infer(from: text, agentName: agentName)
             }
             
             // If the URL contains "deployments/...", we try to replace the deployment name with the chosen model
@@ -218,7 +250,7 @@ final class IntentService {
             guard let scriptUrl = URL(string: azureString) else {
                 usedOpenAI = false
                 lastReason = "invalid Azure URL"
-                return fallback.infer(from: text)
+                return fallback.infer(from: text, agentName: agentName)
             }
             endpointURL = scriptUrl
         } else {
@@ -240,12 +272,57 @@ final class IntentService {
         df.dateFormat = "yyyy-MM-dd HH:mm"
         let nowString = df.string(from: Date())
 
+        let userContext = (userName?.isEmpty == false) ? "The user's name is \(userName!)." : ""
+        
+        let systemPrompt = """
+        You are \(agentName), an intelligent personal assistant. \(userContext) The current time is \(nowString).
+        
+        Your goal is to determine the user's intent based on their input.
+        
+        SUPPORTED CAPABILITIES:
+        1. Manage Tasks (Action: 'task'): Add a task or scheduled reminder to the task list.
+        2. Send SMS (Action: 'sendMessage'): Prepare a text message.
+        3. Send Email (Action: 'sendEmail'): Prepare an email.
+        4. Make Phone Call (Action: 'makePhoneCall'): Prepare a phone call.
+        5. Answer/Chat (Action: 'answer'): Answer questions, chat, or explain limitations.
+
+        LOGIC RULES:
+        1. IMMEDIATE ACTIONS:
+           - If the user wants to Send SMS, Email, or Call RIGHT NOW: Return 'sendMessage', 'sendEmail', or 'makePhoneCall'.
+           - If the user wants ANY OTHER IMMEDIATE action (e.g., "play music", "open safari", "buy stocks", "set timer"): You DO NOT have these capabilities. Return action='answer' with answer="I don't have this capability yet."
+        
+        2. FUTURE ACTIONS / REMINDERS:
+           - If the user wants to do something later or needs a reminder: Return action='task'. populate title, dates, priority.
+        
+        3. INQUIRIES / GREETINGS:
+           - If the user greets you or asks a question: Return action='answer' with the response in 'answer'.
+        
+        JSON OUTPUT FORMAT:
+        {
+          "action": "task" | "sendMessage" | "sendEmail" | "makePhoneCall" | "answer",
+          "title": "...",
+          "startDate": "YYYY-MM-DD HH:mm",
+          "dueDate": "YYYY-MM-DD HH:mm",
+          "priority": 1-3,
+          "tag": "...",
+          "recipient": "...",
+          "messageBody": "...",
+          "subject": "...",
+          "callScript": "...",
+          "answer": "...",
+          "performer": "user" | "agent",
+          "isScheduled": true | false
+        }
+        
+        Respond ONLY with valid JSON.
+        """
+
         let body: [String: Any] = [
             "model": chosenModel,
             "temperature": 0,
             "response_format": ["type": "json_object"],
             "messages": [
-                ["role": "system", "content": "You are a personal assistant. Determine the user's intent: 'task', 'sendMessage' or 'makePhoneCall'. \n1. If Task: Return JSON with action='task', title, startDate, dueDate, priority, tag. Use current time \(nowString). \n2. If Send Message: Return JSON with action='sendMessage', recipient, messageBody. \n3. If Call: Return JSON with action='makePhoneCall', recipient, callScript (short summary of what the user should say). \n\nIMPORTANT: Determine who should perform the action ('performer'). \n- If the user says 'remind me to call' or 'I need to call', set performer='user'.\n- If the user says 'call X later' or 'send X a message at 5pm', set performer='agent' and provides dates.\n- If the user says 'call X now', set performer='agent' and isScheduled=false.\n\nReply ONLY valid JSON."],
+                ["role": "system", "content": systemPrompt],
                 ["role": "user", "content": text]
             ]
         ]
@@ -256,12 +333,12 @@ final class IntentService {
             guard let http = response as? HTTPURLResponse else {
                 usedOpenAI = false
                 lastReason = "no http response"
-                return fallback.infer(from: text)
+                return fallback.infer(from: text, agentName: agentName)
             }
             guard 200..<300 ~= http.statusCode else {
                 usedOpenAI = false
                 lastReason = "HTTP \(http.statusCode)"
-                return fallback.infer(from: text)
+                return fallback.infer(from: text, agentName: agentName)
             }
 
             if let result = parseOpenAIResponse(data: data) {
@@ -271,13 +348,240 @@ final class IntentService {
             } else {
                 usedOpenAI = false
                 lastReason = "parse failure"
-                return fallback.infer(from: text)
+                return fallback.infer(from: text, agentName: agentName)
             }
         } catch {
             usedOpenAI = false
             lastReason = "network/error"
-            return fallback.infer(from: text)
+            return fallback.infer(from: text, agentName: agentName)
         }
+    }
+
+    func polishEmail(text: String, recipient: String, senderName: String, apiKey: String?, model: String?, useAzure: Bool, azureEndpoint: String?, agentName: String = "Nexa") async -> (subject: String, body: String)? {
+        guard let rawKey = apiKey, !rawKey.isEmpty else { return nil }
+        let apiKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        let chosenModel = model?.isEmpty == false ? model! : "gpt-4o"
+        
+        let endpointURL: URL
+        if useAzure {
+            guard var azureString = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+            if let range = azureString.range(of: "/deployments/[^/]+/", options: .regularExpression) {
+                azureString.replaceSubrange(range, with: "/deployments/\(chosenModel)/")
+            }
+            guard let scriptUrl = URL(string: azureString) else { return nil }
+            endpointURL = scriptUrl
+        } else {
+            endpointURL = URL(string: "https://api.openai.com/v1/chat/completions")!
+        }
+
+        var request = URLRequest(url: endpointURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        if useAzure {
+            request.setValue(apiKey, forHTTPHeaderField: "api-key")
+        } else {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+
+        let bodyPayload: [String: Any] = [
+            "model": chosenModel,
+            "temperature": 0.7,
+            "response_format": ["type": "json_object"],
+            "messages": [
+                ["role": "system", "content": "You are \(agentName), a professional email drafter. The email is to '\(recipient)' from '\(senderName)'. Based on the content and recipient, infer the relationship and tone (e.g. casual for family/friends, formal for business). Construct a professional email in JSON with 'subject' and 'body'. Sign off using '\(senderName)'."],
+                ["role": "user", "content": text]
+            ]
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: bodyPayload)
+
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else { return nil }
+            
+            struct EmailResponse: Decodable {
+                let subject: String
+                let body: String
+            }
+            
+            // Reuse parseOpenAIResponse helper logic or just re-implement simple parsing here
+            if let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let choices = result["choices"] as? [[String: Any]],
+               let first = choices.first,
+               let msg = first["message"] as? [String: Any],
+               let contentRaw = msg["content"] as? String {
+                   
+                let content = stripCodeFences(contentRaw)
+                if let jsonData = content.data(using: .utf8),
+                   let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                   let subj = dict["subject"] as? String,
+                   let b = dict["body"] as? String {
+                    return (subj, b)
+                }
+            }
+            return nil
+        } catch {
+            return nil
+        }
+    }
+
+    func polishMessage(text: String, recipient: String, senderName: String, apiKey: String?, model: String?, useAzure: Bool, azureEndpoint: String?, agentName: String = "Nexa") async -> String? {
+        guard let rawKey = apiKey, !rawKey.isEmpty else { return nil }
+        let apiKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        let chosenModel = model?.isEmpty == false ? model! : "gpt-4o"
+        
+        let endpointURL: URL
+        if useAzure {
+            guard var azureString = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+            if let range = azureString.range(of: "/deployments/[^/]+/", options: .regularExpression) {
+                azureString.replaceSubrange(range, with: "/deployments/\(chosenModel)/")
+            }
+            guard let scriptUrl = URL(string: azureString) else { return nil }
+            endpointURL = scriptUrl
+        } else {
+            endpointURL = URL(string: "https://api.openai.com/v1/chat/completions")!
+        }
+
+        var request = URLRequest(url: endpointURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        if useAzure {
+            request.setValue(apiKey, forHTTPHeaderField: "api-key")
+        } else {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+
+        let systemPrompt = """
+        You are \(agentName), an intelligent assistant drafting a text message (SMS/iMessage) from '\(senderName)' to '\(recipient)'. 
+        
+        Your task is to extract the intended message content from the user's spoken instruction and rewrite it for SMS.
+        
+        CRITICAL RULES:
+        1. STRIP all instructional wrappers like "tell him", "ask her", "say that", "let them know", "text him that".
+        2. The output must be the checks message itself, written in the first person (as if '\(senderName)' is typing it).
+        3. Do NOT include phrases like "He said...", "I should tell you...", or "The user wants me to say...".
+        4. Polish the message to be concise and natural.
+        
+        Examples:
+        - Input: "Tell him I'm running 5 mins late" -> Output: "I'm running 5 mins late"
+        - Input: "Ask her if she wants to get dinner tonight" -> Output: "Do you want to get dinner tonight?"
+        - Input: "Let them know I'll be there soon" -> Output: "I'll be there soon"
+        - Input: "Say that I love you" -> Output: "I love you"
+
+        Return JSON with a single field "messageBody".
+        """
+
+        let bodyPayload: [String: Any] = [
+            "model": chosenModel,
+            "temperature": 0.7,
+            "response_format": ["type": "json_object"],
+            "messages": [
+                ["role": "system", "content": systemPrompt],
+                ["role": "user", "content": "The user input is: \"\(text)\""]
+            ]
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: bodyPayload)
+
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else { return nil }
+            
+            if let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let choices = result["choices"] as? [[String: Any]],
+               let first = choices.first,
+               let msg = first["message"] as? [String: Any],
+               let contentRaw = msg["content"] as? String {
+                   
+                let content = stripCodeFences(contentRaw)
+                if let jsonData = content.data(using: .utf8),
+                   let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                   let body = dict["messageBody"] as? String {
+                    return body
+                }
+            }
+            return nil
+        } catch {
+            return nil
+        }
+    }
+
+    func checkEmailSufficiency(currentBody: String, recipient: String, senderName: String, apiKey: String?, model: String?, useAzure: Bool, azureEndpoint: String?, agentName: String = "Nexa") async -> (sufficient: Bool, question: String?) {
+         guard let rawKey = apiKey, !rawKey.isEmpty else { return (true, nil) }
+         let apiKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+         let chosenModel = model?.isEmpty == false ? model! : "gpt-4o"
+         
+         let endpointURL: URL
+         if useAzure {
+             guard var azureString = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines) else { return (true, nil) }
+              if let range = azureString.range(of: "/deployments/[^/]+/", options: .regularExpression) {
+                 azureString.replaceSubrange(range, with: "/deployments/\(chosenModel)/")
+             }
+             guard let scriptUrl = URL(string: azureString) else { return (true, nil) }
+             endpointURL = scriptUrl
+         } else {
+             endpointURL = URL(string: "https://api.openai.com/v1/chat/completions")!
+         }
+         
+         var request = URLRequest(url: endpointURL)
+         request.httpMethod = "POST"
+         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+         if useAzure {
+             request.setValue(apiKey, forHTTPHeaderField: "api-key")
+         } else {
+              request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+         }
+         
+         let sName = senderName.isEmpty ? "The User" : senderName
+         let systemPrompt = """
+         You are \(agentName), an intelligent assistant helping '\(sName)' write an email to '\(recipient)'. 
+         Analyze the user's current raw notes: "\(currentBody)"
+         
+         1. Check if the notes are sufficient to write a COMPLETE email to THIS RECIPIENT.
+         2. Infer the relationship (e.g. formal vs details).
+         3. DO NOT ask who the recipient is, you already know it is '\(recipient)'.
+         4. DO NOT ask for the sender's name if you think it is missing, just assume it will be signed by '\(sName)'.
+         5. IMPORTANT: If the user says "I don't know", "not sure", "skip", "just write it", or implies they have no more info, RETURN TRUE immediately.
+         6. Only ask for missing CRITICAL info (like time, place, specific purpose).
+         
+         - If sufficient (or user wants to stop), return JSON: {"sufficient": true}
+         - If NOT sufficient, return JSON: {"sufficient": false, "question": "Your question here"}
+         """
+         
+         let bodyPayload: [String: Any] = [
+             "model": chosenModel,
+             "temperature": 0.3,
+             "response_format": ["type": "json_object"],
+             "messages": [
+                 ["role": "system", "content": systemPrompt]
+             ]
+         ]
+         request.httpBody = try? JSONSerialization.data(withJSONObject: bodyPayload)
+         
+         do {
+             let (data, response) = try await session.data(for: request)
+             guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else { return (true, nil) }
+             
+             if let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let choices = result["choices"] as? [[String: Any]],
+                let first = choices.first,
+                let msg = first["message"] as? [String: Any],
+                let contentRaw = msg["content"] as? String {
+                 
+                 let content = stripCodeFences(contentRaw)
+                 if let jsonData = content.data(using: .utf8),
+                    let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                    let suff = dict["sufficient"] as? Bool {
+                     let q = dict["question"] as? String
+                     return (suff, q)
+                 }
+             }
+             return (true, nil)
+         } catch {
+             return (true, nil)
+         }
     }
 
     func testConnection(apiKey: String?, model: String?, useAzure: Bool, azureEndpoint: String?) async -> String {
@@ -392,6 +696,8 @@ final class IntentService {
         let recipient = dict["recipient"] as? String
         let messageBody = dict["messageBody"] as? String
         let callScript = dict["callScript"] as? String
+        let subject = dict["subject"] as? String
+        let answer = dict["answer"] as? String
         
         // Delegation
         let performer = dict["performer"] as? String ?? "user"
@@ -437,7 +743,9 @@ final class IntentService {
             action: action,
             recipient: recipient,
             messageBody: messageBody,
+            subject: subject,
             callScript: callScript,
+            answer: answer,
             performer: performer,
             isScheduled: isScheduled
         )
@@ -477,18 +785,36 @@ struct MessageDraft {
     var body: String = ""
 }
 
+struct EmailDraft: Equatable {
+    var recipient: String = ""
+    var recipientName: String = ""
+    var subject: String = ""
+    var body: String = ""
+}
+
 enum InteractionState: Equatable {
     case idle
     case collectingMessageRecipient
     case collectingMessageBody
     case collectingCallRecipient // New case
-    case clarifyingContact(candidates: [SimpleContact], forCall: Bool)
+    case collectingEmailRecipient
+    case collectingEmailAddress
+    case collectingEmailBody
+    case collectingUserName 
+    case answeringEmailQuestion
+    case confirmingEmail(EmailDraft)
+    case clarifyingContact(candidates: [SimpleContact], forCall: Bool, forEmail: Bool)
+    case verifyingEmailContact(contact: SimpleContact)
+    case collectingEmailAddressForContact(contact: SimpleContact)
+    case offeringToSaveEmail(contact: SimpleContact, email: String)
 }
 
 struct SimpleContact: Identifiable, Hashable {
     var id = UUID()
+    var contactId: String? // Added for updates
     var name: String
     var number: String
+    var email: String?
     var label: String
 }
 
@@ -503,27 +829,239 @@ class ContactHelpers {
         }
     }
     
+    func saveEmail(to contactId: String, email: String, label: String = "Email") async -> Bool {
+        guard await requestAccess() else { return false }
+        do {
+            // Need to fetch the mutable contact
+            let keys = [CNContactEmailAddressesKey] as [CNKeyDescriptor]
+            let contact = try store.unifiedContact(withIdentifier: contactId, keysToFetch: keys).mutableCopy() as! CNMutableContact
+            
+            let emailValue = CNLabeledValue(label: label, value: email as NSString)
+            contact.emailAddresses.append(emailValue)
+            
+            let saveRequest = CNSaveRequest()
+            saveRequest.update(contact)
+            try store.execute(saveRequest)
+            return true
+        } catch {
+            print("Error saving email: \(error)")
+            return false
+        }
+    }
+    
     func find(name: String) async -> [SimpleContact] {
         guard await requestAccess() else { return [] }
         
-        let keys = [CNContactGivenNameKey, CNContactFamilyNameKey, CNContactPhoneNumbersKey] as [CNKeyDescriptor]
+        // We will try a few strategies:
+        // 1. Exact/Prefix match using CNContact predicate (fastest)
+        // 2. If that fails or user wants more, we might need a broader search, but CNContact doesn't support fuzzy search well.
+        // We will rely on the predicate for now, but we can fetch ALL contacts and filter if the predicate returns nothing.
+        // Fetching all contacts is heavy, so let's stick to the predicate first.
+        
+        let keys = [CNContactGivenNameKey, CNContactFamilyNameKey, CNContactPhoneNumbersKey, CNContactEmailAddressesKey] as [CNKeyDescriptor]
         let predicate = CNContact.predicateForContacts(matchingName: name)
         
         do {
-            let contacts = try store.unifiedContacts(matching: predicate, keysToFetch: keys)
+            var contacts = try store.unifiedContacts(matching: predicate, keysToFetch: keys)
+            
+            // If strict search failed, try fetching all and fuzzy matching (expensive but powerful)
+            if contacts.isEmpty {
+                 let allContainers = try store.containers(matching: nil)
+                 for container in allContainers {
+                     let fetchPredicate = CNContact.predicateForContactsInContainer(withIdentifier: container.identifier)
+                     let allContacts = try store.unifiedContacts(matching: fetchPredicate, keysToFetch: keys)
+                     // Filter manually
+                     let networkingMatches = allContacts.filter { c in
+                         let first = c.givenName.lowercased()
+                         let last = c.familyName.lowercased()
+                         let query = name.lowercased()
+                         return first.contains(query) || last.contains(query)
+                     }
+                     contacts.append(contentsOf: networkingMatches)
+                     // Limit to avoid freezing
+                     if contacts.count > 20 { break }
+                 }
+            }
+            
             var results: [SimpleContact] = []
             
             for c in contacts {
                 let fullName = "\(c.givenName) \(c.familyName)".trimmingCharacters(in: .whitespaces)
+                var pushed = false
+                
+                // Add phone entries
                 for num in c.phoneNumbers {
                     results.append(SimpleContact(
+                        contactId: c.identifier,
                         name: fullName,
                         number: num.value.stringValue,
+                        email: nil,
                         label: CNLabeledValue<NSString>.localizedString(forLabel: num.label ?? "Mobile")
+                    ))
+                    pushed = true
+                }
+                
+                // Add email entries
+                for email in c.emailAddresses {
+                    results.append(SimpleContact(
+                        contactId: c.identifier,
+                        name: fullName,
+                        number: "",
+                        email: email.value as String,
+                        label: CNLabeledValue<NSString>.localizedString(forLabel: email.label ?? "Email")
+                    ))
+                    pushed = true
+                }
+                
+                // Fallback if no details
+                if !pushed {
+                    results.append(SimpleContact(
+                        contactId: c.identifier,
+                        name: fullName,
+                        number: "",
+                        email: nil,
+                        label: "Contact"
                     ))
                 }
             }
-            return results
+            // Dedup by unique properties to be safe
+            return Array(Set(results))
+        } catch {
+            return []
+        }
+    }
+
+    func getMeCardName() async -> String? {
+        // Ensure we have permission first
+        guard await requestAccess() else { return nil }
+        
+        #if os(iOS)
+        // Access UIDevice on the main thread before detaching
+        let deviceName = UIDevice.current.name
+        #else
+        let deviceName = "" 
+        #endif
+
+        // Run on background thread to avoid Main Thread checker warnings for ContactStore
+        return await Task.detached(priority: .userInitiated) { [deviceName] in
+            let store = CNContactStore()
+            
+            #if os(macOS)
+            do {
+                let me = try store.unifiedMeContactWithKeys(toFetch: [CNContactGivenNameKey as CNKeyDescriptor, CNContactFamilyNameKey as CNKeyDescriptor])
+                let name = "\(me.givenName) \(me.familyName)".trimmingCharacters(in: .whitespaces)
+                return name.isEmpty ? nil : name
+            } catch {
+                return nil
+            }
+            #else
+            // iOS Fallback:
+            // Attempt to infer from device name (e.g. "John's iPhone"), then finding a contact with that name.
+            let devName = deviceName
+            var searchName: String?
+            
+            if let range = devName.range(of: " iPhone") ?? devName.range(of: "'s iPhone") {
+                let candidate = String(devName[..<range.lowerBound])
+                if candidate.hasSuffix("’s") {
+                    searchName = String(candidate.dropLast(2))
+                } else if candidate.hasSuffix("'s") {
+                    searchName = String(candidate.dropLast(2))
+                } else {
+                    searchName = candidate
+                }
+            }
+            
+            guard let nameToFind = searchName, !nameToFind.isEmpty else { return nil }
+            
+            do {
+                let predicate = CNContact.predicateForContacts(matchingName: nameToFind)
+                let keys = [CNContactGivenNameKey, CNContactFamilyNameKey] as [CNKeyDescriptor]
+                let contacts = try store.unifiedContacts(matching: predicate, keysToFetch: keys)
+                
+                // If we found exactly one match, great.
+                // If multiple, hard to say which one is 'me'. We'll just return the first one as a best guess
+                // or return the searchName itself if no contacts found.
+                if let first = contacts.first {
+                    let fullName = "\(first.givenName) \(first.familyName)".trimmingCharacters(in: .whitespaces)
+                    return fullName.isEmpty ? nameToFind : fullName
+                }
+                return nameToFind
+            } catch {
+                return nameToFind
+            }
+            #endif
+        }.value
+    }
+    
+    func findTop5(query: String) async -> [SimpleContact] {
+        guard await requestAccess() else { return [] }
+        
+        // This is a naive 'top 5' implementation that fetches all contacts and filters
+        // In a real app with 10k contacts, this is slow. Use with caution.
+        do {
+            let keys = [CNContactGivenNameKey, CNContactFamilyNameKey, CNContactPhoneNumbersKey, CNContactEmailAddressesKey] as [CNKeyDescriptor]
+            var allContacts: [CNContact] = []
+            
+            // Fetch all (filtering in memory because predicate only supports exact/prefix)
+            let request = CNContactFetchRequest(keysToFetch: keys)
+            try store.enumerateContacts(with: request) { (contact, stop) in
+                allContacts.append(contact)
+            }
+            
+            let lowerQuery = query.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            // Score and sort
+            struct ScoredContact {
+                let contact: CNContact
+                let score: Int
+            }
+            
+            let scored = allContacts.compactMap { c -> ScoredContact? in
+                let first = c.givenName.lowercased()
+                let last = c.familyName.lowercased()
+                let full = "\(first) \(last)"
+                
+                var score = 0
+                if full == lowerQuery { score += 100 }
+                else if first == lowerQuery { score += 90 }
+                else if last == lowerQuery { score += 80 }
+                else if full.starts(with: lowerQuery) { score += 60 }
+                else if first.starts(with: lowerQuery) { score += 50 }
+                else if last.starts(with: lowerQuery) { score += 40 }
+                else if full.contains(lowerQuery) { score += 20 }
+                else { return nil }
+                
+                return ScoredContact(contact: c, score: score)
+            }
+            .sorted { $0.score > $1.score }
+            .prefix(5)
+            .map { $0.contact }
+            
+            var results: [SimpleContact] = []
+            for c in scored {
+                let fullName = "\(c.givenName) \(c.familyName)".trimmingCharacters(in: .whitespaces)
+                
+                for num in c.phoneNumbers {
+                    results.append(SimpleContact(
+                        contactId: c.identifier,
+                        name: fullName,
+                        number: num.value.stringValue,
+                        email: nil,
+                        label: CNLabeledValue<NSString>.localizedString(forLabel: num.label ?? "Mobile")
+                    ))
+                }
+                for email in c.emailAddresses {
+                    results.append(SimpleContact(
+                        contactId: c.identifier,
+                        name: fullName,
+                        number: "",
+                        email: email.value as String,
+                        label: CNLabeledValue<NSString>.localizedString(forLabel: email.label ?? "Email")
+                    ))
+                }
+            }
+            // Dedup by hashable
+            return Array(Set(results))
         } catch {
             return []
         }
@@ -533,7 +1071,7 @@ class ContactHelpers {
 // MARK: - Speech recognizer
 
 @MainActor
-final class SpeechManager: NSObject, ObservableObject, SFSpeechRecognizerDelegate {
+final class SpeechManager: NSObject, ObservableObject, SFSpeechRecognizerDelegate, AVSpeechSynthesizerDelegate {
     @Published var transcript: String = ""
     @Published var isRecording = false
     @Published var authorizationStatus: SFSpeechRecognizerAuthorizationStatus = .notDetermined
@@ -545,15 +1083,29 @@ final class SpeechManager: NSObject, ObservableObject, SFSpeechRecognizerDelegat
     
     // TTS
     private let synthesizer = AVSpeechSynthesizer()
+    private var wasRecordingBeforeSpeaking = false
+    
+    // Silence Detection
+    private var silenceTimer: Timer?
+    var onSilence: (() -> Void)?
 
     override init() {
         super.init()
         recognizer?.delegate = self
+        synthesizer.delegate = self
         // Setup initial audio session
         try? AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
     }
     
     func speak(_ text: String) {
+        // Stop recording if active to prevent self-capture
+        if isRecording {
+            wasRecordingBeforeSpeaking = true
+            stopRecording() // This also invalidates silence timer
+        } else {
+            wasRecordingBeforeSpeaking = false
+        }
+        
         // Quick cleanup of text for speech (optional)
         let clean = text.replacingOccurrences(of: "sms:", with: "message link")
             
@@ -565,6 +1117,19 @@ final class SpeechManager: NSObject, ObservableObject, SFSpeechRecognizerDelegat
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         synthesizer.stopSpeaking(at: .immediate)
         synthesizer.speak(utterance)
+    }
+
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        Task { @MainActor in
+            // Resume listening if we were recording before
+            if self.wasRecordingBeforeSpeaking {
+                self.startRecording()
+                self.wasRecordingBeforeSpeaking = false
+            } else {
+                // If we weren't recording, we still might want to reset session
+                 try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            }
+        }
     }
 
     func requestPermission() {
@@ -604,6 +1169,12 @@ final class SpeechManager: NSObject, ObservableObject, SFSpeechRecognizerDelegat
             if let result {
                 Task { @MainActor in
                     self.transcript = result.bestTranscription.formattedString
+                    // Reset Silence Timer
+                    self.silenceTimer?.invalidate()
+                    self.silenceTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
+                         guard let self = self, self.isRecording else { return }
+                         self.onSilence?()
+                    }
                 }
             }
             if error != nil || (result?.isFinal ?? false) {
@@ -613,6 +1184,9 @@ final class SpeechManager: NSObject, ObservableObject, SFSpeechRecognizerDelegat
     }
 
     func stopRecording() {
+        silenceTimer?.invalidate()
+        silenceTimer = nil
+        
         audioEngine.stop()
         request?.endAudio()
         audioEngine.inputNode.removeTap(onBus: 0)
@@ -628,6 +1202,7 @@ struct ContentView: View {
     @State private var draft: String = ""
     @State private var pendingDraft: TaskDraft = .init(title: "")
     @State private var pendingMessage: MessageDraft = .init()
+    @State private var pendingEmail: EmailDraft = .init()
     @State private var pendingCallRecipient: String = ""
     @State private var interactionState: InteractionState = .idle
     @State private var showTaskDetailSheet = false
@@ -639,11 +1214,13 @@ struct ContentView: View {
     @State private var showSettingsSheet = false
     @State private var showTasksList = false
     @State private var showMessageComposer = false
+    @State private var showEmailComposer = false
     @AppStorage("OPENAI_API_KEY") private var storedApiKey: String = ""
     @AppStorage("OPENAI_MODEL") private var storedModel: String = "gpt-5.2"
     @AppStorage("OPENAI_USE_AZURE") private var useAzure: Bool = true
     @AppStorage("OPENAI_AZURE_ENDPOINT") private var azureEndpoint: String = "https://admin-mev0a1yu-eastus2.openai.azure.com/openai/deployments/gpt-5.2/chat/completions?api-version=2024-12-01-preview"
     @AppStorage("AGENT_NAME") private var agentName: String = "Nexa"
+    @AppStorage("USER_NAME") private var userName: String = ""
     @AppStorage("AGENT_ICON") private var agentIcon: String = "waveform.circle.fill"
     @AppStorage("USER_ICON") private var userIcon: String = "person.circle.fill"
     @StateObject private var speechManager = SpeechManager()
@@ -667,6 +1244,10 @@ struct ContentView: View {
                 inputBar
             }
             .background(Color(.systemGroupedBackground))
+            .onAppear {
+                setupNotifications()
+                setupSpeech()
+            }
             .navigationBarHidden(true)
             .sheet(isPresented: $showTaskDetailSheet) {
                 taskDetailSheet
@@ -696,6 +1277,21 @@ struct ContentView: View {
                     pendingMessage = .init()
                 }
             }
+            .sheet(isPresented: $showEmailComposer) {
+                EmailComposerView(recipient: pendingEmail.recipient, subject: pendingEmail.subject, body: pendingEmail.body) { result, err in
+                    if result == .sent {
+                        messages.append(.init(isUser: false, text: "Email sent successfully."))
+                        if let t = pendingAgentTask {
+                            completeTask(t)
+                            pendingAgentTask = nil
+                        }
+                    } else if result == .cancelled {
+                         messages.append(.init(isUser: false, text: "Email cancelled."))
+                    } else {
+                         messages.append(.init(isUser: false, text: "Email failed to send."))
+                    }
+                }
+            }
             .alert("Time to perform task", isPresented: $showingAgentTaskAlert, actions: {
                 Button("Execute Now") {
                     if let t = pendingAgentTask { executeAgentTask(t) }
@@ -722,8 +1318,24 @@ struct ContentView: View {
                 Text("I couldn't add the task to Calendar. Please enable calendar access in Settings.")
             })
             .onAppear {
+                if userName.isEmpty {
+                    Task {
+                        // Try to fetch name from contacts or device name
+                        if let name = await ContactHelpers().getMeCardName() {
+                            userName = name
+                        } else {
+                            // Fallback to strict device name check
+                            let devName = UIDevice.current.name
+                            if devName != "iPhone" {
+                                userName = devName
+                            }
+                        }
+                    }
+                }
+
                 if messages.isEmpty {
-                    messages.append(.init(isUser: false, text: "Hi! I’m \(agentName). Tell me what you need and I’ll track and prioritize tasks for you."))
+                    let displayUser = userName.isEmpty ? "You" : userName
+                    messages.append(.init(isUser: false, text: "Hi \(displayUser)! I’m \(agentName). Tell me what you need and I’ll track and prioritize tasks for you."))
                 }
                 loadTasks()
                 UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { _, _ in }
@@ -757,10 +1369,15 @@ struct ContentView: View {
     
     private func executeAgentTask(_ task: TaskItem) {
         guard let payload = task.actionPayload else { return }
+        let signatureName = userName.isEmpty ? "the user" : userName
+        let signature = "\n\nI’m \(signatureName)’s AI powered personal assistant - \(agentName)"
         
         if payload.type == "sendMessage" {
-            pendingMessage = MessageDraft(recipient: payload.recipient, body: payload.body ?? "")
+            pendingMessage = MessageDraft(recipient: payload.recipient, body: (payload.body ?? "") + signature)
             showMessageComposer = true
+        } else if payload.type == "sendEmail" {
+            pendingEmail = EmailDraft(recipient: payload.recipient, subject: payload.subject ?? "No Subject", body: (payload.body ?? "") + signature)
+            showEmailComposer = true
         } else if payload.type == "makePhoneCall" || payload.type == "call" {
             // Check for script
             if let script = payload.script, !script.isEmpty {
@@ -823,7 +1440,7 @@ struct ContentView: View {
                             .id(message.id)
                     }
 
-                    if case .clarifyingContact(let candidates, _) = interactionState {
+                    if case .clarifyingContact(let candidates, _, _) = interactionState {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Select a contact:")
                                 .font(.caption)
@@ -849,15 +1466,51 @@ struct ContentView: View {
                         .padding(.horizontal, 4)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
+                    
+                    // Interaction Buttons for Email Flows
+                    if case .verifyingEmailContact = interactionState {
+                        HStack(spacing: 20) {
+                            Button("Yes") {
+                                Task { await handleIntent(for: "Yes") }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            
+                            Button("No") {
+                                Task { await handleIntent(for: "No") }
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                        .padding()
+                    }
+                    
+                    if case .offeringToSaveEmail = interactionState {
+                        HStack(spacing: 20) {
+                            Button("Save") {
+                                Task { await handleIntent(for: "Yes") }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            
+                            Button("Don't Save") {
+                                Task { await handleIntent(for: "No") }
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                        .padding()
+                    }
+                    
+                    // Invisible footer to scroll to
+                    Color.clear
+                        .frame(height: 1)
+                        .id("bottom")
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 16)
                 .onChange(of: messages) { oldValue, newValue in
-                    if let last = newValue.last?.id {
-                        withAnimation(.easeOut(duration: 0.2)) {
-                            proxy.scrollTo(last, anchor: .bottom)
-                        }
+                    // Scroll to bottom whenever messages change
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        proxy.scrollTo("bottom", anchor: .bottom)
                     }
+                    
                     // Auto-speak new agent messages
                     if newValue.count > oldValue.count,
                        let lastMsg = newValue.last,
@@ -865,13 +1518,17 @@ struct ContentView: View {
                         speechManager.speak(lastMsg.text)
                     }
                 }
-                .onChange(of: interactionState) { _, newState in
-                    if case .clarifyingContact = newState {
-                        // Scroll to bottom when options appear
-                        if let last = messages.last?.id {
-                            withAnimation { proxy.scrollTo(last, anchor: .bottom) }
+                .onChange(of: interactionState) { _, _ in
+                    // Scroll to bottom whenever interaction state changes (buttons appear/disappear)
+                    // Add a slight delay to allow layout to update
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        withAnimation {
+                            proxy.scrollTo("bottom", anchor: .bottom)
                         }
                     }
+                }
+                .onChange(of: draft) { _, _ in
+                    // Optional: Scroll to bottom while typing if needed, mostly for multiline
                 }
             }
         }
@@ -1001,16 +1658,18 @@ struct ContentView: View {
         )
     }
 
-    // MARK: Task List Sheet
-    
-    struct TasksListSheet: View {
-        @Binding var tasks: [TaskItem]
-        @Environment(\.dismiss) private var dismiss
-        @State private var selectedFilter: TaskFilter = .all
+}
 
-        enum TaskFilter: String, CaseIterable {
-            case all = "All"
-            case today = "Today"
+// MARK: - Task List Sheet (Moved to top-level)
+
+struct TasksListSheet: View {
+    @Binding var tasks: [TaskItem]
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedFilter: TaskFilter = .all
+
+    enum TaskFilter: String, CaseIterable {
+        case all = "All"
+        case today = "Today"
         case upcoming = "Upcoming"
     }
 
@@ -1022,7 +1681,7 @@ struct ContentView: View {
         let nextWeekStart = calendar.date(byAdding: .day, value: 7, to: todayStart)!
 
         return tasks.filter { task in
-            let targetDate = task.dueDate
+            let targetDate = task.startDate
             switch selectedFilter {
             case .all:
                 return true
@@ -1032,118 +1691,119 @@ struct ContentView: View {
                 return targetDate >= tomorrowStart && targetDate < nextWeekStart
             }
         }
+        // Consistent sorting logic
         .sorted { 
-             // Sort by date, then priority
-             if $0.dueDate != $1.dueDate { return $0.dueDate < $1.dueDate }
+             if $0.startDate != $1.startDate { return $0.startDate < $1.startDate }
              return $0.priority < $1.priority 
         }
     }
 
     var body: some View {
-            NavigationStack {
-                List {
-                    ForEach(filteredTasks) { task in
-                        HStack {
-                            Button {
-                                if let index = tasks.firstIndex(where: { $0.id == task.id }) {
-                                    withAnimation { tasks[index].isDone.toggle() }
-                                }
-                            } label: {
-                                Image(systemName: task.isDone ? "checkmark.circle.fill" : "circle")
-                                    .font(.title2)
-                                    .foregroundStyle(task.isDone ? .green : Color.secondary)
+        NavigationStack {
+            List {
+                ForEach(filteredTasks) { task in
+                    HStack {
+                        Button {
+                            if let index = tasks.firstIndex(where: { $0.id == task.id }) {
+                                withAnimation { tasks[index].isDone.toggle() }
                             }
-                            .buttonStyle(.plain)
+                        } label: {
+                            Image(systemName: task.isDone ? "checkmark.circle.fill" : "circle")
+                                .font(.title2)
+                                .foregroundStyle(task.isDone ? .green : Color.secondary)
+                        }
+                        .buttonStyle(.plain)
 
-                            VStack(alignment: .leading) {
-                                Text(task.title)
-                                    .font(.headline)
-                                    .strikethrough(task.isDone)
-                                    .foregroundStyle(task.isDone ? .secondary : .primary)
-                                Text("\(task.type == .calendar ? "📅 " : "")Due: \(task.dueDate.formatted(date: .abbreviated, time: .shortened))")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Text(task.priorityLabel)
-                                .font(.caption2)
-                                .padding(4)
-                                .background(priorityColor(task.priority).opacity(0.2))
-                                .foregroundStyle(priorityColor(task.priority))
-                                .cornerRadius(4)
+                        VStack(alignment: .leading) {
+                            Text(task.title)
+                                .font(.headline)
+                                .strikethrough(task.isDone)
+                                .foregroundStyle(task.isDone ? .secondary : .primary)
+                            Text("\(task.type == .calendar ? "📅 " : "")Start: \(task.startDate.formatted(date: .abbreviated, time: .shortened))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
-                        .swipeActions(edge: .trailing) {
-                            Button(role: .destructive) {
-                                if let index = tasks.firstIndex(where: { $0.id == task.id }) {
-                                    tasks.remove(at: index)
-                                }
-                            } label: {
-                                Label("Delete", systemImage: "trash")
-                            }
-                        }
-                        .swipeActions(edge: .leading) {
-                            Button(task.isDone ? "Undo" : "Done") {
-                                if let index = tasks.firstIndex(where: { $0.id == task.id }) {
-                                    withAnimation { tasks[index].isDone.toggle() }
-                                }
-                            }
-                            .tint(.green)
-                        }
-                        .listRowBackground(
-                            (task.dueDate < Date() && !task.isDone) ? Color.red.opacity(0.15) : nil
-                        )
+                        Spacer()
+                        Text(task.priorityLabel)
+                            .font(.caption2)
+                            .padding(4)
+                            .background(priorityColor(task.priority).opacity(0.2))
+                            .foregroundStyle(priorityColor(task.priority))
+                            .cornerRadius(4)
                     }
-                }
-                .navigationTitle("Tasks")
-                .toolbar {
-                    ToolbarItem(placement: .principal) {
-                        Picker("Filter", selection: $selectedFilter) {
-                            ForEach(TaskFilter.allCases, id: \.self) { filter in
-                                Text(filter.rawValue).tag(filter)
+                    .swipeActions(edge: .trailing) {
+                        Button(role: .destructive) {
+                            if let index = tasks.firstIndex(where: { $0.id == task.id }) {
+                                tasks.remove(at: index)
+                            }
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                    }
+                    .swipeActions(edge: .leading) {
+                        Button(task.isDone ? "Undo" : "Done") {
+                            if let index = tasks.firstIndex(where: { $0.id == task.id }) {
+                                withAnimation { tasks[index].isDone.toggle() }
                             }
                         }
-                        .pickerStyle(.segmented)
-                        .frame(width: 200)
+                        .tint(.green)
                     }
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button("Close") { dismiss() }
-                    }
-                }
-                .safeAreaInset(edge: .bottom) {
-                    VStack {
-                        Text("Total Tasks: \(tasks.count)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Button("Reset All Tasks") {
-                            tasks.removeAll()
-                        }
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                    }
-                    .padding()
-                    .background(.regularMaterial)
-                }
-                .overlay {
-                    if filteredTasks.isEmpty {
-                        ContentUnavailableView(
-                            "No tasks for \(selectedFilter.rawValue.lowercased())",
-                            systemImage: "checklist",
-                            description: Text("Add some tasks by chatting with the agent.")
-                        )
-                    }
+                    .listRowBackground(
+                        (task.startDate < Date() && !task.isDone) ? Color.red.opacity(0.15) : nil
+                    )
                 }
             }
-        }
-        
-        private func priorityColor(_ value: Int) -> Color {
-            switch value {
-            case 1: return .red
-            case 2: return .orange
-            default: return .blue
+            .navigationTitle("Tasks")
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    Picker("Filter", selection: $selectedFilter) {
+                        ForEach(TaskFilter.allCases, id: \.self) { filter in
+                            Text(filter.rawValue).tag(filter)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 200)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Close") { dismiss() }
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                VStack {
+                    Text("Total Tasks: \(tasks.count)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Reset All Tasks") {
+                        tasks.removeAll()
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                }
+                .padding()
+                .background(.regularMaterial)
+            }
+            .overlay {
+                if filteredTasks.isEmpty {
+                    ContentUnavailableView(
+                        "No tasks for \(selectedFilter.rawValue.lowercased())",
+                        systemImage: "checklist",
+                        description: Text("Add some tasks by chatting with the agent.")
+                    )
+                }
             }
         }
     }
+    
+    private func priorityColor(_ value: Int) -> Color {
+        switch value {
+        case 1: return .red
+        case 2: return .orange
+        default: return .blue
+        }
+    }
+}
 
+extension ContentView {
     // MARK: Input bar
 
     private var inputBar: some View {
@@ -1231,16 +1891,32 @@ struct ContentView: View {
     }
     
     private func confirmContact(_ contact: SimpleContact) async {
-        // Check state to see if it is call or message
         var isCall = false
-        if case .clarifyingContact(_, let call) = interactionState {
+        var isEmail = false
+        if case .clarifyingContact(_, let call, let email) = interactionState {
             isCall = call
+            isEmail = email
         }
     
         if isCall {
             pendingCallRecipient = contact.number
             messages.append(.init(isUser: true, text: "Selected: \(contact.name) (\(contact.label))"))
             await triggerCall(to: pendingCallRecipient)
+        } else if isEmail {
+            // New Logic for Email
+            if let existingEmail = contact.email, !existingEmail.isEmpty {
+                 interactionState = .verifyingEmailContact(contact: contact)
+                 messages.append(.init(isUser: true, text: "Selected: \(contact.name)"))
+                 withAnimation {
+                     messages.append(.init(isUser: false, text: "I have \(existingEmail) for \(contact.name). Is that correct?"))
+                 }
+            } else {
+                 interactionState = .collectingEmailAddressForContact(contact: contact)
+                 messages.append(.init(isUser: true, text: "Selected: \(contact.name)"))
+                 withAnimation {
+                     messages.append(.init(isUser: false, text: "I don't have an email address for \(contact.name). What is it?"))
+                 }
+            }
         } else {
             pendingMessage.recipient = contact.number
             messages.append(.init(isUser: true, text: "Selected: \(contact.name) (\(contact.label))"))
@@ -1248,10 +1924,10 @@ struct ContentView: View {
         }
     }
     
-    private func resolveAndProceed(recipient: String, forCall: Bool = false) async {
+    private func resolveAndProceed(recipient: String, forCall: Bool = false, forEmail: Bool = false) async {
         let digits = recipient.components(separatedBy: CharacterSet.decimalDigits.inverted).joined()
-        // If it looks like a number (at least 7 digits), just use it
-        if digits.count >= 7 {
+        // If it looks like a number (at least 7 digits) and not email
+        if digits.count >= 7 && !forEmail {
             if forCall {
                 pendingCallRecipient = recipient
                 await triggerCall(to: recipient)
@@ -1262,33 +1938,88 @@ struct ContentView: View {
             return
         }
         
-        let candidates = await ContactHelpers().find(name: recipient)
-        if candidates.isEmpty { 
-            // Fallback: use raw input
+        // Instant email check
+        if forEmail && recipient.contains("@") && recipient.contains(".") {
+            pendingEmail.recipient = recipient
+            await checkEmailCompleteness()
+            return
+        }
+        
+        // Check exact match first
+        var candidates = await ContactHelpers().find(name: recipient)
+        
+        // If empty, try fuzzy top 5
+        if candidates.isEmpty {
+             candidates = await ContactHelpers().findTop5(query: recipient)
+        }
+        
+        if candidates.isEmpty {
+            // Truly nothing found even after fuzzy search
             if forCall {
-                pendingCallRecipient = recipient
-                await triggerCall(to: recipient)
+                 interactionState = .collectingCallRecipient
+                 withAnimation {
+                     messages.append(.init(isUser: false, text: "I couldn't find anyone named '\(recipient)'. Who do you want to call?"))
+                 }
+            } else if forEmail {
+                interactionState = .collectingEmailRecipient
+                withAnimation {
+                    messages.append(.init(isUser: false, text: "I couldn't find details for '\(recipient)'. Who is the email for?"))
+                }
             } else {
-                pendingMessage.recipient = recipient
-                await checkMessageCompleteness()
+                interactionState = .collectingMessageRecipient
+                withAnimation {
+                     messages.append(.init(isUser: false, text: "I couldn't find anyone named '\(recipient)'. Who do you want to message?"))
+                }
             }
-        } else if candidates.count == 1 {
-            let c = candidates.first!
-            withAnimation {
-                messages.append(.init(isUser: false, text: "Found \(c.name)."))
-            }
-            if forCall {
-                pendingCallRecipient = c.number
-                await triggerCall(to: c.number)
-            } else {
-                pendingMessage.recipient = c.number
-                await checkMessageCompleteness()
-            }
+            return
+        }
+
+        // Filter based on intent
+        let filtered: [SimpleContact]
+        if forCall || !forEmail {
+            filtered = candidates.filter { !$0.number.isEmpty }
         } else {
-            interactionState = .clarifyingContact(candidates: candidates, forCall: forCall)
-            withAnimation {
+            filtered = candidates
+        }
+
+        if filtered.isEmpty {
+             // Candidates matched name but had no suitable property (missing phone)
+             messages.append(.init(isUser: false, text: "I found contacts for '\(recipient)' but they don't have phone numbers."))
+             return
+        }
+
+        // Logic branching for count
+        if filtered.count > 1 {
+            interactionState = .clarifyingContact(candidates: filtered, forCall: forCall, forEmail: forEmail)
+             withAnimation {
                 messages.append(.init(isUser: false, text: "I found multiple contacts for '\(recipient)'. Please pick one:"))
             }
+        } else {
+             // Single result logic
+             let c = filtered.first!
+             let nameMatch = c.name.localizedCaseInsensitiveContains(recipient)
+             
+             // If name is similar OR we are in email mode (requires strict verify anyway)
+             if nameMatch || forEmail {
+                 if forEmail {
+                      await confirmContact(c)
+                 } else {
+                      withAnimation { messages.append(.init(isUser: false, text: "Found \(c.name).")) }
+                      if forCall {
+                          pendingCallRecipient = c.number
+                          await triggerCall(to: c.number)
+                      } else {
+                          pendingMessage.recipient = c.number
+                          await checkMessageCompleteness()
+                      }
+                 }
+             } else {
+                 // Fuzzy match case (e.g. "Dave" -> "David Smith")
+                 interactionState = .clarifyingContact(candidates: [c], forCall: forCall, forEmail: forEmail)
+                 withAnimation {
+                     messages.append(.init(isUser: false, text: "Did you mean \(c.name)?"))
+                 }
+             }
         }
     }
     
@@ -1342,6 +2073,81 @@ struct ContentView: View {
         await finalizeMessage()
     }
 
+    private func checkEmailCompleteness() async {
+        if pendingEmail.recipient.isEmpty {
+             interactionState = .collectingEmailRecipient
+             withAnimation { messages.append(.init(isUser: false, text: "Who would you like to email?")) }
+             return
+        }
+        
+        // Basic check if recipient is an email address
+        let isEmail = pendingEmail.recipient.contains("@") && pendingEmail.recipient.contains(".")
+        if !isEmail {
+             // If not an email, we need to clarify or ask for one
+             interactionState = .collectingEmailAddress
+             withAnimation { messages.append(.init(isUser: false, text: "Search failed. What is \(pendingEmail.recipient)'s email address?")) }
+             return
+        }
+
+        if pendingEmail.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            interactionState = .collectingEmailBody
+            withAnimation { messages.append(.init(isUser: false, text: "What should the email say?")) }
+            return
+        }
+        
+        if userName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // Attempt to fetch again if missing
+            if let fetchedResult = await ContactHelpers().getMeCardName() {
+                userName = fetchedResult
+            }
+        }
+        
+        let signatureName = userName.isEmpty ? "The User" : userName
+        
+        // NEW: Check Sufficiency
+        let activeKey = storedApiKey.isEmpty ? ProcessInfo.processInfo.environment["OPENAI_API_KEY"] : storedApiKey
+        let (sufficient, question) = await intentService.checkEmailSufficiency(currentBody: pendingEmail.body, recipient: pendingEmail.recipient, senderName: signatureName, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint, agentName: agentName)
+        
+        if !sufficient, let q = question {
+            interactionState = .answeringEmailQuestion
+            withAnimation { messages.append(.init(isUser: false, text: q)) }
+            return
+        }
+        
+        await polishAndConfirmEmail()
+    }
+
+    private func polishAndConfirmEmail() async {
+        withAnimation { messages.append(.init(isUser: false, text: "Drafting professional email...")) }
+        let activeKey = storedApiKey.isEmpty ? ProcessInfo.processInfo.environment["OPENAI_API_KEY"] : storedApiKey
+        let signatureName = userName.isEmpty ? "the user" : userName
+
+        if let polished = await intentService.polishEmail(text: pendingEmail.body, recipient: pendingEmail.recipient, senderName: signatureName, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint, agentName: agentName) {
+            
+            // Append AI signature with special marker for UI rendering if needed, 
+            // but for email body we just append it.
+            let signature = "\n\nI’m \(signatureName)’s AI powered personal assistant - \(agentName)"
+            pendingEmail.subject = polished.subject
+            pendingEmail.body = polished.body + signature
+            
+            interactionState = .confirmingEmail(pendingEmail)
+            withAnimation {
+                // We display it plainly here. To show different color, we would need rich text support in ChatMessage.
+                // Since ChatMessage is plain text, we will denote the signature with a separator for now.
+                messages.append(.init(isUser: false, text: "Here is the draft:\n\nSubject: \(polished.subject)\n\n\(polished.body)\n\n──────────\nI’m \(signatureName)’s AI powered personal assistant - \(agentName)\n──────────\n\nReply 'Yes' to open mail app, or something else to cancel."))
+            }
+        } else {
+             // Fallback
+             let signatureName = userName.isEmpty ? "the user" : userName
+             let signature = "\n\nI’m \(signatureName)’s AI powered personal assistant - \(agentName)"
+             pendingEmail.body = pendingEmail.body + signature
+             interactionState = .confirmingEmail(pendingEmail)
+             withAnimation { 
+                messages.append(.init(isUser: false, text: "I couldn't polish it, using raw text. Ready to send?")) 
+             }
+        }
+    }
+
     private func handleIntent(for text: String) async {
         // Global cancel check
         let lower = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -1350,9 +2156,11 @@ struct ContentView: View {
                 interactionState = .idle
                 pendingDraft = .init(title: "")
                 pendingMessage = .init()
+                pendingEmail = .init()
                 pendingCallRecipient = ""
                 showTaskDetailSheet = false
                 showMessageComposer = false
+                showEmailComposer = false
                 withAnimation {
                     messages.append(.init(isUser: false, text: "Cancelled."))
                 }
@@ -1361,12 +2169,23 @@ struct ContentView: View {
         }
 
         // 0. Check disambiguation
-        if case .clarifyingContact(let candidates, let forCall) = interactionState {
+        if case .clarifyingContact(let candidates, let forCall, let forEmail) = interactionState {
             if let match = candidates.first(where: { $0.name.localizedCaseInsensitiveContains(text) }) {
                 await confirmContact(match)
             } else {
-                if forCall {
+                if text.contains("@") && forEmail {
+                    // User provided specific email during clarification
+                    let email = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    // We don't know WHICH contact to attach to, or if they just want to send.
+                    // Let's assume just send unless they specify.
+                    // Or we could try to attach to the first candidate if plausible?
+                    // Safer: Just use the email.
+                    pendingEmail.recipient = email
+                    await checkEmailCompleteness()
+                } else if forCall {
                     await resolveAndProceed(recipient: text, forCall: true)
+                } else if forEmail {
+                    await resolveAndProceed(recipient: text, forCall: false, forEmail: true)
                 } else {
                     pendingMessage.recipient = text
                     await checkMessageCompleteness()
@@ -1374,10 +2193,80 @@ struct ContentView: View {
             }
             return
         }
+        
+        // 0.1 Check Email Specific States
+        if case .verifyingEmailContact(let contact) = interactionState {
+             let lower = text.lowercased()
+             // Check if user provided an email directly (override)
+             if text.contains("@") {
+                 let potentialEmail = text.components(separatedBy: .whitespacesAndNewlines).first(where: { $0.contains("@") }) ?? text
+                 interactionState = .offeringToSaveEmail(contact: contact, email: potentialEmail)
+                 withAnimation {
+                     messages.append(.init(isUser: false, text: "Got it. Do you want to save \(potentialEmail) to \(contact.name)?"))
+                 }
+                 return
+             }
+             
+             if lower.contains("yes") || lower.contains("correct") || lower.contains("right") || lower.contains("sure") {
+                 pendingEmail.recipient = contact.email ?? ""
+                 await checkEmailCompleteness()
+             } else {
+                 // Assume NO
+                 interactionState = .collectingEmailAddressForContact(contact: contact) 
+                 withAnimation {
+                     messages.append(.init(isUser: false, text: "Okay, what is the correct email address for \(contact.name)?"))
+                 }
+             }
+             return
+        }
+
+        if case .collectingEmailAddressForContact(let contact) = interactionState {
+            if text.contains("@") {
+                 let potentialEmail = text.components(separatedBy: .whitespacesAndNewlines).first(where: { $0.contains("@") }) ?? text
+                 interactionState = .offeringToSaveEmail(contact: contact, email: potentialEmail)
+                 withAnimation {
+                     messages.append(.init(isUser: false, text: "Thanks. Do you want to save \(potentialEmail) to \(contact.name)?"))
+                 }
+            } else {
+                 withAnimation {
+                     messages.append(.init(isUser: false, text: "That doesn't look like an email address. Please try again or say Cancel."))
+                 }
+            }
+            return
+        }
+
+        if case .offeringToSaveEmail(let contact, let email) = interactionState {
+             let lower = text.lowercased()
+             if lower.contains("yes") || lower.contains("sure") || lower.contains("ok") || lower.contains("save") || lower.contains("update") {
+                 pendingEmail.recipient = email
+                 if let cid = contact.contactId {
+                      let success = await ContactHelpers().saveEmail(to: cid, email: email)
+                      if success {
+                           messages.append(.init(isUser: false, text: "Contact updated."))
+                      } else {
+                           messages.append(.init(isUser: false, text: "Failed to update contact (access denied or error)."))
+                      }
+                 } else {
+                      messages.append(.init(isUser: false, text: "Could not find contact ID to update."))
+                 }
+                 await checkEmailCompleteness()
+             } else {
+                 // Assume No
+                 pendingEmail.recipient = email 
+                 messages.append(.init(isUser: false, text: "Okay, using \(email) just for this email."))
+                 await checkEmailCompleteness()
+             }
+             return
+        }
     
         // 1. Check if we are filling a slot
         if interactionState == .collectingCallRecipient {
              await resolveAndProceed(recipient: text, forCall: true)
+             return
+        }
+
+        if interactionState == .collectingEmailRecipient || interactionState == .collectingEmailAddress {
+             await resolveAndProceed(recipient: text, forCall: false, forEmail: true)
              return
         }
 
@@ -1391,10 +2280,48 @@ struct ContentView: View {
             await checkMessageCompleteness()
             return
         }
+
+        if interactionState == .collectingEmailBody {
+            pendingEmail.body = text
+            await checkEmailCompleteness()
+            return
+        }
+
+        if interactionState == .answeringEmailQuestion {
+            pendingEmail.body += "\n\nAdditional Details: \(text)"
+            await checkEmailCompleteness()
+            return
+        }
+        
+        if case .confirmingEmail = interactionState {
+            let lower = text.lowercased()
+            if lower.contains("yes") || lower.contains("send") || lower.contains("ok") || lower.contains("confirm") || lower.contains("looks good") {
+                interactionState = .idle
+                if MFMailComposeViewController.canSendMail() {
+                    await MainActor.run { showEmailComposer = true }
+                } else {
+                    // Fallback for Simulator or no-mail-account environments
+                    // We simulate "background" sending here since we can't use the Composer
+                    withAnimation {
+                        #if targetEnvironment(simulator)
+                        messages.append(.init(isUser: false, text: "Simulated sending email to \(pendingEmail.recipient) (Simulator cannot send real emails)."))
+                        #else
+                        messages.append(.init(isUser: false, text: "I cannot send this email because no Mail account is set up on this device."))
+                        #endif
+                    }
+                }
+            } else {
+                interactionState = .idle
+                withAnimation {
+                    messages.append(.init(isUser: false, text: "Email cancelled."))
+                }
+            }
+            return
+        }
     
         let activeKey = storedApiKey.isEmpty ? ProcessInfo.processInfo.environment["OPENAI_API_KEY"] : storedApiKey
 
-        if var draft = await intentService.infer(from: text, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint) ?? intentAnalyzer.infer(from: text) {
+        if var draft = await intentService.infer(from: text, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint, userName: userName, agentName: agentName) ?? intentAnalyzer.infer(from: text, agentName: agentName) {
             lastIntentSource = intentService.usedOpenAI ? "openai" : "fallback"
             lastIntentReason = intentService.lastReason
             
@@ -1487,6 +2414,29 @@ struct ContentView: View {
                  }
             }
             
+            if draft.action == "sendEmail" {
+                let to = draft.recipient ?? ""
+                // Trim body to ensure meaningful content
+                let cleanBody = draft.messageBody?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                pendingEmail = EmailDraft(recipient: to, subject: draft.subject ?? "", body: cleanBody)
+                
+                if !to.isEmpty {
+                     await resolveAndProceed(recipient: to, forCall: false, forEmail: true)
+                } else {
+                     interactionState = .collectingEmailRecipient
+                     withAnimation { messages.append(.init(isUser: false, text: "Who would you like to email?")) }
+                }
+                return
+            }
+            
+            if draft.action == "greeting" || draft.action == "answer" {
+                let reply = draft.answer ?? "I'm here to help."
+                withAnimation {
+                    messages.append(.init(isUser: false, text: reply))
+                }
+                return
+            }
+
             // Task Logic (User Performer)
             pendingDraft = TaskDraft(
                 title: draft.title ?? "New Task",
@@ -1505,21 +2455,66 @@ struct ContentView: View {
 
     private func finalizeMessage() async {
         interactionState = .idle
+        
+        let signatureName = userName.isEmpty ? "The User" : userName
+        
+        // Polish Message Logic
+        // Always attempt to polish/extract for SMS to handle "tell him..." cases better
+        withAnimation { messages.append(.init(isUser: false, text: "Polishing message...")) }
+        let activeKey = storedApiKey.isEmpty ? ProcessInfo.processInfo.environment["OPENAI_API_KEY"] : storedApiKey
+        
+        // Safety Clean-up logic (moved into main actor later)
+        var finalBody = pendingMessage.body
+        if let polished = await intentService.polishMessage(text: pendingMessage.body, recipient: pendingMessage.recipient, senderName: signatureName, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint, agentName: agentName) {
+             finalBody = polished
+        }
+        
+        // Safety Clean-up: If AI failed OR AI didn't strip the prefix, do it manually
+        // Check for common instructional prefixes
+        let lowerBody = finalBody.lowercased()
+        let prefixes = ["tell him ", "tell her ", "tell them ", "ask him ", "ask her ", "ask them ", "say that ", "let him know ", "let her know ", "text him ", "text her ", "message him ", "message her "]
+        
+        for prefix in prefixes {
+             if lowerBody.hasPrefix(prefix) {
+                 let prefixLength = prefix.count
+                 let index = finalBody.index(finalBody.startIndex, offsetBy: prefixLength)
+                 let rest = String(finalBody[index...])
+                 
+                 if let first = rest.first {
+                     finalBody = String(first).uppercased() + String(rest.dropFirst())
+                 } else {
+                     finalBody = rest
+                 }
+                 break 
+             }
+        }
+
+        // Append signature
+        let signature = "\n\nI’m \(signatureName)’s AI powered personal assistant - \(agentName)"
+        if !finalBody.contains("AI powered personal assistant - \(agentName)") {
+             finalBody += signature
+        }
+        
+        let bodyToSet = finalBody
+        
         await MainActor.run {
+            pendingMessage.body = bodyToSet
+            #if canImport(MessageUI)
             if MFMessageComposeViewController.canSendText() {
                 showMessageComposer = true
             } else {
                 #if targetEnvironment(simulator)
-                // Simulate success for testing on Simulator
-                messages.append(.init(isUser: false, text: "Simulating SMS send (Simulator mode)..."))
-                recordSentMessageAsTask(recipient: pendingMessage.recipient, body: pendingMessage.body)
-                messages.append(.init(isUser: false, text: "Message sent and logged."))
-                pendingMessage = .init()
+                // Simulator
+                showMessageComposer = true 
                 #else
-                messages.append(.init(isUser: false, text: "This device cannot send messages. Make sure you are on a phone with a SIM card."))
-                pendingMessage = .init()
+                messages.append(.init(isUser: false, text: "This device cannot send messages."))
                 #endif
             }
+            #else
+            // macOS
+            messages.append(.init(isUser: false, text: "Message simulated for macOS: \(pendingMessage.body)"))
+            recordSentMessageAsTask(recipient: pendingMessage.recipient, body: pendingMessage.body)
+            #endif
         }
     }
     
@@ -1741,6 +2736,22 @@ struct ContentView: View {
         }
     }
 
+    private func setupSpeech() {
+        speechManager.onSilence = { [weak speechManager] in
+            guard let speechManager = speechManager else { return }
+            Task { @MainActor in
+                if !self.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                     speechManager.stopRecording() // ensure stopped
+                     self.sendMessage()
+                }
+            }
+        }
+    }
+
+    private func setupNotifications() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { _, _ in }
+    }
+
     // MARK: Helpers
 
     private func saveTasks() {
@@ -1795,6 +2806,9 @@ struct ContentView: View {
     }
 }
 
+#if canImport(MessageUI)
+import MessageUI
+
 struct MessageComposerView: UIViewControllerRepresentable {
     var recipients: [String]
     var body: String
@@ -1828,6 +2842,102 @@ struct MessageComposerView: UIViewControllerRepresentable {
         }
     }
 }
+
+struct EmailComposerView: UIViewControllerRepresentable {
+    var recipient: String
+    var subject: String
+    var body: String
+    var completion: (MFMailComposeResult, Error?) -> Void
+
+    func makeUIViewController(context: Context) -> MFMailComposeViewController {
+        if MFMailComposeViewController.canSendMail() {
+            let controller = MFMailComposeViewController()
+            controller.setToRecipients([recipient])
+            controller.setSubject(subject)
+            controller.setMessageBody(body, isHTML: false)
+            controller.mailComposeDelegate = context.coordinator
+            return controller
+        } else {
+            return MFMailComposeViewController() 
+        }
+    }
+
+    func updateUIViewController(_ uiViewController: MFMailComposeViewController, context: Context) {}
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(completion: completion)
+    }
+
+    class Coordinator: NSObject, MFMailComposeViewControllerDelegate {
+        var completion: (MFMailComposeResult, Error?) -> Void
+
+        init(completion: @escaping (MFMailComposeResult, Error?) -> Void) {
+            self.completion = completion
+        }
+
+         func mailComposeController(_ controller: MFMailComposeViewController, didFinishWith result: MFMailComposeResult, error: Error?) {
+            controller.dismiss(animated: true) {
+                self.completion(result, error)
+            }
+        }
+    }
+}
+#else
+// Dummy implementations for platforms without MessageUI (e.g. macOS preview)
+enum MessageComposeResult {
+    case cancelled, sent, failed
+}
+enum MFMailComposeResult {
+    case cancelled, saved, sent, failed
+}
+
+struct MessageComposerView: View {
+    var recipients: [String]
+    private var messageBody: String
+    var completion: (MessageComposeResult) -> Void
+
+    init(recipients: [String], body: String, completion: @escaping (MessageComposeResult) -> Void) {
+        self.recipients = recipients
+        self.messageBody = body
+        self.completion = completion
+    }
+
+    var body: some View {
+        VStack {
+            Text("Simulated Message Composer")
+            Text("To: \(recipients.joined(separator: ", "))")
+            Text("Body: \(messageBody)")
+            Button("Simulate Send") { completion(.sent) }
+            Button("Cancel") { completion(.cancelled) }
+        }
+    }
+}
+
+struct EmailComposerView: View {
+    var recipient: String
+    var subject: String
+    private var emailBody: String
+    var completion: (MFMailComposeResult, Error?) -> Void
+
+    init(recipient: String, subject: String, body: String, completion: @escaping (MFMailComposeResult, Error?) -> Void) {
+        self.recipient = recipient
+        self.subject = subject
+        self.emailBody = body
+        self.completion = completion
+    }
+
+    var body: some View {
+        VStack {
+            Text("Simulated Email Composer")
+            Text("To: \(recipient)")
+            Text("Subject: \(subject)")
+            Text("Body: \(emailBody)")
+            Button("Simulate Send") { completion(.sent, nil) }
+            Button("Cancel") { completion(.cancelled, nil) }
+        }
+    }
+}
+#endif
 
 #Preview {
     ContentView()
