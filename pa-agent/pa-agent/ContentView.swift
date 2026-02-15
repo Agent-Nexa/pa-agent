@@ -1437,6 +1437,12 @@ struct ContentView: View {
                 Text("I couldn't schedule a start-date reminder. Check notification permissions.")
             })
             .alert("Task Overdue", isPresented: $showingOverdueTaskAlert, presenting: pendingOverdueTask) { task in
+                if canDoTaskNow(task) {
+                    Button("Do It Now") {
+                        doTaskNow(task)
+                        pendingOverdueTask = nil
+                    }
+                }
                 Button("Complete") {
                     completeTask(task)
                     pendingOverdueTask = nil
@@ -1660,9 +1666,33 @@ struct ContentView: View {
             promptedOverdueTaskIDs.remove(task.id)
             UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [task.id.uuidString])
             scheduleReminder(for: tasks[idx])
+            let updatedTask = tasks[idx]
+            Task { await addOrUpdateCalendarEvent(for: updatedTask) }
             historyManager.addLog(actionType: "Task", description: "Postponed: \(tasks[idx].title) by 1 hour")
             messages.append(.init(isUser: false, text: "Postponed task by 1 hour: \(tasks[idx].title)"))
             reprioritize()
+        }
+    }
+
+    private func canDoTaskNow(_ task: TaskItem) -> Bool {
+        guard let type = task.actionPayload?.type.lowercased() else { return false }
+        return type == "sendmessage" || type == "sendemail" || type == "makephonecall" || type == "call"
+    }
+
+    private func doTaskNow(_ task: TaskItem) {
+        guard canDoTaskNow(task) else {
+            messages.append(.init(isUser: false, text: "This overdue task does not have a direct SMS/email/call action to run now."))
+            return
+        }
+
+        if let idx = tasks.firstIndex(where: { $0.id == task.id }) {
+            tasks[idx].markOpen()
+            promptedOverdueTaskIDs.remove(task.id)
+            pendingAgentTask = tasks[idx]
+            executeAgentTask(tasks[idx])
+        } else {
+            pendingAgentTask = task
+            executeAgentTask(task)
         }
     }
 
@@ -3003,7 +3033,7 @@ extension ContentView {
             actionType: newTask.executor == .agent ? (newTask.actionPayload?.type ?? "Task") : "Task",
             description: "Added: \(newTask.title)"
         )
-        Task { await addCalendarEvent(for: newTask) }
+        Task { await addOrUpdateCalendarEvent(for: newTask) }
 
         guard announce else { return }
         
@@ -3072,7 +3102,7 @@ extension ContentView {
         }
     }
 
-    private func addCalendarEvent(for task: TaskItem) async {
+    private func addOrUpdateCalendarEvent(for task: TaskItem) async {
         if #available(iOS 17, *) {
             let status = EKEventStore.authorizationStatus(for: .event)
             guard status == .fullAccess || status == .writeOnly else { return }
@@ -3081,20 +3111,33 @@ extension ContentView {
             guard status == .authorized else { return }
         }
 
-        let event = EKEvent(eventStore: eventStore)
+        let event: EKEvent
+        if let externalId = task.externalId,
+           let existing = eventStore.event(withIdentifier: externalId) {
+            event = existing
+        } else {
+            event = EKEvent(eventStore: eventStore)
+        }
+
         event.title = task.title
         event.calendar = eventStore.defaultCalendarForNewEvents
 
-        // Set event window: start at 9am on start date, 30 minutes duration
-        var startComponents = Calendar.current.dateComponents([.year, .month, .day], from: task.startDate)
-        startComponents.hour = 9
-        let start = Calendar.current.date(from: startComponents) ?? task.startDate
+        let start = task.startDate
+        let end = max(task.dueDate, start.addingTimeInterval(30 * 60))
         event.startDate = start
-        event.endDate = start.addingTimeInterval(30 * 60)
-        event.notes = "Due: \(task.dueDate.formatted(date: .abbreviated, time: .omitted)) • Priority: \(task.priorityLabel)"
+        event.endDate = end
+        let marker = "PA_TASK_ID:\(task.id.uuidString)"
+        event.notes = "\(marker)\nDue: \(task.dueDate.formatted(date: .abbreviated, time: .omitted)) • Priority: \(task.priorityLabel)"
 
         do {
             try eventStore.save(event, span: .thisEvent)
+            if let savedIdentifier = event.eventIdentifier {
+                await MainActor.run {
+                    if let idx = tasks.firstIndex(where: { $0.id == task.id }) {
+                        tasks[idx].externalId = savedIdentifier
+                    }
+                }
+            }
         } catch {
             await MainActor.run { showCalendarAlert = true }
         }
@@ -3134,6 +3177,9 @@ extension ContentView {
         let predicate = eventStore.predicateForEvents(withStart: start, end: end, calendars: userCalendars)
         let events = eventStore.events(matching: predicate)
         for event in events {
+            if let notes = event.notes, notes.contains("PA_TASK_ID:") {
+                continue
+            }
             fetchedItems.append(TaskItem(
                 id: UUID(), // We generate a transient ID
                 title: event.title ?? "Event",
