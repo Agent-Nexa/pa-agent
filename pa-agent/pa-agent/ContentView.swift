@@ -1436,25 +1436,24 @@ struct ContentView: View {
             }, message: {
                 Text("I couldn't schedule a start-date reminder. Check notification permissions.")
             })
-            .alert(isPresented: $showingOverdueTaskAlert) {
-                let title = pendingOverdueTask?.title ?? "Task"
-
-                return Alert(
-                    title: Text("Task Overdue"),
-                    message: Text("\(title) is overdue. Do you want to complete it or cancel it?"),
-                    primaryButton: .default(Text("Complete")) {
-                        if let task = pendingOverdueTask {
-                            completeTask(task)
-                        }
-                        pendingOverdueTask = nil
-                    },
-                    secondaryButton: .destructive(Text("Cancel Task")) {
-                        if let task = pendingOverdueTask {
-                            cancelTask(task)
-                        }
-                        pendingOverdueTask = nil
-                    }
-                )
+            .alert("Task Overdue", isPresented: $showingOverdueTaskAlert, presenting: pendingOverdueTask) { task in
+                Button("Complete") {
+                    completeTask(task)
+                    pendingOverdueTask = nil
+                }
+                Button("Postpone 1 Hour") {
+                    postponeTask(task, by: 3600)
+                    pendingOverdueTask = nil
+                }
+                Button("Cancel Task", role: .destructive) {
+                    cancelTask(task)
+                    pendingOverdueTask = nil
+                }
+                Button("Close", role: .cancel) {
+                    pendingOverdueTask = nil
+                }
+            } message: { task in
+                Text("\(task.title) is overdue. You can complete, postpone, or cancel it.")
             }
             .alert("Calendar access needed", isPresented: $showCalendarAlert, actions: {
                 Button("OK", role: .cancel) {}
@@ -1649,6 +1648,20 @@ struct ContentView: View {
             UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [task.id.uuidString])
             historyManager.addLog(actionType: "Task", description: "Canceled: \(tasks[idx].title)")
             messages.append(.init(isUser: false, text: "Canceled task: \(tasks[idx].title)"))
+            reprioritize()
+        }
+    }
+
+    private func postponeTask(_ task: TaskItem, by interval: TimeInterval) {
+        if let idx = tasks.firstIndex(where: { $0.id == task.id }) {
+            tasks[idx].markOpen()
+            tasks[idx].startDate = Date().addingTimeInterval(interval)
+            tasks[idx].dueDate = tasks[idx].dueDate.addingTimeInterval(interval)
+            promptedOverdueTaskIDs.remove(task.id)
+            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [task.id.uuidString])
+            scheduleReminder(for: tasks[idx])
+            historyManager.addLog(actionType: "Task", description: "Postponed: \(tasks[idx].title) by 1 hour")
+            messages.append(.init(isUser: false, text: "Postponed task by 1 hour: \(tasks[idx].title)"))
             reprioritize()
         }
     }
