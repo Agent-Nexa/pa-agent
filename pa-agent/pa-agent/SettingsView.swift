@@ -1,11 +1,13 @@
 import SwiftUI
 import UserNotifications
 import AVFoundation
+import StoreKit
 #if canImport(UIKit)
 import UIKit
 #endif
 
 struct SettingsView: View {
+    @Environment(\.openURL) private var openURL
     @AppStorage("OPENAI_API_KEY") private var storedApiKey: String = ""
     @AppStorage("OPENAI_MODEL") private var storedModel: String = "gpt-5.2"
     @AppStorage("OPENAI_USE_AZURE") private var useAzure: Bool = true
@@ -35,6 +37,7 @@ struct SettingsView: View {
     @State private var referralStatusText: String = ""
     @State private var isEditing: Bool = false
     @State private var previewSynthesizer = AVSpeechSynthesizer()
+    @StateObject private var subscriptionManager = SubscriptionManager.shared
     @ObservedObject var historyManager: ActivityHistoryManager
     private let intentService = IntentService()
 
@@ -73,6 +76,60 @@ struct SettingsView: View {
                     Text(isEditing ? "Edit settings below, then tap Save." : "Settings are read-only. Tap Edit to make changes.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                }
+
+                Section("Subscription") {
+                    if isProductionBuild {
+                        Text("To subscribe, iPhone must be signed in to App Store. If prompted for account, sign in first, then tap Subscribe again.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        HStack {
+                            Text("Status")
+                            Spacer()
+                            Text(subscriptionManager.displayStatus)
+                                .foregroundStyle(subscriptionManager.hasActiveSubscription ? .green : .secondary)
+                        }
+
+                        if let product = subscriptionManager.primaryProduct {
+                            HStack {
+                                Text(product.displayName)
+                                Spacer()
+                                Text(product.displayPrice)
+                                    .foregroundStyle(.secondary)
+                            }
+                        } else if subscriptionManager.isLoadingProducts {
+                            HStack {
+                                ProgressView()
+                                Text("Loading subscription...")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        Button(subscriptionManager.isPurchasing ? "Processing..." : "Subscribe") {
+                            Task { await subscriptionManager.purchasePrimarySubscription() }
+                        }
+                        .disabled(subscriptionManager.isPurchasing || subscriptionManager.primaryProduct == nil)
+
+                        Button("Restore Purchases") {
+                            Task { await subscriptionManager.restorePurchases() }
+                        }
+
+                        Button("Open App Store Subscriptions") {
+                            guard let url = URL(string: "https://apps.apple.com/account/subscriptions") else { return }
+                            openURL(url)
+                        }
+
+                        if !subscriptionManager.statusMessage.isEmpty {
+                            Text(subscriptionManager.statusMessage)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Text("Debug mode: AI is always enabled and subscription status is not checked.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 Section("Identity") {
@@ -222,6 +279,10 @@ struct SettingsView: View {
                     }
                     Button("Test Connection") {
                         Task {
+                            guard isAIFeatureEnabled else {
+                                connectionStatus = "subscription required"
+                                return
+                            }
                             connectionStatus = "testing..."
                             // Use localModel (what is currently selected) instead of storedModel (what was last saved)
                             // so the user can test before saving.
@@ -233,6 +294,7 @@ struct SettingsView: View {
                             )
                         }
                     }
+                    .disabled(!isAIFeatureEnabled)
                 }
                 
                 Section("Notifications Tools") {
@@ -312,6 +374,13 @@ struct SettingsView: View {
                 localUserIcon = userIcon
                 localAgentVoiceEnabled = agentVoiceEnabled
                 localAgentVoiceIdentifier = agentVoiceIdentifier
+
+                if isProductionBuild {
+                    Task {
+                        await subscriptionManager.loadProducts()
+                        await subscriptionManager.refreshSubscriptionStatus()
+                    }
+                }
             }
         }
     }
@@ -375,6 +444,14 @@ struct SettingsView: View {
 
     private var environmentColor: Color {
         isProductionBuild ? .orange : .green
+    }
+
+    private var isAIFeatureEnabled: Bool {
+        #if DEBUG
+        return true
+        #else
+        return subscriptionManager.hasActiveSubscription
+        #endif
     }
 
     private var referralMessage: String {

@@ -12,21 +12,21 @@
 			containerPortal = AEF59D0E2F3D994800FC4B5D /* Project object */;
 			proxyType = 1;
 			remoteGlobalIDString = AEF59D152F3D994800FC4B5D;
-			remoteInfo = "pa-agent";
+			remoteInfo = nexa;
 		};
 		AEF59D2E2F3D994900FC4B5D /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = AEF59D0E2F3D994800FC4B5D /* Project object */;
 			proxyType = 1;
 			remoteGlobalIDString = AEF59D152F3D994800FC4B5D;
-			remoteInfo = "pa-agent";
+			remoteInfo = nexa;
 		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		AEF59D162F3D994800FC4B5D /* pa-agent.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "pa-agent.app"; sourceTree = BUILT_PRODUCTS_DIR; };
-		AEF59D232F3D994900FC4B5D /* pa-agentTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "pa-agentTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
-		AEF59D2D2F3D994900FC4B5D /* pa-agentUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "pa-agentUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		AEF59D162F3D994800FC4B5D /* nexa.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = nexa.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		AEF59D232F3D994900FC4B5D /* nexaTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = nexaTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		AEF59D2D2F3D994900FC4B5D /* nexaUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = nexaUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -85,9 +85,9 @@
 		AEF59D172F3D994800FC4B5D /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				AEF59D162F3D994800FC4B5D /* pa-agent.app */,
-				AEF59D232F3D994900FC4B5D /* pa-agentTests.xctest */,
-				AEF59D2D2F3D994900FC4B5D /* pa-agentUITests.xctest */,
+				AEF59D162F3D994800FC4B5D /* nexa.app */,
+				AEF59D232F3D994900FC4B5D /* nexaTests.xctest */,
+				AEF59D2D2F3D994900FC4B5D /* nexaUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -95,9 +95,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		AEF59D152F3D994800FC4B5D /* pa-agent */ = {
+		AEF59D152F3D994800FC4B5D /* nexa */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = AEF59D372F3D994900FC4B5D /* Build configuration list for PBXNativeTarget "pa-agent" */;
+			buildConfigurationList = AEF59D372F3D994900FC4B5D /* Build configuration list for PBXNativeTarget "nexa" */;
 			buildPhases = (
 				AEF59D122F3D994800FC4B5D /* Sources */,
 				AEF59D132F3D994800FC4B5D /* Frameworks */,
@@ -110,16 +110,16 @@
 			fileSystemSynchronizedGroups = (
 				AEF59D182F3D994800FC4B5D /* pa-agent */,
 			);
-			name = "pa-agent";
+			name = nexa;
 			packageProductDependencies = (
 			);
-			productName = "pa-agent";
-			productReference = AEF59D162F3D994800FC4B5D /* pa-agent.app */;
+			productName = nexa;
+			productReference = AEF59D162F3D994800FC4B5D /* nexa.app */;
 			productType = "com.apple.product-type.application";
 		};
-		AEF59D222F3D994900FC4B5D /* pa-agentTests */ = {
+		AEF59D222F3D994900FC4B5D /* nexaTests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = AEF59D3A2F3D994900FC4B5D /* Build configuration list for PBXNativeTarget "pa-agentTests" */;
+			buildConfigurationList = AEF59D3A2F3D994900FC4B5D /* Build configuration list for PBXNativeTarget "nexaTests" */;
 			buildPhases = (
 				AEF59D1F2F3D994900FC4B5D /* Sources */,
 				AEF59D202F3D994900FC4B5D /* Frameworks */,
@@ -133,16 +133,16 @@
 			fileSystemSynchronizedGroups = (
 				AEF59D262F3D994900FC4B5D /* pa-agentTests */,
 			);
-			name = "pa-agentTests";
+			name = nexaTests;
 			packageProductDependencies = (
 			);
-			productName = "pa-agentTests";
-			productReference = AEF59D232F3D994900FC4B5D /* pa-agentTests.xctest */;
+			productName = nexaTests;
+			productReference = AEF59D232F3D994900FC4B5D /* nexaTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
-		AEF59D2C2F3D994900FC4B5D /* pa-agentUITests */ = {
+		AEF59D2C2F3D994900FC4B5D /* nexaUITests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = AEF59D3D2F3D994900FC4B5D /* Build configuration list for PBXNativeTarget "pa-agentUITests" */;
+			buildConfigurationList = AEF59D3D2F3D994900FC4B5D /* Build configuration list for PBXNativeTarget "nexaUITests" */;
 			buildPhases = (
 				AEF59D292F3D994900FC4B5D /* Sources */,
 				AEF59D2A2F3D994900FC4B5D /* Frameworks */,
@@ -156,11 +156,11 @@
 			fileSystemSynchronizedGroups = (
 				AEF59D302F3D994900FC4B5D /* pa-agentUITests */,
 			);
-			name = "pa-agentUITests";
+			name = nexaUITests;
 			packageProductDependencies = (
 			);
-			productName = "pa-agentUITests";
-			productReference = AEF59D2D2F3D994900FC4B5D /* pa-agentUITests.xctest */;
+			productName = nexaUITests;
+			productReference = AEF59D2D2F3D994900FC4B5D /* nexaUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
 /* End PBXNativeTarget section */
@@ -186,7 +186,7 @@
 					};
 				};
 			};
-			buildConfigurationList = AEF59D112F3D994800FC4B5D /* Build configuration list for PBXProject "pa-agent" */;
+			buildConfigurationList = AEF59D112F3D994800FC4B5D /* Build configuration list for PBXProject "nexa" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -203,9 +203,9 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				AEF59D152F3D994800FC4B5D /* pa-agent */,
-				AEF59D222F3D994900FC4B5D /* pa-agentTests */,
-				AEF59D2C2F3D994900FC4B5D /* pa-agentUITests */,
+				AEF59D152F3D994800FC4B5D /* nexa */,
+				AEF59D222F3D994900FC4B5D /* nexaTests */,
+				AEF59D2C2F3D994900FC4B5D /* nexaUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -261,12 +261,12 @@
 /* Begin PBXTargetDependency section */
 		AEF59D252F3D994900FC4B5D /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = AEF59D152F3D994800FC4B5D /* pa-agent */;
+			target = AEF59D152F3D994800FC4B5D /* nexa */;
 			targetProxy = AEF59D242F3D994900FC4B5D /* PBXContainerItemProxy */;
 		};
 		AEF59D2F2F3D994900FC4B5D /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = AEF59D152F3D994800FC4B5D /* pa-agent */;
+			target = AEF59D152F3D994800FC4B5D /* nexa */;
 			targetProxy = AEF59D2E2F3D994900FC4B5D /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
@@ -478,7 +478,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "z.pa-agentTests";
+				PRODUCT_BUNDLE_IDENTIFIER = "z.nexaTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -486,7 +486,7 @@
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/pa-agent.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/pa-agent";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/nexa.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/nexa";
 			};
 			name = Debug;
 		};
@@ -499,7 +499,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "z.pa-agentTests";
+				PRODUCT_BUNDLE_IDENTIFIER = "z.nexaTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -507,7 +507,7 @@
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/pa-agent.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/pa-agent";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/nexa.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/nexa";
 			};
 			name = Release;
 		};
@@ -518,7 +518,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "z.pa-agentUITests";
+				PRODUCT_BUNDLE_IDENTIFIER = "z.nexaUITests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -526,7 +526,7 @@
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_TARGET_NAME = "pa-agent";
+				TEST_TARGET_NAME = nexa;
 			};
 			name = Debug;
 		};
@@ -537,7 +537,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "z.pa-agentUITests";
+				PRODUCT_BUNDLE_IDENTIFIER = "z.nexaUITests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -545,14 +545,14 @@
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_TARGET_NAME = "pa-agent";
+				TEST_TARGET_NAME = nexa;
 			};
 			name = Release;
 		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		AEF59D112F3D994800FC4B5D /* Build configuration list for PBXProject "pa-agent" */ = {
+		AEF59D112F3D994800FC4B5D /* Build configuration list for PBXProject "nexa" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				AEF59D352F3D994900FC4B5D /* Debug */,
@@ -561,7 +561,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		AEF59D372F3D994900FC4B5D /* Build configuration list for PBXNativeTarget "pa-agent" */ = {
+		AEF59D372F3D994900FC4B5D /* Build configuration list for PBXNativeTarget "nexa" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				AEF59D382F3D994900FC4B5D /* Debug */,
@@ -570,7 +570,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		AEF59D3A2F3D994900FC4B5D /* Build configuration list for PBXNativeTarget "pa-agentTests" */ = {
+		AEF59D3A2F3D994900FC4B5D /* Build configuration list for PBXNativeTarget "nexaTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				AEF59D3B2F3D994900FC4B5D /* Debug */,
@@ -579,7 +579,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		AEF59D3D2F3D994900FC4B5D /* Build configuration list for PBXNativeTarget "pa-agentUITests" */ = {
+		AEF59D3D2F3D994900FC4B5D /* Build configuration list for PBXNativeTarget "nexaUITests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				AEF59D3E2F3D994900FC4B5D /* Debug */,

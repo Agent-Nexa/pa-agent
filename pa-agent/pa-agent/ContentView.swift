@@ -878,6 +878,7 @@ enum InteractionState: Equatable {
     case resolvingMissingTaskContact(task: TaskItem, missingType: String)
     case collectingNewContactDetail(task: TaskItem, name: String, missingType: String)
     case collectingScheduledTaskContact(name: String, missingType: String, draft: TaskDraft, actionType: String)
+    case collectingScheduledActionContent(draft: TaskDraft, actionType: String, recipient: String, promptLabel: String)
 }
 
 struct SimpleContact: Identifiable, Hashable {
@@ -1334,6 +1335,7 @@ struct ContentView: View {
     @StateObject private var historyManager = ActivityHistoryManager()
     @StateObject private var notificationManager = NotificationManager.shared
     @StateObject private var speechManager = SpeechManager()
+    @StateObject private var subscriptionManager = SubscriptionManager.shared
     @State private var showNotificationList = false
     @Namespace private var scrollSpace
     private let eventStore = EKEventStore()
@@ -1363,6 +1365,9 @@ struct ContentView: View {
             .onAppear {
                 setupNotifications()
                 setupSpeech()
+                #if !DEBUG
+                Task { await subscriptionManager.refreshSubscriptionStatus() }
+                #endif
             }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
                 checkAgentTasks(at: Date())
@@ -1614,7 +1619,8 @@ struct ContentView: View {
                 }
                 
                 // We pass the stored body as 'text'
-                if let generated = await intentService.polishMessage(text: finalBody, history: "", recipient: finalRecipient, senderName: signatureName, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint, agentName: agentName) {
+                if isAIFeatureEnabled,
+                   let generated = await intentService.polishMessage(text: finalBody, history: "", recipient: finalRecipient, senderName: signatureName, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint, agentName: agentName) {
                     finalBody = generated
                 }
                 
@@ -1627,9 +1633,25 @@ struct ContentView: View {
 
             await MainActor.run {
                 if payload.type == "sendMessage" {
+                    if finalBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        pendingMessage = MessageDraft(recipient: finalRecipient, body: "")
+                        interactionState = .collectingMessageBody
+                        withAnimation {
+                            messages.append(.init(isUser: false, text: "What should I message \(finalRecipient)?"))
+                        }
+                        return
+                    }
                     pendingMessage = MessageDraft(recipient: finalRecipient, body: finalBody)
                     showMessageComposer = true
                 } else if payload.type == "sendEmail" {
+                    if finalBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        pendingEmail = EmailDraft(recipient: finalRecipient, subject: payload.subject ?? "Update", body: "")
+                        interactionState = .collectingEmailBody
+                        withAnimation {
+                            messages.append(.init(isUser: false, text: "What should the email to \(finalRecipient) say?"))
+                        }
+                        return
+                    }
                     // For email, we might want to generate a subject too if missing? 
                     // PolishMessage returns just body. 
                     // Let's keep subject as is for now.
@@ -2466,22 +2488,34 @@ extension ContentView {
         let signatureName = userName.isEmpty ? "The User" : userName
         
         // NEW: Check Sufficiency
-        let activeKey = storedApiKey.isEmpty ? ProcessInfo.processInfo.environment["OPENAI_API_KEY"] : storedApiKey
-        let (sufficient, question) = await intentService.checkEmailSufficiency(currentBody: pendingEmail.body, recipient: pendingEmail.recipient, senderName: signatureName, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint, agentName: agentName)
-        
-        if !sufficient, let q = question {
-            interactionState = .answeringEmailQuestion
-            withAnimation { messages.append(.init(isUser: false, text: q)) }
-            return
+        if isAIFeatureEnabled {
+            let activeKey = storedApiKey.isEmpty ? ProcessInfo.processInfo.environment["OPENAI_API_KEY"] : storedApiKey
+            let (sufficient, question) = await intentService.checkEmailSufficiency(currentBody: pendingEmail.body, recipient: pendingEmail.recipient, senderName: signatureName, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint, agentName: agentName)
+
+            if !sufficient, let q = question {
+                interactionState = .answeringEmailQuestion
+                withAnimation { messages.append(.init(isUser: false, text: q)) }
+                return
+            }
         }
         
         await polishAndConfirmEmail()
     }
 
     private func polishAndConfirmEmail() async {
-        withAnimation { messages.append(.init(isUser: false, text: "Drafting professional email...")) }
+        withAnimation { messages.append(.init(isUser: false, text: isAIFeatureEnabled ? "Drafting professional email..." : "Preparing email draft...")) }
         let activeKey = storedApiKey.isEmpty ? ProcessInfo.processInfo.environment["OPENAI_API_KEY"] : storedApiKey
         let signatureName = userName.isEmpty ? "the user" : userName
+
+        if !isAIFeatureEnabled {
+            let signature = "\n\nI’m \(signatureName)’s AI powered personal assistant - \(agentName)"
+            pendingEmail.body = pendingEmail.body + signature
+            interactionState = .confirmingEmail(pendingEmail)
+            withAnimation {
+                messages.append(.init(isUser: false, text: "AI drafting is unavailable without subscription. Using your original text. Reply 'Yes' to open mail app, or anything else to cancel."))
+            }
+            return
+        }
 
         if let polished = await intentService.polishEmail(text: pendingEmail.body, recipient: pendingEmail.recipient, senderName: signatureName, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint, agentName: agentName) {
             
@@ -2678,6 +2712,32 @@ extension ContentView {
             showTaskDetailSheet = true
             return
         }
+
+        if case .collectingScheduledActionContent(let draftForTask, let actionType, let recipient, let promptLabel) = interactionState {
+            let trimmedInput = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let lowered = trimmedInput.lowercased()
+            let skipTokens = ["skip", "no", "none", "not now", "later"]
+
+            pendingDraft = draftForTask
+            if skipTokens.contains(lowered) {
+                pendingScheduledActionPayload = .init(type: actionType, recipient: recipient)
+                interactionState = .idle
+                messages.append(.init(isUser: false, text: "Okay — I’ll save the reminder without \(promptLabel) content. You can still edit it later."))
+                showTaskDetailSheet = true
+                return
+            }
+
+            guard !trimmedInput.isEmpty else {
+                messages.append(.init(isUser: false, text: "Please provide the \(promptLabel) content, or reply 'skip'."))
+                return
+            }
+
+            pendingScheduledActionPayload = .init(type: actionType, recipient: recipient, body: trimmedInput)
+            interactionState = .idle
+            messages.append(.init(isUser: false, text: "Great — I saved the \(promptLabel) content for this reminder."))
+            showTaskDetailSheet = true
+            return
+        }
     
         // 1. Check if we are filling a slot
         if interactionState == .collectingCallRecipient {
@@ -2740,10 +2800,18 @@ extension ContentView {
         }
     
         let activeKey = storedApiKey.isEmpty ? ProcessInfo.processInfo.environment["OPENAI_API_KEY"] : storedApiKey
-
-        if var draft = await intentService.infer(from: text, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint, userName: userName, agentName: agentName, appContext: buildAIContextSnapshot()) ?? intentAnalyzer.infer(from: text, agentName: agentName) {
+        let inferred: IntentResult?
+        if isAIFeatureEnabled {
+            inferred = await intentService.infer(from: text, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint, userName: userName, agentName: agentName, appContext: buildAIContextSnapshot()) ?? intentAnalyzer.infer(from: text, agentName: agentName)
             lastIntentSource = intentService.usedOpenAI ? "openai" : "fallback"
             lastIntentReason = intentService.lastReason
+        } else {
+            inferred = intentAnalyzer.infer(from: text, agentName: agentName)
+            lastIntentSource = "fallback"
+            lastIntentReason = "subscription-required"
+        }
+
+        if var draft = inferred {
             
             // Safety: Force 'call' action if the model returned 'task' but it looks like a call
             // Common with GPT models that are biased towards 'task' from previous prompts
@@ -2876,6 +2944,20 @@ extension ContentView {
                          finalRecipient = exact.number
                          pendingDraft.title = "Message \(exact.name)"
                     }
+
+                    let cleanBody = draft.messageBody?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    if cleanBody.isEmpty {
+                        interactionState = .collectingScheduledActionContent(
+                            draft: pendingDraft,
+                            actionType: "sendMessage",
+                            recipient: finalRecipient,
+                            promptLabel: "message"
+                        )
+                        withAnimation {
+                            messages.append(.init(isUser: false, text: "What should I message \(draft.recipient ?? "them")? Reply 'skip' if you only want a reminder without content."))
+                        }
+                        return
+                    }
                     
                     let newTask = TaskItem(
                         title: pendingDraft.title,
@@ -2884,7 +2966,7 @@ extension ContentView {
                         dueDate: pendingDraft.dueDate,
                         priority: pendingDraft.priority,
                         executor: .agent,
-                        actionPayload: .init(type: "sendMessage", recipient: finalRecipient, body: draft.messageBody)
+                        actionPayload: .init(type: "sendMessage", recipient: finalRecipient, body: cleanBody)
                     )
                     insertTask(newTask, announce: true)
                     return
@@ -2990,7 +3072,7 @@ extension ContentView {
         
         // Polish Message Logic
         // Always attempt to polish/extract for SMS to handle "tell him..." cases better
-        withAnimation { messages.append(.init(isUser: false, text: "Polishing message...")) }
+        withAnimation { messages.append(.init(isUser: false, text: isAIFeatureEnabled ? "Polishing message..." : "Preparing message...")) }
         let activeKey = storedApiKey.isEmpty ? ProcessInfo.processInfo.environment["OPENAI_API_KEY"] : storedApiKey
         
         // Prepare context history (last 5 messages)
@@ -3000,7 +3082,8 @@ extension ContentView {
         
         // Safety Clean-up logic (moved into main actor later)
         var finalBody = pendingMessage.body
-        if let polished = await intentService.polishMessage(text: pendingMessage.body, history: recentHistory, recipient: pendingMessage.recipient, senderName: signatureName, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint, agentName: agentName) {
+          if isAIFeatureEnabled,
+              let polished = await intentService.polishMessage(text: pendingMessage.body, history: recentHistory, recipient: pendingMessage.recipient, senderName: signatureName, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint, agentName: agentName) {
              finalBody = polished
         }
         
@@ -3552,6 +3635,14 @@ extension ContentView {
         case "pink": return .pink
         default: return .purple
         }
+    }
+
+    private var isAIFeatureEnabled: Bool {
+        #if DEBUG
+        return true
+        #else
+        return subscriptionManager.hasActiveSubscription
+        #endif
     }
 }
 

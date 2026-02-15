@@ -6,7 +6,7 @@
 //
 
 import Testing
-@testable import pa_agent
+@testable import nexa
 
 struct pa_agentTests {
 

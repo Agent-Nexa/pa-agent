@@ -16,8 +16,8 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "AEF59D152F3D994800FC4B5D"
-               BuildableName = "pa-agent.app"
-               BlueprintName = "pa-agent"
+               BuildableName = "nexa.app"
+               BlueprintName = "nexa"
                ReferencedContainer = "container:pa-agent.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -36,8 +36,8 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "AEF59D222F3D994900FC4B5D"
-               BuildableName = "pa-agentTests.xctest"
-               BlueprintName = "pa-agentTests"
+               BuildableName = "nexaTests.xctest"
+               BlueprintName = "nexaTests"
                ReferencedContainer = "container:pa-agent.xcodeproj">
             </BuildableReference>
          </TestableReference>
@@ -47,8 +47,8 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "AEF59D2C2F3D994900FC4B5D"
-               BuildableName = "pa-agentUITests.xctest"
-               BlueprintName = "pa-agentUITests"
+               BuildableName = "nexaUITests.xctest"
+               BlueprintName = "nexaUITests"
                ReferencedContainer = "container:pa-agent.xcodeproj">
             </BuildableReference>
          </TestableReference>
@@ -69,8 +69,8 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "AEF59D152F3D994800FC4B5D"
-            BuildableName = "pa-agent.app"
-            BlueprintName = "pa-agent"
+            BuildableName = "nexa.app"
+            BlueprintName = "nexa"
             ReferencedContainer = "container:pa-agent.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
@@ -103,8 +103,8 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "AEF59D152F3D994800FC4B5D"
-            BuildableName = "pa-agent.app"
-            BlueprintName = "pa-agent"
+            BuildableName = "nexa.app"
+            BlueprintName = "nexa"
             ReferencedContainer = "container:pa-agent.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
