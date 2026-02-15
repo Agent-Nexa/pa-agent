@@ -221,6 +221,9 @@ struct TaskItem: Identifiable, Hashable, Codable {
     }
 
     var statusLabel: String {
+        if isOverdue() {
+            return "Overdue"
+        }
         switch status {
         case .open: return "Open"
         case .completed: return "Completed"
@@ -271,6 +274,22 @@ struct TaskItem: Identifiable, Hashable, Codable {
         } else {
             markCompleted()
         }
+    }
+
+    func isOverdue(now: Date = Date(), ignoringOlderThanMonths months: Int = 1) -> Bool {
+        guard status == .open, !isDone, dueDate < now else { return false }
+        guard let cutoff = Calendar.current.date(byAdding: .month, value: -months, to: now) else {
+            return dueDate < now
+        }
+        return dueDate >= cutoff
+    }
+
+    func isStaleOverdue(now: Date = Date(), months: Int = 1) -> Bool {
+        guard status == .open, !isDone else { return false }
+        guard let cutoff = Calendar.current.date(byAdding: .month, value: -months, to: now) else {
+            return false
+        }
+        return dueDate < cutoff
     }
 }
 
@@ -1904,6 +1923,7 @@ struct ContentView: View {
     @AppStorage("USER_ICON") private var userIcon: String = "person.circle.fill"
     @AppStorage("AGENT_VOICE_ENABLED") private var agentVoiceEnabled: Bool = true
     @AppStorage("AGENT_VOICE_IDENTIFIER") private var agentVoiceIdentifier: String = ""
+    @AppStorage("PREFERRED_TASK_CALENDAR_ID") private var preferredTaskCalendarId: String = ""
     @StateObject private var historyManager = ActivityHistoryManager()
     @StateObject private var notificationManager = NotificationManager.shared
     @StateObject private var speechManager = SpeechManager()
@@ -1929,6 +1949,8 @@ struct ContentView: View {
     @State private var showScheduleConflictAlert = false
     @State private var pendingConflictTask: TaskItem?
     @State private var pendingConflictMatches: [TaskItem] = []
+    @State private var recentCalendarOccurrenceStatuses: [String: TaskItem.TaskStatus] = [:]
+    private let calendarOccurrenceStatusesStoreKey = "calendar_occurrence_statuses_v1"
     
     @Environment(\.scenePhase) private var scenePhase
 
@@ -2004,6 +2026,9 @@ struct ContentView: View {
                     tasks: $tasks,
                     onRefresh: {
                         Task { await refreshSystemTasks() }
+                    },
+                    onTaskChanged: { task in
+                        syncTaskStatusToCalendarIfNeeded(task)
                     },
                     onRequestCalendarAccess: {
                         Task {
@@ -2146,6 +2171,7 @@ struct ContentView: View {
                 Text(scheduleConflictMessage)
             })
             .onAppear {
+                loadPersistedCalendarOccurrenceStatuses()
                 if userName.isEmpty {
                     Task {
                         // Try to fetch name from contacts or device name
@@ -2184,7 +2210,7 @@ struct ContentView: View {
         // Prevent interruption if already handling tasks
         guard !showMessageComposer, !showEmailComposer, !showingAgentTaskAlert, !showingOverdueTaskAlert else { return }
 
-        if let overdueTask = tasks.first(where: { !$0.isDone && $0.dueDate < time && !promptedOverdueTaskIDs.contains($0.id) }) {
+        if let overdueTask = tasks.first(where: { $0.isOverdue(now: time) && !promptedOverdueTaskIDs.contains($0.id) }) {
             pendingOverdueTask = overdueTask
             promptedOverdueTaskIDs.insert(overdueTask.id)
             showingOverdueTaskAlert = true
@@ -2337,6 +2363,7 @@ struct ContentView: View {
     private func completeTask(_ task: TaskItem) {
         if let idx = tasks.firstIndex(where: { $0.id == task.id }) {
             tasks[idx].markCompleted()
+            syncTaskStatusToCalendarIfNeeded(tasks[idx])
             promptedOverdueTaskIDs.remove(task.id)
             historyManager.addLog(actionType: "Task", description: "Completed: \(tasks[idx].title)")
             reprioritize()
@@ -2346,6 +2373,7 @@ struct ContentView: View {
     private func cancelTask(_ task: TaskItem) {
         if let idx = tasks.firstIndex(where: { $0.id == task.id }) {
             tasks[idx].markCanceled()
+            syncTaskStatusToCalendarIfNeeded(tasks[idx])
             promptedOverdueTaskIDs.remove(task.id)
             UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [task.id.uuidString])
             historyManager.addLog(actionType: "Task", description: "Canceled: \(tasks[idx].title)")
@@ -2359,11 +2387,10 @@ struct ContentView: View {
             tasks[idx].markOpen()
             tasks[idx].startDate = Date().addingTimeInterval(interval)
             tasks[idx].dueDate = tasks[idx].dueDate.addingTimeInterval(interval)
+            syncTaskStatusToCalendarIfNeeded(tasks[idx])
             promptedOverdueTaskIDs.remove(task.id)
             UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [task.id.uuidString])
             scheduleReminder(for: tasks[idx])
-            let updatedTask = tasks[idx]
-            Task { await addOrUpdateCalendarEvent(for: updatedTask) }
             historyManager.addLog(actionType: "Task", description: "Postponed: \(tasks[idx].title) by 1 hour")
             messages.append(.init(isUser: false, text: "Postponed task by 1 hour: \(tasks[idx].title)"))
             reprioritize()
@@ -2761,7 +2788,7 @@ struct ContentView: View {
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
-                    ForEach(tasks) { task in
+                    ForEach(visibleTasks) { task in
                         taskCard(task)
                     }
                 }
@@ -2780,8 +2807,8 @@ struct ContentView: View {
                     .font(.caption2.weight(.semibold))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
-                    .background(statusColor(task.status).opacity(0.18))
-                    .foregroundStyle(statusColor(task.status))
+                    .background(statusColor(for: task).opacity(0.18))
+                    .foregroundStyle(statusColor(for: task))
                     .clipShape(Capsule())
                 Spacer()
                 if task.executor == .agent {
@@ -2832,18 +2859,26 @@ struct ContentView: View {
         }
     }
 
+    private var visibleTasks: [TaskItem] {
+        tasks.filter { !$0.isStaleOverdue() }
+    }
+
 }
 
 // MARK: - Task List Sheet (Moved to top-level)
 
 struct TasksListSheet: View {
     @Binding var tasks: [TaskItem]
+    @AppStorage("PREFERRED_TASK_CALENDAR_ID") private var preferredTaskCalendarId: String = ""
     var onRefresh: () -> Void = {}
+    var onTaskChanged: (TaskItem) -> Void = { _ in }
     var onRequestCalendarAccess: () -> Void = {}
     var onRequestRemindersAccess: () -> Void = {}
     @Environment(\.dismiss) private var dismiss
     @State private var selectedFilter: TaskFilter = .all
     @State private var selectedTaskForDetail: TaskItem?
+    @State private var selectedCalendarName: String = "Default"
+    private let eventStore = EKEventStore()
 
     enum TaskFilter: String, CaseIterable {
         case all = "All"
@@ -2857,8 +2892,9 @@ struct TasksListSheet: View {
         let todayStart = calendar.startOfDay(for: now)
         let tomorrowStart = calendar.date(byAdding: .day, value: 1, to: todayStart)!
         let nextWeekStart = calendar.date(byAdding: .day, value: 7, to: todayStart)!
+        let visibleTasks = tasks.filter { !$0.isStaleOverdue(now: now) }
 
-        return tasks.filter { task in
+        return visibleTasks.filter { task in
             let targetDate = task.startDate
             switch selectedFilter {
             case .all:
@@ -2884,6 +2920,7 @@ struct TasksListSheet: View {
                         Button {
                             if let index = tasks.firstIndex(where: { $0.id == task.id }) {
                                 withAnimation { tasks[index].toggleDoneState() }
+                                onTaskChanged(tasks[index])
                             }
                         } label: {
                             Image(systemName: task.isDone ? "checkmark.circle.fill" : "circle")
@@ -2899,7 +2936,7 @@ struct TasksListSheet: View {
                                 .foregroundStyle(task.isDone ? .secondary : .primary)
                             Text(task.statusLabel)
                                 .font(.caption2)
-                                .foregroundStyle(statusColor(task.status))
+                                .foregroundStyle(statusColor(for: task))
                             Text("\(task.type == .calendar ? "📅 " : "")Start: \(task.startDate.formatted(date: .abbreviated, time: .shortened))")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -2931,6 +2968,7 @@ struct TasksListSheet: View {
                             Button("Cancel") {
                                 if let index = tasks.firstIndex(where: { $0.id == task.id }) {
                                     withAnimation { tasks[index].markCanceled() }
+                                    onTaskChanged(tasks[index])
                                 }
                             }
                             .tint(.yellow)
@@ -2948,6 +2986,7 @@ struct TasksListSheet: View {
                         Button(task.isDone ? "Undo" : "Done") {
                             if let index = tasks.firstIndex(where: { $0.id == task.id }) {
                                 withAnimation { tasks[index].toggleDoneState() }
+                                onTaskChanged(tasks[index])
                             }
                         }
                         .tint(.green)
@@ -2964,14 +3003,13 @@ struct TasksListSheet: View {
             .navigationTitle("Tasks")
             .toolbar {
                 ToolbarItem(placement: .principal) {
-                    Picker("Filter", selection: $selectedFilter) {
-                        ForEach(TaskFilter.allCases, id: \.self) { filter in
-                            Text(filter.rawValue).tag(filter)
-                        }
+                    VStack(spacing: 1) {
+                        Text("Tasks")
+                            .font(.headline)
+                        Text("Calendar - \(selectedCalendarName)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
-                    .pickerStyle(.segmented)
-                    .frame(width: 300)
-                    .padding(.horizontal, 6)
                 }
                 ToolbarItem(placement: .topBarLeading) {
                     Menu {
@@ -2983,9 +3021,26 @@ struct TasksListSheet: View {
                     }
                 }
             }
+            .onAppear {
+                refreshSelectedCalendarName()
+            }
+            .onChange(of: preferredTaskCalendarId) { _, _ in
+                refreshSelectedCalendarName()
+            }
+            .safeAreaInset(edge: .top) {
+                Picker("Filter", selection: $selectedFilter) {
+                    ForEach(TaskFilter.allCases, id: \.self) { filter in
+                        Text(filter.rawValue).tag(filter)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                .background(.regularMaterial)
+            }
             .safeAreaInset(edge: .bottom) {
                 VStack {
-                    Text("Total Tasks: \(tasks.count)")
+                    Text("Total Tasks: \(tasks.filter { !$0.isStaleOverdue() }.count)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -3006,6 +3061,20 @@ struct TasksListSheet: View {
             }
         }
     }
+
+    private func refreshSelectedCalendarName() {
+        if preferredTaskCalendarId.isEmpty {
+            selectedCalendarName = "Default"
+            return
+        }
+
+        let calendars = eventStore.calendars(for: .event)
+        if let matched = calendars.first(where: { $0.calendarIdentifier == preferredTaskCalendarId }) {
+            selectedCalendarName = matched.title
+        } else {
+            selectedCalendarName = "Default"
+        }
+    }
     
     private func priorityColor(_ value: Int) -> Color {
         switch value {
@@ -3015,8 +3084,11 @@ struct TasksListSheet: View {
         }
     }
 
-    private func statusColor(_ status: TaskItem.TaskStatus) -> Color {
-        switch status {
+    private func statusColor(for task: TaskItem) -> Color {
+        if task.isOverdue() {
+            return .orange
+        }
+        switch task.status {
         case .open: return .secondary
         case .completed: return .green
         case .canceled: return .red
@@ -3024,7 +3096,7 @@ struct TasksListSheet: View {
     }
 
     private func taskRowBackgroundColor(_ task: TaskItem) -> Color {
-        if task.status == .open && !task.isDone && task.dueDate < Date() {
+        if task.isOverdue() {
             return Color.red.opacity(0.18)
         }
         switch task.status {
@@ -4549,7 +4621,7 @@ extension ContentView {
         }.count
 
         let overdue = appTasks.filter {
-            !$0.isDone && $0.status == .open && $0.dueDate < now
+            $0.isOverdue(now: now)
         }.count
 
         let upcoming = appTasks.filter {
@@ -4895,7 +4967,7 @@ extension ContentView {
             event = EKEvent(eventStore: eventStore)
         }
 
-        event.title = task.title
+        event.title = calendarEventTitle(for: task)
         guard let writableCalendar = writableEventCalendar() else {
             await MainActor.run { showCalendarAlert = true }
             return
@@ -4907,7 +4979,8 @@ extension ContentView {
         event.startDate = start
         event.endDate = end
         let marker = "PA_TASK_ID:\(task.id.uuidString)"
-        event.notes = "\(marker)\nDue: \(task.dueDate.formatted(date: .abbreviated, time: .omitted)) • Priority: \(task.priorityLabel)"
+        let statusFlag = "PA_STATUS:\(task.status.rawValue)"
+        event.notes = "\(marker)\n\(statusFlag)\nStatus: \(task.statusLabel)\nDue: \(task.dueDate.formatted(date: .abbreviated, time: .omitted)) • Priority: \(task.priorityLabel)"
 
         do {
             try eventStore.save(event, span: .thisEvent)
@@ -4925,15 +4998,253 @@ extension ContentView {
     }
 
     private func writableEventCalendar() -> EKCalendar? {
+        let candidates = writableEventCalendars()
+
+        if !preferredTaskCalendarId.isEmpty,
+           let preferred = candidates.first(where: { $0.calendarIdentifier == preferredTaskCalendarId }) {
+            return preferred
+        }
+
         if let defaultCalendar = eventStore.defaultCalendarForNewEvents,
            defaultCalendar.allowsContentModifications {
             return defaultCalendar
         }
+        return candidates.first
+    }
 
-        let candidates = eventStore.calendars(for: .event).filter {
+    private func writableEventCalendars() -> [EKCalendar] {
+        eventStore.calendars(for: .event).filter {
             $0.allowsContentModifications && $0.type != .subscription && $0.type != .birthday
         }
-        return candidates.first
+    }
+
+    private func statusFlagDateString(_ date: Date) -> String {
+        let components = Calendar.current.dateComponents([.year, .month, .day], from: date)
+        let year = components.year ?? 1970
+        let month = components.month ?? 1
+        let day = components.day ?? 1
+        return String(format: "%04d-%02d-%02d", year, month, day)
+    }
+
+    private func calendarSeriesIdentifier(from externalId: String) -> String {
+        externalId.components(separatedBy: "/RID=").first ?? externalId
+    }
+
+    private func calendarOccurrenceStatusKey(externalId: String, date: Date) -> String {
+        "\(calendarSeriesIdentifier(from: externalId))|\(statusFlagDateString(date))"
+    }
+
+    private func loadPersistedCalendarOccurrenceStatuses() {
+        guard let data = UserDefaults.standard.data(forKey: calendarOccurrenceStatusesStoreKey),
+              let raw = try? JSONDecoder().decode([String: String].self, from: data) else {
+            return
+        }
+
+        var decoded: [String: TaskItem.TaskStatus] = [:]
+        for (key, value) in raw {
+            if let status = TaskItem.TaskStatus(rawValue: value) {
+                decoded[key] = status
+            }
+        }
+        recentCalendarOccurrenceStatuses = decoded
+    }
+
+    private func persistCalendarOccurrenceStatuses() {
+        let raw = Dictionary(uniqueKeysWithValues: recentCalendarOccurrenceStatuses.map { ($0.key, $0.value.rawValue) })
+        guard let data = try? JSONEncoder().encode(raw) else { return }
+        UserDefaults.standard.set(data, forKey: calendarOccurrenceStatusesStoreKey)
+    }
+
+    private func parseOccurrenceStatusLine(_ line: String) -> (timestamp: Int, status: TaskItem.TaskStatus)? {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("PA_STATUS_AT:") else { return nil }
+        let payload = String(trimmed.dropFirst("PA_STATUS_AT:".count))
+        guard let lastColonIndex = payload.lastIndex(of: ":") else { return nil }
+        let keyPart = String(payload[..<lastColonIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let statusPart = String(payload[payload.index(after: lastColonIndex)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let status = TaskItem.TaskStatus(rawValue: statusPart) else {
+            return nil
+        }
+
+        let ts: Int
+        if let parsedInt = Int(keyPart) {
+            ts = parsedInt
+        } else {
+            let iso = ISO8601DateFormatter()
+            guard let date = iso.date(from: keyPart) else { return nil }
+            ts = Int(date.timeIntervalSince1970.rounded())
+        }
+        return (timestamp: ts, status: status)
+    }
+
+    private func parseOccurrenceDayStatusLine(_ line: String) -> (dayKey: String, status: TaskItem.TaskStatus)? {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("PA_STATUS_ON:") else { return nil }
+        let payload = String(trimmed.dropFirst("PA_STATUS_ON:".count))
+        let parts = payload.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2,
+              let status = TaskItem.TaskStatus(rawValue: String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            return nil
+        }
+        return (dayKey: String(parts[0]).trimmingCharacters(in: .whitespacesAndNewlines), status: status)
+    }
+
+    private func parseTaskStatusFlag(from notes: String?, occurrenceStart: Date? = nil, occurrenceOnly: Bool = false) -> TaskItem.TaskStatus? {
+        guard let notes else { return nil }
+
+        if let occurrenceStart {
+            let targetDayKey = statusFlagDateString(occurrenceStart)
+            let calendar = Calendar.current
+            for line in notes.split(separator: "\n") {
+                if let parsed = parseOccurrenceDayStatusLine(String(line)), parsed.dayKey == targetDayKey {
+                    debugCalendarStatus("parseTaskStatusFlag matched PA_STATUS_ON day=\(targetDayKey) status=\(parsed.status.rawValue)")
+                    return parsed.status
+                }
+            }
+
+            let targetTs = Int(occurrenceStart.timeIntervalSince1970.rounded())
+            for line in notes.split(separator: "\n") {
+                if let parsed = parseOccurrenceStatusLine(String(line)) {
+                    if abs(parsed.timestamp - targetTs) <= 120 {
+                        debugCalendarStatus("parseTaskStatusFlag matched legacy PA_STATUS_AT exact ts=\(parsed.timestamp) targetTs=\(targetTs) status=\(parsed.status.rawValue)")
+                        return parsed.status
+                    }
+
+                    let parsedDate = Date(timeIntervalSince1970: TimeInterval(parsed.timestamp))
+                    if calendar.isDate(parsedDate, inSameDayAs: occurrenceStart) {
+                        debugCalendarStatus("parseTaskStatusFlag matched legacy PA_STATUS_AT same-day parsed=\(parsedDate.formatted(date: .abbreviated, time: .standard)) target=\(occurrenceStart.formatted(date: .abbreviated, time: .standard)) status=\(parsed.status.rawValue)")
+                        return parsed.status
+                    }
+                }
+            }
+
+            if occurrenceOnly {
+                debugCalendarStatus("parseTaskStatusFlag no occurrence match for day=\(targetDayKey); occurrenceOnly=true")
+                return nil
+            }
+        }
+
+        for line in notes.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("PA_STATUS:") else { continue }
+            let raw = String(trimmed.dropFirst("PA_STATUS:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            debugCalendarStatus("parseTaskStatusFlag fallback PA_STATUS=\(raw)")
+            return TaskItem.TaskStatus(rawValue: raw)
+        }
+        return nil
+    }
+
+    private func parseTaskIdentifierFlag(from notes: String?) -> UUID? {
+        guard let notes else { return nil }
+        for line in notes.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("PA_TASK_ID:") else { continue }
+            let raw = String(trimmed.dropFirst("PA_TASK_ID:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            return UUID(uuidString: raw)
+        }
+        return nil
+    }
+
+    private func upsertStatusFlag(in notes: String?, status: TaskItem.TaskStatus, occurrenceStart: Date? = nil) -> String {
+        let existingLines = (notes ?? "").split(separator: "\n").map { String($0) }
+        if let occurrenceStart {
+            let occurrenceKey = statusFlagDateString(occurrenceStart)
+            let prefix = "PA_STATUS_ON:\(occurrenceKey):"
+            let filteredLines = existingLines.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix(prefix) }
+            let statusLine = "PA_STATUS_ON:\(occurrenceKey):\(status.rawValue)"
+            if filteredLines.isEmpty {
+                return statusLine
+            }
+            return ([statusLine] + filteredLines).joined(separator: "\n")
+        }
+        let filteredLines = existingLines.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("PA_STATUS:") }
+        let statusLine = "PA_STATUS:\(status.rawValue)"
+        if filteredLines.isEmpty {
+            return statusLine
+        }
+        return ([statusLine] + filteredLines).joined(separator: "\n")
+    }
+
+    private func updateExistingCalendarEventStatusIfNeeded(for task: TaskItem) async {
+        guard task.type == .calendar,
+              let externalId = task.externalId,
+              !externalId.isEmpty else { return }
+
+        if #available(iOS 17, *) {
+            let status = EKEventStore.authorizationStatus(for: .event)
+            guard status == .fullAccess || status == .writeOnly else { return }
+        } else {
+            let status = EKEventStore.authorizationStatus(for: .event)
+            guard status == .authorized else { return }
+        }
+
+        guard let event = eventStore.event(withIdentifier: externalId) else { return }
+        debugCalendarStatus("save-start id=\(externalId) title=\(task.title) start=\(task.startDate.formatted(date: .abbreviated, time: .standard)) status=\(task.status.rawValue)")
+        event.notes = upsertStatusFlag(in: event.notes, status: task.status, occurrenceStart: task.startDate)
+        debugCalendarStatus("save-notes id=\(externalId) notes=\((event.notes ?? "<nil>").replacingOccurrences(of: "\n", with: " | "))")
+        do {
+            try eventStore.save(event, span: .thisEvent)
+        } catch {
+            debugCalendarStatus("save-failed id=\(externalId) err=\(error.localizedDescription)")
+            return
+        }
+        debugCalendarStatus("save-done id=\(externalId)")
+
+        await MainActor.run {
+            let key = calendarOccurrenceStatusKey(externalId: externalId, date: task.startDate)
+            if task.status == .open {
+                recentCalendarOccurrenceStatuses.removeValue(forKey: key)
+            } else {
+                recentCalendarOccurrenceStatuses[key] = task.status
+            }
+            persistCalendarOccurrenceStatuses()
+        }
+
+        await MainActor.run {
+            for index in tasks.indices {
+                guard tasks[index].type == .calendar,
+                      tasks[index].externalId == task.externalId,
+                      abs(tasks[index].startDate.timeIntervalSince(task.startDate)) <= 120 else {
+                    continue
+                }
+                tasks[index].status = task.status
+                tasks[index].isDone = task.status != .open
+                debugCalendarStatus("local-update id=\(tasks[index].externalId ?? "") start=\(tasks[index].startDate.formatted(date: .abbreviated, time: .standard)) status=\(tasks[index].status.rawValue)")
+            }
+        }
+
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        await refreshSystemTasks()
+    }
+
+    private func reconcileAppTaskStatusesFromCalendar(_ items: [TaskItem]) -> [TaskItem] {
+        if #available(iOS 17, *) {
+            let status = EKEventStore.authorizationStatus(for: .event)
+            guard status == .fullAccess else { return items }
+        } else {
+            let status = EKEventStore.authorizationStatus(for: .event)
+            guard status == .authorized else { return items }
+        }
+
+        return items.map { item in
+            guard item.type == .app,
+                  let externalId = item.externalId,
+                  let event = eventStore.event(withIdentifier: externalId),
+                  let mappedTaskId = parseTaskIdentifierFlag(from: event.notes),
+                  mappedTaskId == item.id,
+                                    let mappedStatus = parseTaskStatusFlag(from: event.notes, occurrenceStart: item.startDate) else {
+                return item
+            }
+
+            if item.status != .open && mappedStatus == .open {
+                return item
+            }
+
+            var updated = item
+            updated.status = mappedStatus
+            updated.isDone = mappedStatus != .open
+            return updated
+        }
     }
 
     private func requestRemindersAccessIfNeeded() async {
@@ -4951,6 +5262,10 @@ extension ContentView {
     }
 
     private func fetchSystemItems() -> [TaskItem] {
+        if recentCalendarOccurrenceStatuses.isEmpty {
+            loadPersistedCalendarOccurrenceStatuses()
+        }
+
         if #available(iOS 17, *) {
             let status = EKEventStore.authorizationStatus(for: .event)
             // Write-only permission cannot read events for sync.
@@ -4986,10 +5301,26 @@ extension ContentView {
             if let notes = event.notes, notes.contains("PA_TASK_ID:") {
                 continue
             }
+            let isRecurring = (event.recurrenceRules?.isEmpty == false)
+            let hasOccurrenceScopedStatus = (event.notes?.contains("PA_STATUS_ON:") == true) || (event.notes?.contains("PA_STATUS_AT:") == true)
+            var mappedStatus = parseTaskStatusFlag(
+                from: event.notes,
+                occurrenceStart: event.startDate,
+                occurrenceOnly: isRecurring || hasOccurrenceScopedStatus
+            ) ?? .open
+            let overrideKey = calendarOccurrenceStatusKey(externalId: event.eventIdentifier ?? "", date: event.startDate)
+            if let recentOverride = recentCalendarOccurrenceStatuses[overrideKey] {
+                mappedStatus = recentOverride
+                debugCalendarStatus("fetch-override id=\(event.eventIdentifier ?? "<nil>") key=\(overrideKey) status=\(recentOverride.rawValue)")
+            }
+            if mappedStatus != .open || hasOccurrenceScopedStatus {
+                debugCalendarStatus("fetch-map id=\(event.eventIdentifier ?? "<nil>") recurring=\(isRecurring) start=\(event.startDate.formatted(date: .abbreviated, time: .standard)) status=\(mappedStatus.rawValue) occScoped=\(hasOccurrenceScopedStatus) notes=\((event.notes ?? "<nil>").replacingOccurrences(of: "\n", with: " | "))")
+            }
             fetchedItems.append(TaskItem(
                 id: UUID(), // We generate a transient ID
                 title: event.title ?? "Event",
-                isDone: false, // Events are not checkable in valid sense, but assume false
+                isDone: mappedStatus != .open,
+                status: mappedStatus,
                 tag: event.calendar.title,
                 startDate: event.startDate,
                 dueDate: event.endDate,
@@ -5000,6 +5331,12 @@ extension ContentView {
         }
         
         return fetchedItems
+    }
+
+    private func debugCalendarStatus(_ message: String) {
+        #if DEBUG
+        print("[CalendarStatusDebug] \(message)")
+        #endif
     }
 
     private func fetchReminderItems() async -> [TaskItem] {
@@ -5302,7 +5639,7 @@ extension ContentView {
         // we will append them transiently. 
         // CRITICAL: We must filter out previous system items before appending new ones to avoid duplicates if we save this array back.
         
-        let existingAppTasks = baseTasks.filter { $0.type == .app }
+        let existingAppTasks = reconcileAppTaskStatusesFromCalendar(baseTasks.filter { $0.type == .app })
         let systemItems = fetchSystemItems()
         tasks = existingAppTasks + systemItems
         
@@ -5317,8 +5654,11 @@ extension ContentView {
         }
     }
 
-    private func statusColor(_ status: TaskItem.TaskStatus) -> Color {
-        switch status {
+    private func statusColor(for task: TaskItem) -> Color {
+        if task.isOverdue() {
+            return .orange
+        }
+        switch task.status {
         case .open: return .secondary
         case .completed: return .green
         case .canceled: return .red
@@ -5326,7 +5666,7 @@ extension ContentView {
     }
 
     private func taskBackgroundColor(_ task: TaskItem) -> Color {
-        if task.status == .open && !task.isDone && task.dueDate < Date() {
+        if task.isOverdue() {
             return Color.red.opacity(0.18)
         }
         switch task.status {
@@ -5342,6 +5682,30 @@ extension ContentView {
     private func toggleTask(_ task: TaskItem) {
         guard let index = tasks.firstIndex(of: task) else { return }
         tasks[index].toggleDoneState()
+        syncTaskStatusToCalendarIfNeeded(tasks[index])
+    }
+
+    private func syncTaskStatusToCalendarIfNeeded(_ task: TaskItem) {
+        switch task.type {
+        case .app:
+            Task { await addOrUpdateCalendarEvent(for: task) }
+        case .calendar:
+            Task { await updateExistingCalendarEventStatusIfNeeded(for: task) }
+        default:
+            break
+        }
+    }
+
+    private func calendarEventTitle(for task: TaskItem) -> String {
+        guard task.type == .app else { return task.title }
+        switch task.status {
+        case .open:
+            return task.title
+        case .completed:
+            return "✅ \(task.title)"
+        case .canceled:
+            return "❌ \(task.title)"
+        }
     }
 
     private var agentAccentColor: Color {

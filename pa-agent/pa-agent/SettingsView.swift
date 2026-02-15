@@ -22,6 +22,7 @@ struct SettingsView: View {
     @AppStorage("AGENT_VOICE_ENABLED") private var agentVoiceEnabled: Bool = true
     @AppStorage("AGENT_VOICE_IDENTIFIER") private var agentVoiceIdentifier: String = ""
     @AppStorage("PERMISSION_SETUP_SHOWN") private var permissionSetupShown: Bool = false
+    @AppStorage("PREFERRED_TASK_CALENDAR_ID") private var preferredTaskCalendarId: String = ""
     
     @State private var localKey: String = ""
     @State private var localModel: String = "gpt-5.2"
@@ -43,6 +44,7 @@ struct SettingsView: View {
     @State private var speechPermissionText: String = "Unknown"
     @State private var calendarPermissionText: String = "Unknown"
     @State private var remindersPermissionText: String = "Unknown"
+    @State private var taskCalendarChoices: [EKCalendar] = []
     @State private var isEditing: Bool = false
     @State private var previewSynthesizer = AVSpeechSynthesizer()
     @StateObject private var subscriptionManager = SubscriptionManager.shared
@@ -324,6 +326,7 @@ struct SettingsView: View {
                         Task {
                             await requestCalendarPermission()
                             refreshPermissionStatuses()
+                            refreshTaskCalendarChoices()
                         }
                     }
 
@@ -350,6 +353,22 @@ struct SettingsView: View {
                         Text(permissionStatusText)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                    }
+                }
+
+                Section("Task Calendar") {
+                    if taskCalendarChoices.isEmpty {
+                        Text("No writable calendars available. Grant Calendar access first.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Picker("Default Task Calendar", selection: $preferredTaskCalendarId) {
+                            Text("Default Calendar").tag("")
+                            ForEach(taskCalendarChoices, id: \.calendarIdentifier) { calendar in
+                                Text(calendar.title).tag(calendar.calendarIdentifier)
+                            }
+                        }
+                        .pickerStyle(.menu)
                     }
                 }
 
@@ -458,6 +477,7 @@ struct SettingsView: View {
                 localAgentVoiceEnabled = agentVoiceEnabled
                 localAgentVoiceIdentifier = agentVoiceIdentifier
                 refreshPermissionStatuses()
+                refreshTaskCalendarChoices()
 
                 if isProductionBuild {
                     Task {
@@ -570,6 +590,33 @@ struct SettingsView: View {
 
         calendarPermissionText = calendarStatusLabel(EKEventStore.authorizationStatus(for: .event))
         remindersPermissionText = reminderStatusLabel(EKEventStore.authorizationStatus(for: .reminder))
+    }
+
+    private func refreshTaskCalendarChoices() {
+        let status = EKEventStore.authorizationStatus(for: .event)
+        let canReadCalendars: Bool
+
+        if #available(iOS 17, *) {
+            canReadCalendars = status == .fullAccess || status == .writeOnly
+        } else {
+            canReadCalendars = status == .authorized
+        }
+
+        guard canReadCalendars else {
+            taskCalendarChoices = []
+            preferredTaskCalendarId = ""
+            return
+        }
+
+        let calendars = eventStore.calendars(for: .event).filter {
+            $0.allowsContentModifications && $0.type != .subscription && $0.type != .birthday
+        }
+
+        taskCalendarChoices = calendars
+        if !preferredTaskCalendarId.isEmpty,
+           !calendars.contains(where: { $0.calendarIdentifier == preferredTaskCalendarId }) {
+            preferredTaskCalendarId = ""
+        }
     }
 
     private func requestNotificationPermission() async -> Bool {
