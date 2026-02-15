@@ -228,6 +228,28 @@ struct TaskItem: Identifiable, Hashable, Codable {
         }
     }
 
+    var categoryLabel: String {
+        let lower = tag.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if lower.contains("work") || lower.contains("office") || lower.contains("client") || lower.contains("project") {
+            return "Work"
+        }
+        if lower.contains("personal") || lower.contains("home") || lower.contains("family") {
+            return "Personal"
+        }
+        return "Uncategorized"
+    }
+
+    var categoryIconName: String {
+        switch categoryLabel {
+        case "Work":
+            return "briefcase.fill"
+        case "Personal":
+            return "person.fill"
+        default:
+            return "questionmark.circle.fill"
+        }
+    }
+
     mutating func markCompleted() {
         isDone = true
         status = .completed
@@ -583,6 +605,101 @@ final class IntentService {
                 errorReason: "network/error",
                 isEstimated: true
             )
+            return nil
+        }
+    }
+
+    func classifyTaskTag(
+        text: String,
+        title: String?,
+        apiKey: String?,
+        model: String?,
+        useAzure: Bool,
+        azureEndpoint: String?,
+        agentName: String = "Nexa"
+    ) async -> String? {
+        guard let rawKey = apiKey, !rawKey.isEmpty else { return nil }
+        let apiKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let chosenModel = model?.isEmpty == false ? model! : "gpt-4o"
+        let endpointURL: URL
+
+        if useAzure {
+            guard var azureString = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+            if let range = azureString.range(of: "/deployments/[^/]+/", options: .regularExpression) {
+                azureString.replaceSubrange(range, with: "/deployments/\(chosenModel)/")
+            }
+            guard let scriptUrl = URL(string: azureString) else { return nil }
+            endpointURL = scriptUrl
+        } else {
+            endpointURL = URL(string: "https://api.openai.com/v1/chat/completions")!
+        }
+
+        var request = URLRequest(url: endpointURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        if useAzure {
+            request.setValue(apiKey, forHTTPHeaderField: "api-key")
+        } else {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+
+        let systemPrompt = """
+        You are \(agentName). Classify a task as one of:
+        - Work
+        - Personal
+        Return JSON only: {"tag":"Work"} or {"tag":"Personal"}
+        If uncertain, default to Personal.
+        """
+
+        let userPayload = "Task title: \(title ?? "")\nUser request: \(text)"
+        let body: [String: Any] = [
+            "model": chosenModel,
+            "temperature": 0,
+            "response_format": ["type": "json_object"],
+            "messages": [
+                ["role": "system", "content": systemPrompt],
+                ["role": "user", "content": userPayload]
+            ]
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        let requestText = "task_tag_classify title=\(title ?? "") text=\(text)"
+        let provider = useAzure ? "azure-openai" : "openai"
+
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+                logTokenUsage(feature: "task_tag_classify", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: false, errorReason: "http")
+                return nil
+            }
+
+            guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let choices = root["choices"] as? [[String: Any]],
+                  let first = choices.first,
+                  let message = first["message"] as? [String: Any],
+                  let rawContent = message["content"] as? String
+            else {
+                logTokenUsage(feature: "task_tag_classify", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: false, errorReason: "parse")
+                return nil
+            }
+
+            let content = stripCodeFences(rawContent)
+            guard let contentData = content.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: contentData) as? [String: Any],
+                  let tagRaw = json["tag"] as? String
+            else {
+                logTokenUsage(feature: "task_tag_classify", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: false, errorReason: "missing-tag")
+                return nil
+            }
+
+            logTokenUsage(feature: "task_tag_classify", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: true)
+            let lower = tagRaw.lowercased()
+            if lower.contains("work") { return "Work" }
+            if lower.contains("personal") { return "Personal" }
+            return nil
+        } catch {
+            logTokenUsage(feature: "task_tag_classify", provider: provider, model: chosenModel, requestText: requestText, responseData: nil, success: false, errorReason: "network/error")
             return nil
         }
     }
@@ -2634,6 +2751,14 @@ struct ContentView: View {
                 .buttonStyle(.bordered)
             }
 
+            HStack(spacing: 12) {
+                Label("Work", systemImage: "briefcase.fill")
+                Label("Personal", systemImage: "person.fill")
+                Label("Other", systemImage: "questionmark.circle.fill")
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
                     ForEach(tasks) { task in
@@ -2651,9 +2776,6 @@ struct ContentView: View {
     private func taskCard(_ task: TaskItem) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(task.tag.uppercased())
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
                 Text(task.statusLabel)
                     .font(.caption2.weight(.semibold))
                     .padding(.horizontal, 6)
@@ -2682,6 +2804,10 @@ struct ContentView: View {
                 Label(task.priorityLabel, systemImage: "flag.fill")
                     .font(.caption)
                     .foregroundStyle(priorityColor(task.priority))
+                Image(systemName: task.categoryIconName)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(task.categoryLabel)
                 HStack(spacing: 4) {
                     Image(systemName: "calendar")
                     Text(task.dueDate, style: .date)
@@ -2697,7 +2823,7 @@ struct ContentView: View {
         .frame(maxWidth: 220, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(.background)
+                .fill(taskBackgroundColor(task))
                 .shadow(color: Color.black.opacity(0.05), radius: 8, x: 0, y: 4)
         )
         .contentShape(Rectangle())
@@ -2779,12 +2905,18 @@ struct TasksListSheet: View {
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Text(task.priorityLabel)
-                            .font(.caption2)
-                            .padding(4)
-                            .background(priorityColor(task.priority).opacity(0.2))
-                            .foregroundStyle(priorityColor(task.priority))
-                            .cornerRadius(4)
+                        HStack(spacing: 6) {
+                            Text(task.priorityLabel)
+                                .font(.caption2)
+                                .padding(4)
+                                .background(priorityColor(task.priority).opacity(0.2))
+                                .foregroundStyle(priorityColor(task.priority))
+                                .cornerRadius(4)
+                            Image(systemName: task.categoryIconName)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .accessibilityLabel(task.categoryLabel)
+                        }
 
                         Button {
                             selectedTaskForDetail = task
@@ -2795,6 +2927,15 @@ struct TasksListSheet: View {
                         .buttonStyle(.plain)
                     }
                     .swipeActions(edge: .trailing) {
+                        if task.status != .canceled {
+                            Button("Cancel") {
+                                if let index = tasks.firstIndex(where: { $0.id == task.id }) {
+                                    withAnimation { tasks[index].markCanceled() }
+                                }
+                            }
+                            .tint(.yellow)
+                        }
+
                         Button(role: .destructive) {
                             if let index = tasks.firstIndex(where: { $0.id == task.id }) {
                                 tasks.remove(at: index)
@@ -2812,7 +2953,7 @@ struct TasksListSheet: View {
                         .tint(.green)
                     }
                     .listRowBackground(
-                        (task.startDate < Date() && !task.isDone) ? Color.red.opacity(0.15) : nil
+                        taskRowBackgroundColor(task)
                     )
                     .contentShape(Rectangle())
                     .onTapGesture {
@@ -2829,10 +2970,8 @@ struct TasksListSheet: View {
                         }
                     }
                     .pickerStyle(.segmented)
-                    .frame(width: 200)
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Close") { dismiss() }
+                    .frame(width: 300)
+                    .padding(.horizontal, 6)
                 }
                 ToolbarItem(placement: .topBarLeading) {
                     Menu {
@@ -2849,11 +2988,6 @@ struct TasksListSheet: View {
                     Text("Total Tasks: \(tasks.count)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Button("Reset All Tasks") {
-                        tasks.removeAll()
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.red)
                 }
                 .padding()
                 .background(.regularMaterial)
@@ -2888,6 +3022,20 @@ struct TasksListSheet: View {
         case .canceled: return .red
         }
     }
+
+    private func taskRowBackgroundColor(_ task: TaskItem) -> Color {
+        if task.status == .open && !task.isDone && task.dueDate < Date() {
+            return Color.red.opacity(0.18)
+        }
+        switch task.status {
+        case .completed:
+            return Color.green.opacity(0.18)
+        case .canceled:
+            return Color.yellow.opacity(0.22)
+        case .open:
+            return Color.white
+        }
+    }
 }
 
 struct TaskDetailsSheet: View {
@@ -2901,6 +3049,11 @@ struct TaskDetailsSheet: View {
                     LabeledContent("Title", value: task.title)
                     LabeledContent("Status", value: task.statusLabel)
                     LabeledContent("Priority", value: task.priorityLabel)
+                    LabeledContent("Task Type") {
+                        Image(systemName: task.categoryIconName)
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel(task.categoryLabel)
+                    }
                     LabeledContent("Tag", value: task.tag)
                 }
 
@@ -4120,6 +4273,11 @@ extension ContentView {
             // Scheduled reminder with call intent: verify contact before confirmation sheet
             let draftTitle = (draft.title ?? text).trimmingCharacters(in: .whitespacesAndNewlines)
             let draftTitleLower = draftTitle.lowercased()
+
+            if draft.action == "task" {
+                draft.tag = await inferTaskTag(from: text, modelTag: draft.tag, title: draft.title)
+            }
+
             if draft.action == "task", draftTitleLower.hasPrefix("call ") || draftTitleLower.contains(" call ") {
                 let rawName = (draft.recipient?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
                     ? draft.recipient!.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -4330,6 +4488,56 @@ extension ContentView {
             lower.contains("reminder")
 
         return hasStatusIntent && (hasTaskContext || lower.contains("overdue") || lower.contains("upcoming") || lower.contains("completed"))
+    }
+
+    private func normalizedTaskTag(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let lower = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if lower.isEmpty { return nil }
+        if lower.contains("work") || lower.contains("office") || lower.contains("client") || lower.contains("meeting") || lower.contains("project") {
+            return "Work"
+        }
+        if lower.contains("personal") || lower.contains("home") || lower.contains("family") || lower.contains("health") || lower.contains("friend") {
+            return "Personal"
+        }
+        return nil
+    }
+
+    private func keywordTaskTag(from text: String) -> String? {
+        let lower = text.lowercased()
+        let workHints = ["meeting", "client", "project", "deadline", "office", "team", "manager", "presentation", "work"]
+        let personalHints = ["family", "doctor", "gym", "home", "birthday", "friend", "personal", "shopping", "booking"]
+
+        if workHints.contains(where: { lower.contains($0) }) { return "Work" }
+        if personalHints.contains(where: { lower.contains($0) }) { return "Personal" }
+        return nil
+    }
+
+    private func inferTaskTag(from userText: String, modelTag: String?, title: String?) async -> String {
+        if let normalized = normalizedTaskTag(modelTag) {
+            return normalized
+        }
+
+        if let byKeyword = keywordTaskTag(from: "\(title ?? "") \n \(userText)") {
+            return byKeyword
+        }
+
+        if isAIFeatureEnabled {
+            let activeKey = storedApiKey.isEmpty ? ProcessInfo.processInfo.environment["OPENAI_API_KEY"] : storedApiKey
+            if let aiTag = await intentService.classifyTaskTag(
+                text: userText,
+                title: title,
+                apiKey: activeKey,
+                model: storedModel,
+                useAzure: useAzure,
+                azureEndpoint: azureEndpoint,
+                agentName: agentName
+            ) {
+                return aiTag
+            }
+        }
+
+        return "Personal"
     }
 
     private func currentTaskStatusSnapshot() -> TaskStatusSnapshot {
@@ -5114,6 +5322,20 @@ extension ContentView {
         case .open: return .secondary
         case .completed: return .green
         case .canceled: return .red
+        }
+    }
+
+    private func taskBackgroundColor(_ task: TaskItem) -> Color {
+        if task.status == .open && !task.isDone && task.dueDate < Date() {
+            return Color.red.opacity(0.18)
+        }
+        switch task.status {
+        case .completed:
+            return Color.green.opacity(0.18)
+        case .canceled:
+            return Color.yellow.opacity(0.22)
+        case .open:
+            return Color.white
         }
     }
 
