@@ -13,6 +13,9 @@ import AVFoundation
 import EventKit
 import NaturalLanguage
 import Contacts
+#if canImport(Charts)
+import Charts
+#endif
 #if canImport(MessageUI)
 import MessageUI
 #endif
@@ -1469,6 +1472,7 @@ struct ContentView: View {
     @State private var lastIntentReason: String = "not-run"
     @State private var showKeySheet = false
     @State private var showSettingsSheet = false
+    @State private var showAIUsageSheet = false
     @State private var showTasksList = false
     @State private var showMessageComposer = false
     @State private var showEmailComposer = false
@@ -1570,8 +1574,28 @@ struct ContentView: View {
             .sheet(isPresented: $showSettingsSheet) {
                 SettingsView(historyManager: historyManager)
             }
+            .sheet(isPresented: $showAIUsageSheet) {
+                AIUsageView()
+            }
             .sheet(isPresented: $showTasksList) {
-                TasksListSheet(tasks: $tasks)
+                TasksListSheet(
+                    tasks: $tasks,
+                    onRefresh: {
+                        Task { await refreshSystemTasks() }
+                    },
+                    onRequestCalendarAccess: {
+                        Task {
+                            await requestCalendarAccessIfNeeded()
+                            await refreshSystemTasks()
+                        }
+                    },
+                    onRequestRemindersAccess: {
+                        Task {
+                            await requestRemindersAccessIfNeeded()
+                            await refreshSystemTasks()
+                        }
+                    }
+                )
             }
             .sheet(item: $selectedTaskForDetail) { task in
                 TaskDetailsSheet(task: task)
@@ -1945,10 +1969,16 @@ struct ContentView: View {
                 }
             }
             .padding(.trailing, 8)
+
+            Button(action: { showTasksList = true }) {
+                Image(systemName: "checklist")
+                    .font(.title3)
+            }
+            .padding(.trailing, 8)
             
             Menu {
-                Button(action: { showTasksList = true }) {
-                    Label("Tasks", systemImage: "checklist")
+                Button(action: { showAIUsageSheet = true }) {
+                    Label("AI usage", systemImage: "chart.bar")
                 }
                 Button(action: { showSettingsSheet = true }) {
                     Label("Settings", systemImage: "gearshape")
@@ -2214,6 +2244,9 @@ struct ContentView: View {
 
 struct TasksListSheet: View {
     @Binding var tasks: [TaskItem]
+    var onRefresh: () -> Void = {}
+    var onRequestCalendarAccess: () -> Void = {}
+    var onRequestRemindersAccess: () -> Void = {}
     @Environment(\.dismiss) private var dismiss
     @State private var selectedFilter: TaskFilter = .all
     @State private var selectedTaskForDetail: TaskItem?
@@ -2333,6 +2366,15 @@ struct TasksListSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Close") { dismiss() }
                 }
+                ToolbarItem(placement: .topBarLeading) {
+                    Menu {
+                        Button("Sync Now") { onRefresh() }
+                        Button("Enable Calendar Access") { onRequestCalendarAccess() }
+                        Button("Enable Reminders Access") { onRequestRemindersAccess() }
+                    } label: {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                    }
+                }
             }
             .safeAreaInset(edge: .bottom) {
                 VStack {
@@ -2353,7 +2395,7 @@ struct TasksListSheet: View {
                     ContentUnavailableView(
                         "No tasks for \(selectedFilter.rawValue.lowercased())",
                         systemImage: "checklist",
-                        description: Text("Add some tasks by chatting with the agent.")
+                        description: Text("Try Sync Now from the top-left menu, or add tasks by chatting with the agent.")
                     )
                 }
             }
@@ -2433,16 +2475,16 @@ struct PermissionWelcomeView: View {
             VStack(alignment: .leading, spacing: 20) {
                 Spacer()
 
-                Image(systemName: "checkmark.shield.fill")
-                    .font(.system(size: 54))
-                    .foregroundStyle(.blue)
+                HStack(alignment: .top, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Set Up Nexa")
+                            .font(.largeTitle.bold())
 
-                Text("Set Up Nexa")
-                    .font(.largeTitle.bold())
-
-                Text("This is the first step to set up Nexa. Please grant the required permissions so Nexa can be fully functional for tasks, reminders, speech, and notifications.")
-                    .font(.body)
-                    .foregroundStyle(.secondary)
+                        Text("This is the first step to set up Nexa. Please grant the required permissions so Nexa can be fully functional for tasks, reminders, speech, and notifications.")
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                    }
+                }
 
                 Spacer()
 
@@ -2497,6 +2539,164 @@ struct PermissionSetupSheet: View {
                     }
                 }
             }
+        }
+    }
+}
+
+struct AIUsageView: View {
+    private enum ReportRange: String, CaseIterable, Identifiable {
+        case daily = "Daily"
+        case monthly = "Monthly"
+
+        var id: String { rawValue }
+    }
+
+    @StateObject private var tokenUsageManager = TokenUsageManager.shared
+    @StateObject private var subscriptionManager = SubscriptionManager.shared
+    @State private var reportRange: ReportRange = .daily
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("AI Tokens (Today)") {
+                    let today = tokenUsageManager.summary(for: Date())
+                    let month = tokenUsageManager.monthlySummary(for: Date())
+                    let limit = tokenUsageManager.monthlyTokenLimit(hasActiveSubscription: subscriptionManager.hasActiveSubscription)
+                    let remaining = tokenUsageManager.remainingTokensThisMonth(hasActiveSubscription: subscriptionManager.hasActiveSubscription)
+
+                    HStack {
+                        Text("Requests")
+                        Spacer()
+                        Text("\(today.requestCount)")
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack {
+                        Text("Prompt Tokens")
+                        Spacer()
+                        Text("\(today.promptTokens)")
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack {
+                        Text("Completion Tokens")
+                        Spacer()
+                        Text("\(today.completionTokens)")
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack {
+                        Text("Total Tokens")
+                        Spacer()
+                        Text("\(today.totalTokens)")
+                            .fontWeight(.semibold)
+                    }
+
+                    HStack {
+                        Text("Monthly Limit")
+                        Spacer()
+                        Text("\(limit)")
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack {
+                        Text("Used This Month")
+                        Spacer()
+                        Text("\(month.totalTokens)")
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack {
+                        Text("Remaining This Month")
+                        Spacer()
+                        Text("\(remaining)")
+                            .foregroundStyle(remaining > 0 ? Color.secondary : Color.orange)
+                    }
+                }
+
+                Section {
+                    Picker("View", selection: $reportRange) {
+                        ForEach(ReportRange.allCases) { range in
+                            Text(range.rawValue).tag(range)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    let dailyRows = tokenUsageManager.dailySummaries(limit: 14)
+                    let monthlyRows = tokenUsageManager.monthlySummaries(limit: 12)
+
+                    if reportRange == .daily && dailyRows.isEmpty {
+                        Text("No AI token usage yet.")
+                            .foregroundStyle(.secondary)
+                    } else if reportRange == .monthly && monthlyRows.isEmpty {
+                        Text("No AI token usage yet.")
+                            .foregroundStyle(.secondary)
+                    } else if reportRange == .daily {
+                        #if canImport(Charts)
+                        let chartRows = dailyRows.sorted { $0.dayStart < $1.dayStart }
+                        Chart(chartRows) { day in
+                            BarMark(
+                                x: .value("Day", day.dayStart, unit: .day),
+                                y: .value("Tokens", day.totalTokens)
+                            )
+                            .foregroundStyle(.blue)
+                        }
+                        .frame(height: 180)
+                        .chartYAxis {
+                            AxisMarks(position: .leading)
+                        }
+                        #endif
+
+                        ForEach(dailyRows) { day in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(day.dayStart.formatted(date: .abbreviated, time: .omitted))
+                                        .font(.subheadline)
+                                    Text("Requests: \(day.requestCount) • Success: \(day.successfulRequestCount)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text("\(day.totalTokens)")
+                                    .font(.headline)
+                            }
+                        }
+                    } else {
+                        #if canImport(Charts)
+                        let chartRows = monthlyRows.sorted { $0.monthStart < $1.monthStart }
+                        Chart(chartRows) { month in
+                            BarMark(
+                                x: .value("Month", month.monthStart, unit: .month),
+                                y: .value("Tokens", month.totalTokens)
+                            )
+                            .foregroundStyle(.blue)
+                        }
+                        .frame(height: 180)
+                        .chartYAxis {
+                            AxisMarks(position: .leading)
+                        }
+                        #endif
+
+                        ForEach(monthlyRows) { month in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(month.monthStart.formatted(.dateTime.year().month(.abbreviated)))
+                                        .font(.subheadline)
+                                    Text("Requests: \(month.requestCount) • Success: \(month.successfulRequestCount)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text("\(month.totalTokens)")
+                                    .font(.headline)
+                            }
+                        }
+                    }
+                } header: {
+                    Text(reportRange == .daily ? "Daily Usage Report" : "Monthly Usage Report")
+                }
+            }
+            .navigationTitle("AI Usage")
         }
     }
 }
@@ -3637,7 +3837,11 @@ extension ContentView {
         }
 
         event.title = task.title
-        event.calendar = eventStore.defaultCalendarForNewEvents
+        guard let writableCalendar = writableEventCalendar() else {
+            await MainActor.run { showCalendarAlert = true }
+            return
+        }
+        event.calendar = writableCalendar
 
         let start = task.startDate
         let end = max(task.dueDate, start.addingTimeInterval(30 * 60))
@@ -3655,9 +3859,22 @@ extension ContentView {
                     }
                 }
             }
+            await refreshSystemTasks()
         } catch {
             await MainActor.run { showCalendarAlert = true }
         }
+    }
+
+    private func writableEventCalendar() -> EKCalendar? {
+        if let defaultCalendar = eventStore.defaultCalendarForNewEvents,
+           defaultCalendar.allowsContentModifications {
+            return defaultCalendar
+        }
+
+        let candidates = eventStore.calendars(for: .event).filter {
+            $0.allowsContentModifications && $0.type != .subscription && $0.type != .birthday
+        }
+        return candidates.first
     }
 
     private func requestRemindersAccessIfNeeded() async {
@@ -3675,6 +3892,19 @@ extension ContentView {
     }
 
     private func fetchSystemItems() -> [TaskItem] {
+        if #available(iOS 17, *) {
+            let status = EKEventStore.authorizationStatus(for: .event)
+            // Write-only permission cannot read events for sync.
+            guard status == .fullAccess else {
+                return []
+            }
+        } else {
+            let status = EKEventStore.authorizationStatus(for: .event)
+            guard status == .authorized else {
+                return []
+            }
+        }
+
         let calendar = Calendar.current
         var fetchedItems: [TaskItem] = []
         

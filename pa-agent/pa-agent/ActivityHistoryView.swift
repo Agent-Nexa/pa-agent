@@ -9,8 +9,9 @@ struct ActivityHistoryView: View {
         List {
             Section("AI Tokens (Today)") {
                 let today = tokenUsageManager.summary(for: Date())
-                let limit = tokenUsageManager.dailyTokenLimit(hasActiveSubscription: subscriptionManager.hasActiveSubscription)
-                let remaining = tokenUsageManager.remainingTokensToday(hasActiveSubscription: subscriptionManager.hasActiveSubscription)
+                let month = tokenUsageManager.monthlySummary(for: Date())
+                let limit = tokenUsageManager.monthlyTokenLimit(hasActiveSubscription: subscriptionManager.hasActiveSubscription)
+                let remaining = tokenUsageManager.remainingTokensThisMonth(hasActiveSubscription: subscriptionManager.hasActiveSubscription)
 
                 HStack {
                     Text("Requests")
@@ -41,14 +42,21 @@ struct ActivityHistoryView: View {
                 }
 
                 HStack {
-                    Text("Daily Limit")
+                    Text("Monthly Limit")
                     Spacer()
                     Text("\(limit)")
                         .foregroundStyle(.secondary)
                 }
 
                 HStack {
-                    Text("Remaining")
+                    Text("Used This Month")
+                    Spacer()
+                    Text("\(month.totalTokens)")
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack {
+                    Text("Remaining This Month")
                     Spacer()
                     Text("\(remaining)")
                         .foregroundStyle(remaining > 0 ? Color.secondary : Color.orange)
@@ -78,6 +86,29 @@ struct ActivityHistoryView: View {
                             }
                             Spacer()
                             Text("\(day.totalTokens)")
+                                .font(.headline)
+                        }
+                    }
+                }
+            }
+
+            Section("Monthly Usage Report") {
+                let monthlyRows = tokenUsageManager.monthlySummaries(limit: 12)
+                if monthlyRows.isEmpty {
+                    Text("No AI token usage yet.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(monthlyRows) { month in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(month.monthStart.formatted(.dateTime.year().month(.abbreviated)))
+                                    .font(.subheadline)
+                                Text("Requests: \(month.requestCount) • Success: \(month.successfulRequestCount)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Text("\(month.totalTokens)")
                                 .font(.headline)
                         }
                     }

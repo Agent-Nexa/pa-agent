@@ -54,6 +54,18 @@ struct DailyTokenUsage: Identifiable {
     var id: Date { dayStart }
 }
 
+struct MonthlyTokenUsage: Identifiable {
+    let monthStart: Date
+    let promptTokens: Int
+    let completionTokens: Int
+    let totalTokens: Int
+    let requestCount: Int
+    let successfulRequestCount: Int
+    let estimatedRequestCount: Int
+
+    var id: Date { monthStart }
+}
+
 final class TokenUsageManager: ObservableObject {
     static let shared = TokenUsageManager()
 
@@ -116,12 +128,38 @@ final class TokenUsageManager: ObservableObject {
         }
     }
 
-    func dailyTokenLimit(hasActiveSubscription: Bool) -> Int {
+    func monthlySummaries(limit: Int = 12) -> [MonthlyTokenUsage] {
+        let grouped = Dictionary(grouping: entries) { monthStart(for: $0.date) }
+        let sortedMonths = grouped.keys.sorted(by: >).prefix(max(limit, 1))
+        return sortedMonths.map { month in
+            let rows = grouped[month] ?? []
+            return buildMonthlySummary(for: month, rows: rows)
+        }
+    }
+
+    func monthlySummary(for date: Date) -> MonthlyTokenUsage {
+        let month = monthStart(for: date)
+        let nextMonth = calendar.date(byAdding: .month, value: 1, to: month) ?? month
+        let rows = entries.filter { $0.date >= month && $0.date < nextMonth }
+        return buildMonthlySummary(for: month, rows: rows)
+    }
+
+    func monthlyTokenLimit(hasActiveSubscription: Bool) -> Int {
         hasActiveSubscription ? 200_000 : 20_000
     }
 
+    func remainingTokensThisMonth(hasActiveSubscription: Bool) -> Int {
+        let limit = monthlyTokenLimit(hasActiveSubscription: hasActiveSubscription)
+        let monthTotal = monthlySummary(for: Date()).totalTokens
+        return max(0, limit - monthTotal)
+    }
+
+    func dailyTokenLimit(hasActiveSubscription: Bool) -> Int {
+        monthlyTokenLimit(hasActiveSubscription: hasActiveSubscription)
+    }
+
     func remainingTokensToday(hasActiveSubscription: Bool) -> Int {
-        let limit = dailyTokenLimit(hasActiveSubscription: hasActiveSubscription)
+        let limit = monthlyTokenLimit(hasActiveSubscription: hasActiveSubscription)
         let today = summary(for: Date()).totalTokens
         return max(0, limit - today)
     }
@@ -136,6 +174,30 @@ final class TokenUsageManager: ObservableObject {
 
         return DailyTokenUsage(
             dayStart: dayStart,
+            promptTokens: prompt,
+            completionTokens: completion,
+            totalTokens: total,
+            requestCount: requestCount,
+            successfulRequestCount: successfulRequestCount,
+            estimatedRequestCount: estimatedRequestCount
+        )
+    }
+
+    private func monthStart(for date: Date) -> Date {
+        let components = calendar.dateComponents([.year, .month], from: date)
+        return calendar.date(from: components) ?? calendar.startOfDay(for: date)
+    }
+
+    private func buildMonthlySummary(for monthStart: Date, rows: [TokenUsageEntry]) -> MonthlyTokenUsage {
+        let prompt = rows.reduce(0) { $0 + $1.promptTokens }
+        let completion = rows.reduce(0) { $0 + $1.completionTokens }
+        let total = rows.reduce(0) { $0 + $1.totalTokens }
+        let requestCount = rows.count
+        let successfulRequestCount = rows.filter(\.success).count
+        let estimatedRequestCount = rows.filter(\.isEstimated).count
+
+        return MonthlyTokenUsage(
+            monthStart: monthStart,
             promptTokens: prompt,
             completionTokens: completion,
             totalTokens: total,
