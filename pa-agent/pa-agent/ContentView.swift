@@ -260,6 +260,7 @@ final class IntentService {
     }()
 
     private let session = URLSession(configuration: .default)
+    private let tokenUsageManager = TokenUsageManager.shared
 
     func infer(from text: String, apiKey: String?, model: String?, useAzure: Bool, azureEndpoint: String?, userName: String?, agentName: String = "Nexa", appContext: String? = nil) async -> IntentResult? {
         guard let rawKey = apiKey, !rawKey.isEmpty else {
@@ -383,30 +384,37 @@ final class IntentService {
             ]
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        let requestText = "\(systemPrompt)\n\nUser:\n\(text)"
+        let provider = useAzure ? "azure-openai" : "openai"
 
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
+                logTokenUsage(feature: "intent_infer", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: false, errorReason: "no http response")
                 usedOpenAI = false
                 lastReason = "no http response"
                 return fallback.infer(from: text, agentName: agentName)
             }
             guard 200..<300 ~= http.statusCode else {
+                logTokenUsage(feature: "intent_infer", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: false, errorReason: "HTTP \(http.statusCode)")
                 usedOpenAI = false
                 lastReason = "HTTP \(http.statusCode)"
                 return fallback.infer(from: text, agentName: agentName)
             }
 
             if let result = parseOpenAIResponse(data: data) {
+                logTokenUsage(feature: "intent_infer", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: true)
                 usedOpenAI = true
                 lastReason = "ok"
                 return result
             } else {
+                logTokenUsage(feature: "intent_infer", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: false, errorReason: "parse failure")
                 usedOpenAI = false
                 lastReason = "parse failure"
                 return fallback.infer(from: text, agentName: agentName)
             }
         } catch {
+            logTokenUsage(feature: "intent_infer", provider: provider, model: chosenModel, requestText: requestText, responseData: nil, success: false, errorReason: "network/error")
             usedOpenAI = false
             lastReason = "network/error"
             return fallback.infer(from: text, agentName: agentName)
@@ -451,10 +459,19 @@ final class IntentService {
             ]
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: bodyPayload)
+        let requestText = "email_polish recipient=\(recipient) sender=\(senderName) userText=\(text)"
+        let provider = useAzure ? "azure-openai" : "openai"
 
         do {
             let (data, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else { return nil }
+            guard let http = response as? HTTPURLResponse else {
+                logTokenUsage(feature: "email_polish", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: false, errorReason: "no http response")
+                return nil
+            }
+            guard 200..<300 ~= http.statusCode else {
+                logTokenUsage(feature: "email_polish", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: false, errorReason: "HTTP \(http.statusCode)")
+                return nil
+            }
             
             struct EmailResponse: Decodable {
                 let subject: String
@@ -473,11 +490,14 @@ final class IntentService {
                    let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
                    let subj = dict["subject"] as? String,
                    let b = dict["body"] as? String {
+                    logTokenUsage(feature: "email_polish", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: true)
                     return (subj, b)
                 }
             }
+            logTokenUsage(feature: "email_polish", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: false, errorReason: "parse failure")
             return nil
         } catch {
+            logTokenUsage(feature: "email_polish", provider: provider, model: chosenModel, requestText: requestText, responseData: nil, success: false, errorReason: "network/error")
             return nil
         }
     }
@@ -550,10 +570,19 @@ final class IntentService {
             ]
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: bodyPayload)
+        let requestText = "message_polish recipient=\(recipient) sender=\(senderName) userText=\(text) history=\(history)"
+        let provider = useAzure ? "azure-openai" : "openai"
 
         do {
             let (data, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else { return nil }
+            guard let http = response as? HTTPURLResponse else {
+                logTokenUsage(feature: "message_polish", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: false, errorReason: "no http response")
+                return nil
+            }
+            guard 200..<300 ~= http.statusCode else {
+                logTokenUsage(feature: "message_polish", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: false, errorReason: "HTTP \(http.statusCode)")
+                return nil
+            }
             
             if let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let choices = result["choices"] as? [[String: Any]],
@@ -565,11 +594,14 @@ final class IntentService {
                 if let jsonData = content.data(using: .utf8),
                    let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
                    let body = dict["messageBody"] as? String {
+                    logTokenUsage(feature: "message_polish", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: true)
                     return body
                 }
             }
+            logTokenUsage(feature: "message_polish", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: false, errorReason: "parse failure")
             return nil
         } catch {
+            logTokenUsage(feature: "message_polish", provider: provider, model: chosenModel, requestText: requestText, responseData: nil, success: false, errorReason: "network/error")
             return nil
         }
     }
@@ -625,10 +657,19 @@ final class IntentService {
              ]
          ]
          request.httpBody = try? JSONSerialization.data(withJSONObject: bodyPayload)
+         let requestText = "email_sufficiency recipient=\(recipient) sender=\(sName) body=\(currentBody)"
+         let provider = useAzure ? "azure-openai" : "openai"
          
          do {
              let (data, response) = try await session.data(for: request)
-             guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else { return (true, nil) }
+             guard let http = response as? HTTPURLResponse else {
+                 logTokenUsage(feature: "email_sufficiency", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: false, errorReason: "no http response")
+                 return (true, nil)
+             }
+             guard 200..<300 ~= http.statusCode else {
+                 logTokenUsage(feature: "email_sufficiency", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: false, errorReason: "HTTP \(http.statusCode)")
+                 return (true, nil)
+             }
              
              if let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                 let choices = result["choices"] as? [[String: Any]],
@@ -641,11 +682,14 @@ final class IntentService {
                     let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
                     let suff = dict["sufficient"] as? Bool {
                      let q = dict["question"] as? String
+                     logTokenUsage(feature: "email_sufficiency", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: true)
                      return (suff, q)
                  }
              }
+             logTokenUsage(feature: "email_sufficiency", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: false, errorReason: "parse failure")
              return (true, nil)
          } catch {
+             logTokenUsage(feature: "email_sufficiency", provider: provider, model: chosenModel, requestText: requestText, responseData: nil, success: false, errorReason: "network/error")
              return (true, nil)
          }
     }
@@ -702,15 +746,21 @@ final class IntentService {
             // Note: temperature 0 is fine
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        let requestText = "connection_test model=\(chosenModel)"
+        let provider = useAzure ? "azure-openai" : "openai"
 
         do {
             let (data, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse else { return "no http response" }
+            guard let http = response as? HTTPURLResponse else {
+                logTokenUsage(feature: "connection_test", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: false, errorReason: "no http response")
+                return "no http response"
+            }
             
             if !(200..<300 ~= http.statusCode) {
                 if let errText = String(data: data, encoding: .utf8) {
                     print("Connection failed body: \(errText)")
                 }
+                logTokenUsage(feature: "connection_test", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: false, errorReason: "HTTP \(http.statusCode)")
                 if http.statusCode == 429 {
                     return "Error 429 (Check Billing)"
                 }
@@ -720,7 +770,10 @@ final class IntentService {
             print("Response body: \(text)") 
             
             // 1. Try string match (relaxed)
-            if text.contains("ok") && text.contains("true") { return "ok" }
+            if text.contains("ok") && text.contains("true") {
+                logTokenUsage(feature: "connection_test", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: true)
+                return "ok"
+            }
             
             // 2. Try proper JSON parsing (more robust)
             if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -728,15 +781,113 @@ final class IntentService {
                let first = choices.first,
                let message = first["message"] as? [String: Any],
                let content = message["content"] as? String {
-                   if content.contains("ok") && content.contains("true") { return "ok" }
+                   if content.contains("ok") && content.contains("true") {
+                       logTokenUsage(feature: "connection_test", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: true)
+                       return "ok"
+                   }
             }
             
+            logTokenUsage(feature: "connection_test", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: false, errorReason: "parse fail")
             return "parse fail"
         } catch {
+            logTokenUsage(feature: "connection_test", provider: provider, model: chosenModel, requestText: requestText, responseData: nil, success: false, errorReason: "network/error")
             print("Network error: \(error)")
             return "network/error"
         }
     }
+
+    private func logTokenUsage(feature: String, provider: String, model: String, requestText: String, responseData: Data?, success: Bool, errorReason: String? = nil) {
+        if let parsed = extractTokenUsage(from: responseData) {
+            tokenUsageManager.addEntry(
+                feature: feature,
+                provider: provider,
+                model: model,
+                promptTokens: parsed.promptTokens,
+                completionTokens: parsed.completionTokens,
+                success: success,
+                errorReason: errorReason,
+                isEstimated: false
+            )
+            return
+        }
+
+        let estimatedPrompt = estimateTokens(for: requestText)
+        let estimatedCompletion = success ? estimateTokens(for: extractResponseMessage(from: responseData) ?? "") : 0
+
+        tokenUsageManager.addEntry(
+            feature: feature,
+            provider: provider,
+            model: model,
+            promptTokens: estimatedPrompt,
+            completionTokens: estimatedCompletion,
+            success: success,
+            errorReason: errorReason,
+            isEstimated: true
+        )
+    }
+
+    private func extractTokenUsage(from data: Data?) -> (promptTokens: Int, completionTokens: Int)? {
+        guard let data,
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let usage = root["usage"] as? [String: Any]
+        else { return nil }
+
+        let prompt = intValue(from: usage, keys: ["prompt_tokens", "input_tokens", "promptTokenCount", "inputTokenCount"])
+        let completion = intValue(from: usage, keys: ["completion_tokens", "output_tokens", "completionTokenCount", "outputTokenCount"])
+        let total = intValue(from: usage, keys: ["total_tokens", "totalTokenCount"])
+
+        if prompt == 0, completion == 0, total == 0 {
+            return nil
+        }
+
+        if prompt == 0, completion == 0, total > 0 {
+            return (total, 0)
+        }
+
+        if total > 0, prompt == 0 {
+            return (max(0, total - completion), completion)
+        }
+
+        if total > 0, completion == 0 {
+            return (prompt, max(0, total - prompt))
+        }
+
+        return (prompt, completion)
+    }
+
+    private func intValue(from dict: [String: Any], keys: [String]) -> Int {
+        for key in keys {
+            if let value = dict[key] as? Int {
+                return value
+            }
+            if let value = dict[key] as? Double {
+                return Int(value)
+            }
+            if let value = dict[key] as? String, let intValue = Int(value) {
+                return intValue
+            }
+        }
+        return 0
+    }
+
+    private func estimateTokens(for text: String) -> Int {
+        let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return 0 }
+        return max(1, cleaned.count / 4)
+    }
+
+    private func extractResponseMessage(from data: Data?) -> String? {
+        guard let data,
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = root["choices"] as? [[String: Any]],
+              let first = choices.first,
+              let message = first["message"] as? [String: Any],
+              let content = message["content"] as? String
+        else { return nil }
+
+        return stripCodeFences(content)
+    }
+
     private func parseOpenAIResponse(data: Data) -> IntentResult? {
         struct Choice: Decodable {
             struct Message: Decodable { let content: String? }
