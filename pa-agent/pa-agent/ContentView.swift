@@ -1488,6 +1488,9 @@ struct ContentView: View {
     @StateObject private var speechManager = SpeechManager()
     @StateObject private var subscriptionManager = SubscriptionManager.shared
     @State private var showNotificationList = false
+    @State private var selectedTaskForDetail: TaskItem?
+    @AppStorage("PERMISSION_SETUP_SHOWN") private var permissionSetupShown: Bool = false
+    @State private var showPermissionSetupSheet = false
     @Namespace private var scrollSpace
     private let eventStore = EKEventStore()
     private let intentAnalyzer = IntentAnalyzer()
@@ -1504,6 +1507,36 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
+        Group {
+            if permissionSetupShown {
+                mainContent
+            } else {
+                PermissionWelcomeView {
+                    showPermissionSetupSheet = true
+                }
+            }
+        }
+        .sheet(isPresented: $showPermissionSetupSheet) {
+            PermissionSetupSheet(allowSkip: permissionSetupShown) { notifications, speech, calendar, reminders in
+                Task {
+                    await requestSelectedPermissions(
+                        notifications: notifications,
+                        speech: speech,
+                        calendar: calendar,
+                        reminders: reminders
+                    )
+                    permissionSetupShown = true
+                    showPermissionSetupSheet = false
+                    await refreshSystemTasks()
+                }
+            } onSkip: {
+                showPermissionSetupSheet = false
+            }
+            .interactiveDismissDisabled(!permissionSetupShown)
+        }
+    }
+
+    private var mainContent: some View {
         NavigationStack {
             VStack(spacing: 0) {
                 header
@@ -1522,10 +1555,12 @@ struct ContentView: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
                 checkAgentTasks(at: Date())
+                Task { await refreshSystemTasks() }
             }
             .onChange(of: scenePhase) { newPhase in
                 if newPhase == .active {
                      checkAgentTasks(at: Date())
+                     Task { await refreshSystemTasks() }
                 }
             }
             .navigationBarHidden(true)
@@ -1537,6 +1572,9 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showTasksList) {
                 TasksListSheet(tasks: $tasks)
+            }
+            .sheet(item: $selectedTaskForDetail) { task in
+                TaskDetailsSheet(task: task)
             }
             .sheet(isPresented: $showMessageComposer) {
                 MessageComposerView(recipients: [pendingMessage.recipient], body: pendingMessage.body) { result in
@@ -1653,12 +1691,7 @@ struct ContentView: View {
                     messages.append(.init(isUser: false, text: "Hi \(displayUser)! I’m \(agentName). Tell me what you need and I’ll track and prioritize tasks for you."))
                 }
                 loadTasks()
-                setupNotifications()
-                speechManager.requestPermission()
-                Task { 
-                    await requestCalendarAccessIfNeeded()
-                    await requestRemindersAccessIfNeeded()
-                }
+                Task { await refreshSystemTasks() }
                 // Start timer
                 timerCancellable = taskTimer.connect()
             }
@@ -2169,6 +2202,10 @@ struct ContentView: View {
                 .fill(.background)
                 .shadow(color: Color.black.opacity(0.05), radius: 8, x: 0, y: 4)
         )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            selectedTaskForDetail = task
+        }
     }
 
 }
@@ -2179,6 +2216,7 @@ struct TasksListSheet: View {
     @Binding var tasks: [TaskItem]
     @Environment(\.dismiss) private var dismiss
     @State private var selectedFilter: TaskFilter = .all
+    @State private var selectedTaskForDetail: TaskItem?
 
     enum TaskFilter: String, CaseIterable {
         case all = "All"
@@ -2246,6 +2284,14 @@ struct TasksListSheet: View {
                             .background(priorityColor(task.priority).opacity(0.2))
                             .foregroundStyle(priorityColor(task.priority))
                             .cornerRadius(4)
+
+                        Button {
+                            selectedTaskForDetail = task
+                        } label: {
+                            Image(systemName: "info.circle")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
                     }
                     .swipeActions(edge: .trailing) {
                         Button(role: .destructive) {
@@ -2267,6 +2313,10 @@ struct TasksListSheet: View {
                     .listRowBackground(
                         (task.startDate < Date() && !task.isDone) ? Color.red.opacity(0.15) : nil
                     )
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        selectedTaskForDetail = task
+                    }
                 }
             }
             .navigationTitle("Tasks")
@@ -2307,6 +2357,9 @@ struct TasksListSheet: View {
                     )
                 }
             }
+            .sheet(item: $selectedTaskForDetail) { task in
+                TaskDetailsSheet(task: task)
+            }
         }
     }
     
@@ -2323,6 +2376,127 @@ struct TasksListSheet: View {
         case .open: return .secondary
         case .completed: return .green
         case .canceled: return .red
+        }
+    }
+}
+
+struct TaskDetailsSheet: View {
+    let task: TaskItem
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Task") {
+                    LabeledContent("Title", value: task.title)
+                    LabeledContent("Status", value: task.statusLabel)
+                    LabeledContent("Priority", value: task.priorityLabel)
+                    LabeledContent("Tag", value: task.tag)
+                }
+
+                Section("Schedule") {
+                    LabeledContent("Start", value: task.startDate.formatted(date: .abbreviated, time: .shortened))
+                    LabeledContent("Due", value: task.dueDate.formatted(date: .abbreviated, time: .shortened))
+                }
+
+                Section("Source") {
+                    LabeledContent("Type", value: sourceLabel)
+                    if let externalId = task.externalId, !externalId.isEmpty {
+                        LabeledContent("Calendar ID", value: externalId)
+                            .font(.caption)
+                    }
+                }
+            }
+            .navigationTitle("Task Details")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private var sourceLabel: String {
+        switch task.type {
+        case .app: return "App"
+        case .calendar: return "Calendar"
+        case .reminder: return "Reminder"
+        }
+    }
+}
+
+struct PermissionWelcomeView: View {
+    let onStart: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 20) {
+                Spacer()
+
+                Image(systemName: "checkmark.shield.fill")
+                    .font(.system(size: 54))
+                    .foregroundStyle(.blue)
+
+                Text("Set Up Nexa")
+                    .font(.largeTitle.bold())
+
+                Text("This is the first step to set up Nexa. Please grant the required permissions so Nexa can be fully functional for tasks, reminders, speech, and notifications.")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Button(action: onStart) {
+                    Text("Start Permission Setup")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(24)
+            .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+}
+
+struct PermissionSetupSheet: View {
+    var allowSkip: Bool = true
+    let onContinue: (_ notifications: Bool, _ speech: Bool, _ calendar: Bool, _ reminders: Bool) -> Void
+    let onSkip: () -> Void
+
+    @State private var askNotifications = true
+    @State private var askSpeech = true
+    @State private var askCalendar = true
+    @State private var askReminders = true
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Text("Choose what to enable. iOS will still show one system prompt per permission type, but this setup lets users control everything from one place.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Permissions") {
+                    Toggle("Notifications", isOn: $askNotifications)
+                    Toggle("Speech + Microphone", isOn: $askSpeech)
+                    Toggle("Calendar", isOn: $askCalendar)
+                    Toggle("Reminders", isOn: $askReminders)
+                }
+            }
+            .navigationTitle("Permission Setup")
+            .toolbar {
+                if allowSkip {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Skip") { onSkip() }
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Continue") {
+                        onContinue(askNotifications, askSpeech, askCalendar, askReminders)
+                    }
+                }
+            }
         }
     }
 }
@@ -3539,6 +3713,67 @@ extension ContentView {
         return fetchedItems
     }
 
+    private func fetchReminderItems() async -> [TaskItem] {
+        if #available(iOS 17, *) {
+            let status = EKEventStore.authorizationStatus(for: .reminder)
+            guard status == .fullAccess || status == .writeOnly else { return [] }
+        } else {
+            let status = EKEventStore.authorizationStatus(for: .reminder)
+            guard status == .authorized else { return [] }
+        }
+
+        let now = Date()
+        let reminderCalendars = eventStore.calendars(for: .reminder)
+
+        guard !reminderCalendars.isEmpty else { return [] }
+
+        let predicate = eventStore.predicateForReminders(in: reminderCalendars)
+
+        return await withCheckedContinuation { continuation in
+            eventStore.fetchReminders(matching: predicate) { reminders in
+                let rows = (reminders ?? [])
+                    .filter { !$0.isCompleted }
+                    .map { reminder -> TaskItem in
+                    let dueDate = reminder.dueDateComponents?.date ?? reminder.startDateComponents?.date ?? now.addingTimeInterval(3600)
+                    let startDate = reminder.startDateComponents?.date ?? dueDate
+                    let mappedPriority: Int
+                    switch reminder.priority {
+                    case 1...3: mappedPriority = 1
+                    case 4...6: mappedPriority = 2
+                    default: mappedPriority = 3
+                    }
+
+                        return TaskItem(
+                            id: UUID(),
+                            title: reminder.title,
+                            isDone: reminder.isCompleted,
+                            tag: reminder.calendar.title,
+                            startDate: startDate,
+                            dueDate: dueDate,
+                            priority: mappedPriority,
+                            type: .reminder,
+                            externalId: reminder.calendarItemIdentifier
+                        )
+                    }
+                continuation.resume(returning: rows)
+            }
+        }
+    }
+
+    private func refreshSystemTasks() async {
+        await MainActor.run {
+            loadTasks()
+        }
+        let reminderItems = await fetchReminderItems()
+        await MainActor.run {
+            let nonReminder = tasks.filter { $0.type != .reminder }
+            let uniqueReminders = Dictionary(grouping: reminderItems, by: { $0.externalId ?? $0.id.uuidString }).compactMap { $0.value.first }
+            tasks = nonReminder + uniqueReminders
+            reprioritize()
+            print("Loaded \(tasks.filter { $0.type == .app }.count) app tasks + \(tasks.filter { $0.type == .calendar }.count) calendar events + \(uniqueReminders.count) reminders")
+        }
+    }
+
     private func reprioritize() {
         tasks.sort { lhs, rhs in
             if !Calendar.current.isDate(lhs.dueDate, inSameDayAs: rhs.dueDate) {
@@ -3619,15 +3854,50 @@ extension ContentView {
     }
 
     private func setupNotifications() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { granted, error in
-            if granted {
-                print("Permissions granted")
-            } else {
-                print("Permissions denied or error: \(String(describing: error))")
-                // Alert the user roughly
-                Task { @MainActor in 
-                     // We could set a state here to warn the user, but standard alert handles it on schedule fail.
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            print("Notification status: \(settings.authorizationStatus.rawValue)")
+        }
+    }
+
+    private func requestSelectedPermissions(notifications: Bool, speech: Bool, calendar: Bool, reminders: Bool) async {
+        if notifications {
+            _ = await requestNotificationPermission()
+        }
+        if speech {
+            _ = await requestSpeechPermission()
+            _ = await requestMicrophonePermission()
+        }
+        if calendar {
+            await requestCalendarAccessIfNeeded()
+        }
+        if reminders {
+            await requestRemindersAccessIfNeeded()
+        }
+    }
+
+    private func requestNotificationPermission() async -> Bool {
+        await withCheckedContinuation { continuation in
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { granted, _ in
+                continuation.resume(returning: granted)
+            }
+        }
+    }
+
+    private func requestSpeechPermission() async -> Bool {
+        await withCheckedContinuation { continuation in
+            SFSpeechRecognizer.requestAuthorization { status in
+                Task { @MainActor in
+                    speechManager.authorizationStatus = status
                 }
+                continuation.resume(returning: status == .authorized)
+            }
+        }
+    }
+
+    private func requestMicrophonePermission() async -> Bool {
+        await withCheckedContinuation { continuation in
+            AVAudioSession.sharedInstance().requestRecordPermission { granted in
+                continuation.resume(returning: granted)
             }
         }
     }
@@ -3730,12 +4000,6 @@ extension ContentView {
             }
         }
         
-        if baseTasks.isEmpty {
-           baseTasks = [
-               .init(title: "Review roadmap with PM", tag: "Work", startDate: .now, dueDate: .now.addingTimeInterval(86_400.0 * 2), priority: 1)
-           ]
-        }
-
         for index in baseTasks.indices {
             if baseTasks[index].status == .open && baseTasks[index].isDone {
                 baseTasks[index].status = .completed

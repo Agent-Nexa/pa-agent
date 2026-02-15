@@ -2,6 +2,8 @@ import SwiftUI
 import UserNotifications
 import AVFoundation
 import StoreKit
+import Speech
+import EventKit
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -19,6 +21,7 @@ struct SettingsView: View {
     @AppStorage("USER_ICON") private var userIcon: String = "person.circle.fill"
     @AppStorage("AGENT_VOICE_ENABLED") private var agentVoiceEnabled: Bool = true
     @AppStorage("AGENT_VOICE_IDENTIFIER") private var agentVoiceIdentifier: String = ""
+    @AppStorage("PERMISSION_SETUP_SHOWN") private var permissionSetupShown: Bool = false
     
     @State private var localKey: String = ""
     @State private var localModel: String = "gpt-5.2"
@@ -35,11 +38,17 @@ struct SettingsView: View {
     @State private var connectionStatus: String = "not tested"
     @State private var savedMessage: String = ""
     @State private var referralStatusText: String = ""
+    @State private var permissionStatusText: String = ""
+    @State private var notificationsPermissionText: String = "Unknown"
+    @State private var speechPermissionText: String = "Unknown"
+    @State private var calendarPermissionText: String = "Unknown"
+    @State private var remindersPermissionText: String = "Unknown"
     @State private var isEditing: Bool = false
     @State private var previewSynthesizer = AVSpeechSynthesizer()
     @StateObject private var subscriptionManager = SubscriptionManager.shared
     @ObservedObject var historyManager: ActivityHistoryManager
     private let intentService = IntentService()
+    private let eventStore = EKEventStore()
 
     var body: some View {
         NavigationStack {
@@ -270,6 +279,80 @@ struct SettingsView: View {
                     }
                 }
 
+                Section("Permissions") {
+                    HStack {
+                        Text("Notifications")
+                        Spacer()
+                        Text(notificationsPermissionText)
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Text("Speech + Mic")
+                        Spacer()
+                        Text(speechPermissionText)
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Text("Calendar")
+                        Spacer()
+                        Text(calendarPermissionText)
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Text("Reminders")
+                        Spacer()
+                        Text(remindersPermissionText)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Button("Request Notifications") {
+                        Task {
+                            _ = await requestNotificationPermission()
+                            refreshPermissionStatuses()
+                        }
+                    }
+
+                    Button("Request Speech + Microphone") {
+                        Task {
+                            _ = await requestSpeechPermission()
+                            _ = await requestMicrophonePermission()
+                            refreshPermissionStatuses()
+                        }
+                    }
+
+                    Button("Request Calendar") {
+                        Task {
+                            await requestCalendarPermission()
+                            refreshPermissionStatuses()
+                        }
+                    }
+
+                    Button("Request Reminders") {
+                        Task {
+                            await requestReminderPermission()
+                            refreshPermissionStatuses()
+                        }
+                    }
+
+                    Button("Open iOS App Settings") {
+                        #if canImport(UIKit)
+                        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+                        openURL(url)
+                        #endif
+                    }
+
+                    Button("Reset Permission Setup Prompt") {
+                        permissionSetupShown = false
+                        permissionStatusText = "Permission setup prompt reset. It will appear next app launch."
+                    }
+
+                    if !permissionStatusText.isEmpty {
+                        Text(permissionStatusText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 Section("Diagnostics") {
                     HStack {
                         Text("Status")
@@ -374,6 +457,7 @@ struct SettingsView: View {
                 localUserIcon = userIcon
                 localAgentVoiceEnabled = agentVoiceEnabled
                 localAgentVoiceIdentifier = agentVoiceIdentifier
+                refreshPermissionStatuses()
 
                 if isProductionBuild {
                     Task {
@@ -471,6 +555,115 @@ struct SettingsView: View {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "-"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "-"
         return "v\(version).\(build)"
+    }
+
+    private func refreshPermissionStatuses() {
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            DispatchQueue.main.async {
+                self.notificationsPermissionText = self.notificationStatusLabel(settings.authorizationStatus)
+            }
+        }
+
+        let speechStatus = SFSpeechRecognizer.authorizationStatus()
+        let micStatus = AVAudioSession.sharedInstance().recordPermission
+        speechPermissionText = "\(speechStatusLabel(speechStatus)) • Mic \(microphoneStatusLabel(micStatus))"
+
+        calendarPermissionText = calendarStatusLabel(EKEventStore.authorizationStatus(for: .event))
+        remindersPermissionText = reminderStatusLabel(EKEventStore.authorizationStatus(for: .reminder))
+    }
+
+    private func requestNotificationPermission() async -> Bool {
+        await withCheckedContinuation { continuation in
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { granted, _ in
+                continuation.resume(returning: granted)
+            }
+        }
+    }
+
+    private func requestSpeechPermission() async -> Bool {
+        await withCheckedContinuation { continuation in
+            SFSpeechRecognizer.requestAuthorization { status in
+                continuation.resume(returning: status == .authorized)
+            }
+        }
+    }
+
+    private func requestMicrophonePermission() async -> Bool {
+        await withCheckedContinuation { continuation in
+            AVAudioSession.sharedInstance().requestRecordPermission { granted in
+                continuation.resume(returning: granted)
+            }
+        }
+    }
+
+    private func requestCalendarPermission() async {
+        if #available(iOS 17, *) {
+            _ = try? await eventStore.requestFullAccessToEvents()
+        } else {
+            _ = try? await eventStore.requestAccess(to: .event)
+        }
+    }
+
+    private func requestReminderPermission() async {
+        if #available(iOS 17, *) {
+            _ = try? await eventStore.requestFullAccessToReminders()
+        } else {
+            _ = try? await eventStore.requestAccess(to: .reminder)
+        }
+    }
+
+    private func notificationStatusLabel(_ status: UNAuthorizationStatus) -> String {
+        switch status {
+        case .authorized: return "Allowed"
+        case .denied: return "Denied"
+        case .notDetermined: return "Not Set"
+        case .provisional: return "Provisional"
+        case .ephemeral: return "Ephemeral"
+        @unknown default: return "Unknown"
+        }
+    }
+
+    private func speechStatusLabel(_ status: SFSpeechRecognizerAuthorizationStatus) -> String {
+        switch status {
+        case .authorized: return "Allowed"
+        case .denied: return "Denied"
+        case .notDetermined: return "Not Set"
+        case .restricted: return "Restricted"
+        @unknown default: return "Unknown"
+        }
+    }
+
+    private func microphoneStatusLabel(_ status: AVAudioSession.RecordPermission) -> String {
+        switch status {
+        case .granted: return "Allowed"
+        case .denied: return "Denied"
+        case .undetermined: return "Not Set"
+        @unknown default: return "Unknown"
+        }
+    }
+
+    private func calendarStatusLabel(_ status: EKAuthorizationStatus) -> String {
+        switch status {
+        case .fullAccess: return "Full Access"
+        case .writeOnly: return "Write Only"
+        case .authorized: return "Authorized"
+        case .denied: return "Denied"
+        case .restricted: return "Restricted"
+        case .notDetermined: return "Not Set"
+        @unknown default: return "Unknown"
+        }
+    }
+
+    private func reminderStatusLabel(_ status: EKAuthorizationStatus) -> String {
+        switch status {
+        case .fullAccess: return "Full Access"
+        case .writeOnly: return "Write Only"
+        case .authorized: return "Authorized"
+        case .denied: return "Denied"
+        case .restricted: return "Restricted"
+        case .notDetermined: return "Not Set"
+        @unknown default: return "Unknown"
+        }
     }
 
     private func previewVoice() {
