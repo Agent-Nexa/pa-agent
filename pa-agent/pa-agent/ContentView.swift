@@ -2876,6 +2876,7 @@ struct TasksListSheet: View {
     var onRequestRemindersAccess: () -> Void = {}
     @Environment(\.dismiss) private var dismiss
     @State private var selectedFilter: TaskFilter = .all
+    @State private var selectedStatusFilter: StatusFilter = .all
     @State private var selectedTaskForDetail: TaskItem?
     @State private var selectedCalendarName: String = "Default"
     private let eventStore = EKEventStore()
@@ -2884,6 +2885,13 @@ struct TasksListSheet: View {
         case all = "All"
         case today = "Today"
         case upcoming = "Upcoming"
+    }
+
+    enum StatusFilter: String, CaseIterable {
+        case all = "All"
+        case open = "Open"
+        case completed = "Completed"
+        case canceled = "Canceled"
     }
 
     var filteredTasks: [TaskItem] {
@@ -2895,6 +2903,20 @@ struct TasksListSheet: View {
         let visibleTasks = tasks.filter { !$0.isStaleOverdue(now: now) }
 
         return visibleTasks.filter { task in
+            let statusMatches: Bool
+            switch selectedStatusFilter {
+            case .all:
+                statusMatches = true
+            case .open:
+                statusMatches = task.status == .open && !task.isDone
+            case .completed:
+                statusMatches = task.status == .completed || task.isDone
+            case .canceled:
+                statusMatches = task.status == .canceled
+            }
+
+            guard statusMatches else { return false }
+
             let targetDate = task.startDate
             switch selectedFilter {
             case .all:
@@ -3000,7 +3022,9 @@ struct TasksListSheet: View {
                     }
                 }
             }
+            .listStyle(.plain)
             .navigationTitle("Tasks")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) {
                     VStack(spacing: 1) {
@@ -3028,12 +3052,21 @@ struct TasksListSheet: View {
                 refreshSelectedCalendarName()
             }
             .safeAreaInset(edge: .top) {
-                Picker("Filter", selection: $selectedFilter) {
-                    ForEach(TaskFilter.allCases, id: \.self) { filter in
-                        Text(filter.rawValue).tag(filter)
+                VStack(spacing: 8) {
+                    Picker("Status Filter", selection: $selectedStatusFilter) {
+                        ForEach(StatusFilter.allCases, id: \.self) { filter in
+                            Text(filter.rawValue).tag(filter)
+                        }
                     }
+                    .pickerStyle(.menu)
+
+                    Picker("Date Filter", selection: $selectedFilter) {
+                        ForEach(TaskFilter.allCases, id: \.self) { filter in
+                            Text(filter.rawValue).tag(filter)
+                        }
+                    }
+                    .pickerStyle(.segmented)
                 }
-                .pickerStyle(.segmented)
                 .padding(.horizontal)
                 .padding(.vertical, 8)
                 .background(.regularMaterial)
@@ -3050,7 +3083,7 @@ struct TasksListSheet: View {
             .overlay {
                 if filteredTasks.isEmpty {
                     ContentUnavailableView(
-                        "No tasks for \(selectedFilter.rawValue.lowercased())",
+                        "No \(selectedStatusFilter.rawValue.lowercased()) tasks for \(selectedFilter.rawValue.lowercased())",
                         systemImage: "checklist",
                         description: Text("Try Sync Now from the top-left menu, or add tasks by chatting with the agent.")
                     )
