@@ -840,11 +840,11 @@ struct ChatMessage: Identifiable, Hashable {
     let timestamp: Date = .init()
 }
 
-struct TaskDraft {
+struct TaskDraft: Equatable {
     var title: String
     var startDate: Date = .now
     var dueDate: Date = .now.addingTimeInterval(60 * 60 * 24)
-    var priority: Int = 2
+    var priority: Int = 1
     var tag: String = "Inbox"
 }
 
@@ -877,6 +877,7 @@ enum InteractionState: Equatable {
     case offeringToSaveEmail(contact: SimpleContact, email: String)
     case resolvingMissingTaskContact(task: TaskItem, missingType: String)
     case collectingNewContactDetail(task: TaskItem, name: String, missingType: String)
+    case collectingScheduledTaskContact(name: String, missingType: String, draft: TaskDraft, actionType: String)
 }
 
 struct SimpleContact: Identifiable, Hashable {
@@ -1194,7 +1195,7 @@ final class SpeechManager: NSObject, ObservableObject, SFSpeechRecognizerDelegat
         try? AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
     }
     
-    func speak(_ text: String) {
+    func speak(_ text: String, voiceIdentifier: String? = nil) {
         // Stop recording if active to prevent self-capture
         if isRecording {
             wasRecordingBeforeSpeaking = true
@@ -1211,7 +1212,13 @@ final class SpeechManager: NSObject, ObservableObject, SFSpeechRecognizerDelegat
         try? session.setActive(true, options: .notifyOthersOnDeactivation)
         
         let utterance = AVSpeechUtterance(string: clean)
-        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        if let identifier = voiceIdentifier,
+           !identifier.isEmpty,
+           let configuredVoice = AVSpeechSynthesisVoice(identifier: identifier) {
+            utterance.voice = configuredVoice
+        } else {
+            utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        }
         synthesizer.stopSpeaking(at: .immediate)
         synthesizer.speak(utterance)
     }
@@ -1301,6 +1308,7 @@ struct ContentView: View {
     @State private var pendingMessage: MessageDraft = .init()
     @State private var pendingEmail: EmailDraft = .init()
     @State private var pendingCallRecipient: String = ""
+    @State private var pendingScheduledActionPayload: TaskItem.AgentAction? = nil
     @State private var interactionState: InteractionState = .idle
     @State private var showTaskDetailSheet = false
     @State private var showNotificationAlert = false
@@ -1321,6 +1329,8 @@ struct ContentView: View {
     @AppStorage("AGENT_ICON") private var agentIcon: String = "brain.head.profile"
     @AppStorage("AGENT_ICON_COLOR") private var agentIconColor: String = "purple"
     @AppStorage("USER_ICON") private var userIcon: String = "person.circle.fill"
+    @AppStorage("AGENT_VOICE_ENABLED") private var agentVoiceEnabled: Bool = true
+    @AppStorage("AGENT_VOICE_IDENTIFIER") private var agentVoiceIdentifier: String = ""
     @StateObject private var historyManager = ActivityHistoryManager()
     @StateObject private var notificationManager = NotificationManager.shared
     @StateObject private var speechManager = SpeechManager()
@@ -1628,7 +1638,9 @@ struct ContentView: View {
                 } else if payload.type == "makePhoneCall" || payload.type == "call" {
                     if let script = payload.script, !script.isEmpty {
                         let instruction = "Connecting you to \(finalRecipient). You should say: \(script)"
-                        speechManager.speak(instruction)
+                        if agentVoiceEnabled {
+                            speechManager.speak(instruction, voiceIdentifier: agentVoiceIdentifier)
+                        }
                         messages.append(.init(isUser: false, text: "Script: \(script)"))
                     }
                     Task { await triggerCall(to: finalRecipient) }
@@ -1830,7 +1842,9 @@ struct ContentView: View {
                     if newValue.count > oldValue.count,
                        let lastMsg = newValue.last,
                        !lastMsg.isUser {
-                        speechManager.speak(lastMsg.text)
+                        if agentVoiceEnabled {
+                            speechManager.speak(lastMsg.text, voiceIdentifier: agentVoiceIdentifier)
+                        }
                     }
                 }
                 .onChange(of: interactionState) { _, _ in
@@ -2180,6 +2194,11 @@ extension ContentView {
     private var taskDetailSheet: some View {
         NavigationStack {
             Form {
+                Section {
+                    Label("Please verify the priority before adding this task.", systemImage: "info.circle")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
                 Section("Title & Tag") {
                     TextField("Task title", text: $pendingDraft.title)
                     TextField("Tag", text: $pendingDraft.tag)
@@ -2200,7 +2219,10 @@ extension ContentView {
             .navigationTitle("Confirm task")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { showTaskDetailSheet = false }
+                    Button("Cancel") {
+                        pendingScheduledActionPayload = nil
+                        showTaskDetailSheet = false
+                    }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Add") { commitPendingTask() }
@@ -2634,6 +2656,24 @@ extension ContentView {
              executeAgentTask(updatedTask)
              return
         }
+
+        if case .collectingScheduledTaskContact(let name, let missingType, let draftForTask, let actionType) = interactionState {
+            let trimmedInput = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let isPhoneValid = trimmedInput.components(separatedBy: CharacterSet.decimalDigits.inverted).joined().count >= 7
+            let isEmailValid = trimmedInput.contains("@") && trimmedInput.contains(".")
+
+            if (missingType == "phone" && !isPhoneValid) || (missingType == "email" && !isEmailValid) {
+                messages.append(.init(isUser: false, text: "Please enter a valid \(missingType == "phone" ? "phone number" : "email address") for \(name)."))
+                return
+            }
+
+            pendingDraft = draftForTask
+            pendingScheduledActionPayload = .init(type: actionType, recipient: trimmedInput)
+            interactionState = .idle
+            messages.append(.init(isUser: false, text: "Got it. I’ll use \(trimmedInput) for \(name) and save this reminder."))
+            showTaskDetailSheet = true
+            return
+        }
     
         // 1. Check if we are filling a slot
         if interactionState == .collectingCallRecipient {
@@ -2768,7 +2808,7 @@ extension ContentView {
                         title: draft.title ?? "Call \(draft.recipient ?? "someone")",
                         startDate: draft.startDate ?? Date().addingTimeInterval(3600),
                         dueDate: draft.dueDate ?? Date().addingTimeInterval(7200),
-                        priority: draft.priority ?? 2,
+                        priority: draft.priority ?? 1,
                         tag: draft.tag ?? "Personal"
                     )
                     
@@ -2819,7 +2859,7 @@ extension ContentView {
                         title: draft.title ?? "Msg \(draft.recipient ?? "someone")",
                         startDate: draft.startDate ?? Date().addingTimeInterval(3600),
                         dueDate: draft.dueDate ?? Date().addingTimeInterval(7200),
-                        priority: draft.priority ?? 2,
+                        priority: draft.priority ?? 1,
                         tag: draft.tag ?? "Personal"
                     )
                     
@@ -2879,12 +2919,56 @@ extension ContentView {
                 return
             }
 
+            // Scheduled reminder with call intent: verify contact before confirmation sheet
+            let draftTitle = (draft.title ?? text).trimmingCharacters(in: .whitespacesAndNewlines)
+            let draftTitleLower = draftTitle.lowercased()
+            if draft.action == "task", draftTitleLower.hasPrefix("call ") || draftTitleLower.contains(" call ") {
+                let rawName = (draft.recipient?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+                    ? draft.recipient!.trimmingCharacters(in: .whitespacesAndNewlines)
+                    : extractCallTarget(from: draftTitle)
+
+                let preparedDraft = TaskDraft(
+                    title: draftTitle.isEmpty ? "Call \(rawName.isEmpty ? "contact" : rawName)" : draftTitle,
+                    startDate: draft.startDate ?? Date(),
+                    dueDate: draft.dueDate ?? Date().addingTimeInterval(86400),
+                    priority: draft.priority ?? 1,
+                    tag: draft.tag ?? "Inbox"
+                )
+
+                let digits = rawName.components(separatedBy: CharacterSet.decimalDigits.inverted).joined()
+                if digits.count >= 7 {
+                    pendingDraft = preparedDraft
+                    pendingScheduledActionPayload = .init(type: "makePhoneCall", recipient: rawName, script: draft.callScript)
+                    showTaskDetailSheet = true
+                    return
+                }
+
+                if !rawName.isEmpty {
+                    let candidates = await ContactHelpers().find(name: rawName)
+                    if let exact = candidates.first(where: { !$0.number.isEmpty }) {
+                        var confirmedDraft = preparedDraft
+                        confirmedDraft.title = "Call \(exact.name)"
+                        pendingDraft = confirmedDraft
+                        pendingScheduledActionPayload = .init(type: "makePhoneCall", recipient: exact.number, script: draft.callScript)
+                        showTaskDetailSheet = true
+                        return
+                    }
+
+                    interactionState = .collectingScheduledTaskContact(name: rawName, missingType: "phone", draft: preparedDraft, actionType: "makePhoneCall")
+                    withAnimation {
+                        messages.append(.init(isUser: false, text: "I couldn't find a phone number for '\(rawName)'. Please provide the number so I can store it in this reminder."))
+                    }
+                    return
+                }
+            }
+
             // Task Logic (User Performer)
+            pendingScheduledActionPayload = nil
             pendingDraft = TaskDraft(
                 title: draft.title ?? "New Task",
                 startDate: draft.startDate ?? Date(),
                 dueDate: draft.dueDate ?? Date().addingTimeInterval(86400),
-                priority: draft.priority ?? 2,
+                priority: draft.priority ?? 1,
                 tag: draft.tag ?? "Inbox"
             )
             showTaskDetailSheet = true
@@ -2993,9 +3077,27 @@ extension ContentView {
 
         let title = cleaned.isEmpty ? text.trimmingCharacters(in: .whitespacesAndNewlines) : cleaned
         pendingDraft = TaskDraft(title: title)
+        pendingScheduledActionPayload = nil
 
         // Keep the sheet open so the user can refine details if they want.
         showTaskDetailSheet = true
+    }
+
+    private func extractCallTarget(from title: String) -> String {
+        let lower = title.lowercased()
+        guard let range = lower.range(of: "call ") else { return "" }
+        let after = String(title[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if after.isEmpty { return "" }
+
+        let stopWords = [" tomorrow", " today", " tonight", " at ", " on ", " in ", " by "]
+        let lowerAfter = after.lowercased()
+        var cutIndex = after.endIndex
+        for word in stopWords {
+            if let stopRange = lowerAfter.range(of: word), stopRange.lowerBound < cutIndex {
+                cutIndex = stopRange.lowerBound
+            }
+        }
+        return String(after[..<cutIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func generateAssistantResponse(for text: String) -> String {
@@ -3016,11 +3118,14 @@ extension ContentView {
             tag: pendingDraft.tag,
             startDate: pendingDraft.startDate,
             dueDate: pendingDraft.dueDate,
-            priority: pendingDraft.priority
+            priority: pendingDraft.priority,
+            executor: .user,
+            actionPayload: pendingScheduledActionPayload
         )
         insertTask(newTask, announce: true)
 
         pendingDraft = TaskDraft(title: "")
+        pendingScheduledActionPayload = nil
         showTaskDetailSheet = false
     }
 
