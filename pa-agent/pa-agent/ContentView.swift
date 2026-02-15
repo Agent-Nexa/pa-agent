@@ -288,11 +288,15 @@ final class IntentService {
 
         LOGIC RULES:
         1. IMMEDIATE ACTIONS:
-           - If the user wants to Send SMS, Email, or Call RIGHT NOW: Return 'sendMessage', 'sendEmail', or 'makePhoneCall'.
+           - If the user starts with "message", "text", "email", "call" WITHOUT a specific future time, treat it as IMMEDIATE.
+           - If the user wants to Send SMS, Email, or Call RIGHT NOW (e.g., "send message", "call mom", "email boss"): Return 'sendMessage', 'sendEmail', or 'makePhoneCall'.
+           - Default to IMMEDIATE action for communication commands unless a future time is explicitly mentioned (e.g. "tomorrow", "later", "at 5pm").
            - If the user wants ANY OTHER IMMEDIATE action (e.g., "play music", "open safari", "buy stocks", "set timer"): You DO NOT have these capabilities. Return action='answer' with answer="I don't have this capability yet."
         
         2. FUTURE ACTIONS / REMINDERS:
-           - If the user wants to do something later or needs a reminder: Return action='task'. populate title, dates, priority.
+           - If the user explicitly mentions a future time (e.g. "remind me to call later", "send text tomorrow"): Return action='task' with Action Payload.
+           - If the user explicitly asks to "remind" them or "add task" (e.g. "remind me to message X"): Return action='task', performer='user'.
+           - IMPORTANT: For "remind me to call", set action='task' and performer='user' (unless they explicitly say "you call X tomorrow").
         
         3. INQUIRIES / GREETINGS:
            - If the user greets you or asks a question: Return action='answer' with the response in 'answer'.
@@ -426,7 +430,7 @@ final class IntentService {
         }
     }
 
-    func polishMessage(text: String, recipient: String, senderName: String, apiKey: String?, model: String?, useAzure: Bool, azureEndpoint: String?, agentName: String = "Nexa") async -> String? {
+    func polishMessage(text: String, history: String, recipient: String, senderName: String, apiKey: String?, model: String?, useAzure: Bool, azureEndpoint: String?, agentName: String = "Nexa") async -> String? {
         guard let rawKey = apiKey, !rawKey.isEmpty else { return nil }
         let apiKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
         
@@ -457,6 +461,13 @@ final class IntentService {
         let systemPrompt = """
         You are \(agentName), an intelligent assistant drafting a text message (SMS/iMessage) from '\(senderName)' to '\(recipient)'. 
         
+        The user has been conversing with you. Here is the recent conversation context:
+        ---
+        \(history)
+        ---
+        
+        The user's latest input regarding the message content is: "\(text)"
+        
         Your task is to extract the intended message content from the user's spoken instruction and rewrite it for SMS.
         
         CRITICAL RULES:
@@ -464,6 +475,7 @@ final class IntentService {
         2. The output must be the checks message itself, written in the first person (as if '\(senderName)' is typing it).
         3. Do NOT include phrases like "He said...", "I should tell you...", or "The user wants me to say...".
         4. Polish the message to be concise and natural.
+        5. USE CONTEXT: If the user refers to previous context (e.g., "tell him about that thing"), refer to the history to fill it in.
         
         Examples:
         - Input: "Tell him I'm running 5 mins late" -> Output: "I'm running 5 mins late"
@@ -2327,7 +2339,13 @@ extension ContentView {
             
             // Safety: Force 'call' action if the model returned 'task' but it looks like a call
             // Common with GPT models that are biased towards 'task' from previous prompts
-            if (draft.action == "task" || draft.action == nil),
+            // NOTE: We only do this if it is NOT scheduled (i.e. looks like an immediate request misclassified)
+            let isScheduledTask = (draft.startDate != nil && draft.startDate! > Date().addingTimeInterval(300)) || (draft.isScheduled == true)
+            let lowerText = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            
+            // Safety: Force 'call' action
+            if !isScheduledTask,
+               (draft.action == "task" || draft.action == nil),
                let title = draft.title?.lowercased(),
                (title.starts(with: "call ") || title.starts(with: "phone ") || title.starts(with: "dial ")) {
                 draft.action = "makePhoneCall"
@@ -2337,20 +2355,20 @@ extension ContentView {
                 draft.recipient = name.trimmingCharacters(in: .whitespacesAndNewlines)
             }
             
+            // Safety: Force 'sendMessage' action if input starts with command keywords
+            if !isScheduledTask,
+               (draft.action == "task" || draft.action == nil),
+               (lowerText.starts(with: "message ") || lowerText.starts(with: "text ") || lowerText.starts(with: "sms ") || lowerText.starts(with: "send ")) {
+                 draft.action = "sendMessage"
+                 // If we override, we reset recipient/body to ensure the agent asks/polishes correctly
+                 // rather than using potentially confusing task details.
+                 draft.recipient = nil
+                 draft.messageBody = text // Pass full text for polishing later
+            }
+            
             // Call Logic
             if draft.action == "makePhoneCall" || draft.action == "call" {
-                // If immediate
-                if draft.performer == "agent" && (draft.isScheduled == false || draft.isScheduled == nil) {
-                    if let raw = draft.recipient, !raw.isEmpty {
-                        await resolveAndProceed(recipient: raw, forCall: true)
-                    } else {
-                        interactionState = .collectingCallRecipient
-                        withAnimation { messages.append(.init(isUser: false, text: "Who do you want to call?")) }
-                    }
-                    return
-                }
-                
-                // If scheduled agent task
+                // If scheduled agent task (Explicitly marked as task or future)
                 if draft.performer == "agent" && draft.isScheduled == true {
                     pendingDraft = TaskDraft(
                         title: draft.title ?? "Call \(draft.recipient ?? "someone")",
@@ -2377,21 +2395,19 @@ extension ContentView {
                     insertTask(newTask, announce: true)
                     return
                 }
+                
+                // Otherwise treat as immediate
+                if let raw = draft.recipient, !raw.isEmpty {
+                    await resolveAndProceed(recipient: raw, forCall: true)
+                } else {
+                    interactionState = .collectingCallRecipient
+                    withAnimation { messages.append(.init(isUser: false, text: "Who do you want to call?")) }
+                }
+                return
             }
 
             if draft.action == "sendMessage" {
-                if draft.performer == "agent" && (draft.isScheduled == false || draft.isScheduled == nil) {
-                    pendingMessage = MessageDraft(recipient: "", body: draft.messageBody ?? "")
-                    if let raw = draft.recipient, !raw.isEmpty {
-                        await resolveAndProceed(recipient: raw)
-                    } else {
-                        await checkMessageCompleteness()
-                    }
-                    return
-                }
-                
-                // Scheduled Message
-                 if draft.performer == "agent" && draft.isScheduled == true {
+                if draft.performer == "agent" && draft.isScheduled == true {
                     pendingDraft = TaskDraft(
                         title: draft.title ?? "Msg \(draft.recipient ?? "someone")",
                         startDate: draft.startDate ?? Date().addingTimeInterval(3600),
@@ -2412,6 +2428,15 @@ extension ContentView {
                     insertTask(newTask, announce: true)
                     return
                  }
+                 
+                 // Immediate Message
+                 pendingMessage = MessageDraft(recipient: "", body: draft.messageBody ?? "")
+                 if let raw = draft.recipient, !raw.isEmpty {
+                    await resolveAndProceed(recipient: raw)
+                 } else {
+                    await checkMessageCompleteness()
+                 }
+                 return
             }
             
             if draft.action == "sendEmail" {
@@ -2463,9 +2488,14 @@ extension ContentView {
         withAnimation { messages.append(.init(isUser: false, text: "Polishing message...")) }
         let activeKey = storedApiKey.isEmpty ? ProcessInfo.processInfo.environment["OPENAI_API_KEY"] : storedApiKey
         
+        // Prepare context history (last 5 messages)
+        let recentHistory = messages.suffix(5).map { msg in
+            "\(msg.isUser ? "User" : "Agent"): \(msg.text)"
+        }.joined(separator: "\n")
+        
         // Safety Clean-up logic (moved into main actor later)
         var finalBody = pendingMessage.body
-        if let polished = await intentService.polishMessage(text: pendingMessage.body, recipient: pendingMessage.recipient, senderName: signatureName, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint, agentName: agentName) {
+        if let polished = await intentService.polishMessage(text: pendingMessage.body, history: recentHistory, recipient: pendingMessage.recipient, senderName: signatureName, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint, agentName: agentName) {
              finalBody = polished
         }
         
