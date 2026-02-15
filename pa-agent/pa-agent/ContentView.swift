@@ -5331,7 +5331,24 @@ extension ContentView {
         let predicate = eventStore.predicateForEvents(withStart: start, end: end, calendars: userCalendars)
         let events = eventStore.events(matching: predicate)
         for event in events {
-            if let notes = event.notes, notes.contains("PA_TASK_ID:") {
+            if let mappedTaskId = parseTaskIdentifierFlag(from: event.notes) {
+                let mappedStatus = parseTaskStatusFlag(from: event.notes, occurrenceStart: event.startDate) ?? .open
+                let normalizedTitle = event.title?
+                    .replacingOccurrences(of: "✅ ", with: "")
+                    .replacingOccurrences(of: "❌ ", with: "") ?? "Task"
+
+                fetchedItems.append(TaskItem(
+                    id: mappedTaskId,
+                    title: normalizedTitle,
+                    isDone: mappedStatus != .open,
+                    status: mappedStatus,
+                    tag: event.calendar.title,
+                    startDate: event.startDate,
+                    dueDate: event.endDate,
+                    priority: 2,
+                    type: .app,
+                    externalId: event.eventIdentifier
+                ))
                 continue
             }
             let isRecurring = (event.recurrenceRules?.isEmpty == false)
@@ -5642,8 +5659,9 @@ extension ContentView {
     // MARK: Helpers
 
     private func saveTasks() {
-        // Only save items created within the app
-        let appTasks = tasks.filter { $0.type == .app }
+        let appTasks = tasks.filter {
+            $0.type == .app && ($0.externalId == nil || $0.externalId?.isEmpty == true)
+        }
         if let data = try? JSONEncoder().encode(appTasks) {
             UserDefaults.standard.set(data, forKey: "saved_tasks")
         }
@@ -5659,24 +5677,26 @@ extension ContentView {
             }
         }
         
+        baseTasks = baseTasks.filter { $0.externalId == nil || $0.externalId?.isEmpty == true }
+
         for index in baseTasks.indices {
             if baseTasks[index].status == .open && baseTasks[index].isDone {
                 baseTasks[index].status = .completed
             }
         }
-        
-        // Combine with system items
-        // Note: In a real app we would not effectively re-append system items to the 'tasks' array on every load 
-        // if 'tasks' is binding back to storage. We should separate them.
-        // However, given the current simple structure where 'tasks' is the single source of truth for the list view,
-        // we will append them transiently. 
-        // CRITICAL: We must filter out previous system items before appending new ones to avoid duplicates if we save this array back.
-        
+
         let existingAppTasks = reconcileAppTaskStatusesFromCalendar(baseTasks.filter { $0.type == .app })
         let systemItems = fetchSystemItems()
-        tasks = existingAppTasks + systemItems
+
+        let unsyncedById = Dictionary(uniqueKeysWithValues: existingAppTasks.map { ($0.id, $0) })
+        let systemAppIds = Set(systemItems.filter { $0.type == .app }.map { $0.id })
+        let remainingUnsynced = unsyncedById
+            .filter { !systemAppIds.contains($0.key) }
+            .map { $0.value }
+
+        tasks = remainingUnsynced + systemItems
         
-        print("Loaded \(existingAppTasks.count) app tasks + \(systemItems.count) system events")
+        print("Loaded \(remainingUnsynced.count) unsynced app tasks + \(systemItems.count) system items")
     }
 
     private func priorityColor(_ value: Int) -> Color {
