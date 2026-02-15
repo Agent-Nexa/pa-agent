@@ -179,6 +179,12 @@ struct TaskItem: Identifiable, Hashable, Codable {
         case user
         case agent
     }
+
+    enum TaskStatus: String, Codable {
+        case open
+        case completed
+        case canceled
+    }
     
     struct AgentAction: Codable, Hashable {
         var type: String // "call", "sendMessage", "makePhoneCall", "sendEmail"
@@ -191,6 +197,7 @@ struct TaskItem: Identifiable, Hashable, Codable {
     var id = UUID()
     var title: String
     var isDone: Bool = false
+    var status: TaskStatus = .open
     var tag: String = "General"
     var startDate: Date = .now
     var dueDate: Date = .now.addingTimeInterval(60 * 60 * 24)
@@ -209,6 +216,37 @@ struct TaskItem: Identifiable, Hashable, Codable {
         default: return "Low"
         }
     }
+
+    var statusLabel: String {
+        switch status {
+        case .open: return "Open"
+        case .completed: return "Completed"
+        case .canceled: return "Canceled"
+        }
+    }
+
+    mutating func markCompleted() {
+        isDone = true
+        status = .completed
+    }
+
+    mutating func markCanceled() {
+        isDone = true
+        status = .canceled
+    }
+
+    mutating func markOpen() {
+        isDone = false
+        status = .open
+    }
+
+    mutating func toggleDoneState() {
+        if isDone {
+            markOpen()
+        } else {
+            markCompleted()
+        }
+    }
 }
 
 final class IntentService {
@@ -223,7 +261,7 @@ final class IntentService {
 
     private let session = URLSession(configuration: .default)
 
-    func infer(from text: String, apiKey: String?, model: String?, useAzure: Bool, azureEndpoint: String?, userName: String?, agentName: String = "Nexa") async -> IntentResult? {
+    func infer(from text: String, apiKey: String?, model: String?, useAzure: Bool, azureEndpoint: String?, userName: String?, agentName: String = "Nexa", appContext: String? = nil) async -> IntentResult? {
         guard let rawKey = apiKey, !rawKey.isEmpty else {
             usedOpenAI = false
             lastReason = "missing API key"
@@ -275,11 +313,15 @@ final class IntentService {
         let weekdayStr = Calendar.current.weekdaySymbols[weekday - 1]
 
         let userContext = (userName?.isEmpty == false) ? "The user's name is \(userName!)." : ""
+        let contextBlock = (appContext?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+            ? "\nAPP CONTEXT (from local app state):\n\(appContext!)\n"
+            : ""
         
         let systemPrompt = """
         You are \(agentName), an intelligent personal assistant. \(userContext) The current time is \(nowString) (\(weekdayStr)).
+        \(contextBlock)
         
-        Your goal is to determine the user's intent based on their input.
+        Your brain is powered by advanced AI. When you receive a request, THINK about what the user really wants.
         
         SUPPORTED CAPABILITIES:
         1. Manage Tasks (Action: 'task'): Add a task or scheduled reminder to the task list.
@@ -289,13 +331,18 @@ final class IntentService {
         5. Answer/Chat (Action: 'answer'): Answer questions, chat, or explain limitations.
 
         LOGIC RULES:
-        1. IMMEDIATE ACTIONS:
+        1. GENERATIVE CONTENT:
+           - If the user asks you to "message X a joke", "email Y a poem", "send a birthday wish", do NOT just set the body to "a joke" or "a poem".
+           - You MUST generate the actual content in the 'messageBody' or 'callScript' field.
+           - Example: "Message Ivy a joke" -> action='sendMessage', recipient='Ivy', messageBody='Why did the scarecrow win an award? Because he was outstanding in his field!'
+        
+        2. IMMEDIATE ACTIONS:
            - If the user starts with "message", "text", "email", "call" WITHOUT a specific future time, treat it as IMMEDIATE.
            - If the user wants to Send SMS, Email, or Call RIGHT NOW (e.g., "send message", "call mom", "email boss"): Return 'sendMessage', 'sendEmail', or 'makePhoneCall'.
            - Default to IMMEDIATE action for communication commands unless a future time is explicitly mentioned (e.g. "tomorrow", "later", "at 5pm").
            - If the user wants ANY OTHER IMMEDIATE action (e.g., "play music", "open safari", "buy stocks", "set timer"): You DO NOT have these capabilities. Return action='answer' with answer="I don't have this capability yet."
         
-        2. FUTURE ACTIONS / REMINDERS:
+        3. FUTURE ACTIONS / REMINDERS:
            - If the user explicitly mentions a future time (e.g. "remind me to call later", "send text tomorrow"): Return action='task' with Action Payload.
            - If the user explicitly asks to "remind" them or "add task" (e.g. "remind me to message X"): Return action='task', performer='user'.
            - IMPORTANT: For "remind me to call", set action='task' and performer='user' (unless they explicitly say "you call X tomorrow").
@@ -303,6 +350,8 @@ final class IntentService {
         
         3. INQUIRIES / GREETINGS:
            - If the user greets you or asks a question: Return action='answer' with the response in 'answer'.
+              - If the user asks for summaries/status (e.g. "summarize today's tasks", "what did I do today", "what notifications do I have"), use APP CONTEXT to answer concretely.
+              - Never say you cannot access the data if APP CONTEXT is provided.
         
         JSON OUTPUT FORMAT:
         {
@@ -397,7 +446,7 @@ final class IntentService {
             "temperature": 0.7,
             "response_format": ["type": "json_object"],
             "messages": [
-                ["role": "system", "content": "You are \(agentName), a professional email drafter. The email is to '\(recipient)' from '\(senderName)'. Based on the content and recipient, infer the relationship and tone (e.g. casual for family/friends, formal for business). Construct a professional email in JSON with 'subject' and 'body'. Sign off using '\(senderName)'."],
+                ["role": "system", "content": "You are \(agentName), an intelligent assistant drafting an email to '\(recipient)' from '\(senderName)'. Based on the user's input, infer the relationship and tone (casual vs formal). If the user asks for creative content (e.g. 'send a joke', 'write a poem'), generate it appropriately. Construct the final email in JSON with 'subject' and 'body'. Ensure you sign off using '\(senderName)'."],
                 ["role": "user", "content": text]
             ]
         ]
@@ -475,15 +524,17 @@ final class IntentService {
         
         CRITICAL RULES:
         1. STRIP all instructional wrappers like "tell him", "ask her", "say that", "let them know", "text him that".
-        2. The output must be the checks message itself, written in the first person (as if '\(senderName)' is typing it).
-        3. Do NOT include phrases like "He said...", "I should tell you...", or "The user wants me to say...".
-        4. Polish the message to be concise and natural.
-        5. USE CONTEXT: If the user refers to previous context (e.g., "tell him about that thing"), refer to the history to fill it in.
+        2. GENERATE CONTENT: If the user asks to "send a joke", "write a poem", "wish happy birthday", or any other generative request, you MUST generate the actual creative content. Do not just repeat the request.
+        3. The output must be the message itself, written in the first person (as if '\(senderName)' is typing it).
+        4. Do NOT include phrases like "Here is the joke...", "He said...", "I should tell you...", or "The user wants me to say...".
+        5. Polish the message to be concise and natural.
+        6. USE CONTEXT: If the user refers to previous context (e.g., "tell him about that thing"), refer to the history to fill it in.
         
         Examples:
         - Input: "Tell him I'm running 5 mins late" -> Output: "I'm running 5 mins late"
         - Input: "Ask her if she wants to get dinner tonight" -> Output: "Do you want to get dinner tonight?"
-        - Input: "Let them know I'll be there soon" -> Output: "I'll be there soon"
+        - Input: "Send a joke about programming" -> Output: "Why do programmers prefer dark mode? Because light attracts bugs!"
+        - Input: "Wish him happy birthday with excitement" -> Output: "Happy Birthday!! 🎂 Hope you have an amazing day!"
         - Input: "Say that I love you" -> Output: "I love you"
 
         Return JSON with a single field "messageBody".
@@ -1267,9 +1318,13 @@ struct ContentView: View {
     @AppStorage("OPENAI_AZURE_ENDPOINT") private var azureEndpoint: String = "https://admin-mev0a1yu-eastus2.openai.azure.com/openai/deployments/gpt-5.2/chat/completions?api-version=2024-12-01-preview"
     @AppStorage("AGENT_NAME") private var agentName: String = "Nexa"
     @AppStorage("USER_NAME") private var userName: String = ""
-    @AppStorage("AGENT_ICON") private var agentIcon: String = "waveform.circle.fill"
+    @AppStorage("AGENT_ICON") private var agentIcon: String = "brain.head.profile"
+    @AppStorage("AGENT_ICON_COLOR") private var agentIconColor: String = "purple"
     @AppStorage("USER_ICON") private var userIcon: String = "person.circle.fill"
+    @StateObject private var historyManager = ActivityHistoryManager()
+    @StateObject private var notificationManager = NotificationManager.shared
     @StateObject private var speechManager = SpeechManager()
+    @State private var showNotificationList = false
     @Namespace private var scrollSpace
     private let eventStore = EKEventStore()
     private let intentAnalyzer = IntentAnalyzer()
@@ -1312,7 +1367,7 @@ struct ContentView: View {
                 taskDetailSheet
             }
             .sheet(isPresented: $showSettingsSheet) {
-                SettingsView()
+                SettingsView(historyManager: historyManager)
             }
             .sheet(isPresented: $showTasksList) {
                 TasksListSheet(tasks: $tasks)
@@ -1341,6 +1396,7 @@ struct ContentView: View {
                 EmailComposerView(recipient: pendingEmail.recipient, subject: pendingEmail.subject, body: pendingEmail.body) { result, err in
                     if result == .sent {
                         messages.append(.init(isUser: false, text: "Email sent successfully."))
+                        historyManager.addLog(actionType: "Email", description: "Sent to \(pendingEmail.recipient)")
                         if let t = pendingAgentTask {
                             completeTask(t)
                         }
@@ -1579,18 +1635,21 @@ struct ContentView: View {
     
     private func completeTask(_ task: TaskItem) {
         if let idx = tasks.firstIndex(where: { $0.id == task.id }) {
-            tasks[idx].isDone = true
+            tasks[idx].markCompleted()
             promptedOverdueTaskIDs.remove(task.id)
+            historyManager.addLog(actionType: "Task", description: "Completed: \(tasks[idx].title)")
             reprioritize()
         }
     }
 
     private func cancelTask(_ task: TaskItem) {
         if let idx = tasks.firstIndex(where: { $0.id == task.id }) {
-            tasks.remove(at: idx)
+            tasks[idx].markCanceled()
             promptedOverdueTaskIDs.remove(task.id)
             UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [task.id.uuidString])
-            messages.append(.init(isUser: false, text: "Canceled overdue task: \(task.title)"))
+            historyManager.addLog(actionType: "Task", description: "Canceled: \(tasks[idx].title)")
+            messages.append(.init(isUser: false, text: "Canceled task: \(tasks[idx].title)"))
+            reprioritize()
         }
     }
 
@@ -1604,11 +1663,28 @@ struct ContentView: View {
                 Text("Speak tasks, capture details, and keep priorities tight.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                Button("Settings") { showSettingsSheet = true }
-                    .font(.caption)
-                    .buttonStyle(.bordered)
             }
             Spacer()
+            // Notification Bell
+            Button(action: { showNotificationList = true }) {
+                ZStack(alignment: .topTrailing) {
+                    Image(systemName: "bell")
+                        .font(.title3)
+                    
+                    let count = notificationManager.notifications.filter { !$0.isRead }.count
+                    if count > 0 {
+                        Text("\(count)")
+                            .font(.caption2.bold())
+                            .foregroundStyle(.white)
+                            .padding(4)
+                            .background(Color.red)
+                            .clipShape(Circle())
+                            .offset(x: 10, y: -10)
+                    }
+                }
+            }
+            .padding(.trailing, 8)
+            
             Menu {
                 Button("Tasks", action: { showTasksList = true })
                 Button("Settings") { showSettingsSheet = true }
@@ -1620,6 +1696,9 @@ struct ContentView: View {
         }
         .padding(.horizontal)
         .padding(.vertical, 12)
+        .sheet(isPresented: $showNotificationList) {
+            NotificationListView(manager: notificationManager)
+        }
     }
 
     // MARK: Chat
@@ -1734,9 +1813,9 @@ struct ContentView: View {
             } else {
                 Image(systemName: agentIcon)
                     .font(.title2)
-                    .foregroundStyle(.purple)
+                    .foregroundStyle(agentAccentColor)
                     .frame(width: 32, height: 32)
-                    .background(Color.purple.opacity(0.1))
+                    .background(agentAccentColor.opacity(0.12))
                     .clipShape(Circle())
             }
 
@@ -1810,10 +1889,17 @@ struct ContentView: View {
                 Text(task.tag.uppercased())
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.secondary)
+                Text(task.statusLabel)
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(statusColor(task.status).opacity(0.18))
+                    .foregroundStyle(statusColor(task.status))
+                    .clipShape(Capsule())
                 Spacer()
                 if task.executor == .agent {
                     Image(systemName: "person.crop.circle.badge.exclamationmark")
-                         .foregroundStyle(.purple)
+                         .foregroundStyle(agentAccentColor)
                          .help("\(agentName) Task")
                 }
                 Button {
@@ -1898,7 +1984,7 @@ struct TasksListSheet: View {
                     HStack {
                         Button {
                             if let index = tasks.firstIndex(where: { $0.id == task.id }) {
-                                withAnimation { tasks[index].isDone.toggle() }
+                                withAnimation { tasks[index].toggleDoneState() }
                             }
                         } label: {
                             Image(systemName: task.isDone ? "checkmark.circle.fill" : "circle")
@@ -1912,6 +1998,9 @@ struct TasksListSheet: View {
                                 .font(.headline)
                                 .strikethrough(task.isDone)
                                 .foregroundStyle(task.isDone ? .secondary : .primary)
+                            Text(task.statusLabel)
+                                .font(.caption2)
+                                .foregroundStyle(statusColor(task.status))
                             Text("\(task.type == .calendar ? "📅 " : "")Start: \(task.startDate.formatted(date: .abbreviated, time: .shortened))")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -1936,7 +2025,7 @@ struct TasksListSheet: View {
                     .swipeActions(edge: .leading) {
                         Button(task.isDone ? "Undo" : "Done") {
                             if let index = tasks.firstIndex(where: { $0.id == task.id }) {
-                                withAnimation { tasks[index].isDone.toggle() }
+                                withAnimation { tasks[index].toggleDoneState() }
                             }
                         }
                         .tint(.green)
@@ -1992,6 +2081,14 @@ struct TasksListSheet: View {
         case 1: return .red
         case 2: return .orange
         default: return .blue
+        }
+    }
+
+    private func statusColor(_ status: TaskItem.TaskStatus) -> Color {
+        switch status {
+        case .open: return .secondary
+        case .completed: return .green
+        case .canceled: return .red
         }
     }
 }
@@ -2239,9 +2336,11 @@ extension ContentView {
             UIApplication.shared.open(url, options: [:]) { success in
                 if success {
                      messages.append(.init(isUser: false, text: "Calling \(number)..."))
+                     historyManager.addLog(actionType: "Call", description: "Start call to \(number)")
                 } else {
                     #if targetEnvironment(simulator)
                     messages.append(.init(isUser: false, text: "Simulating Call to \(number)... (Simulator doesn't support calls)"))
+                    historyManager.addLog(actionType: "Call", description: "Simulated call to \(number)")
                     #else
                     messages.append(.init(isUser: false, text: "Could not initiate call."))
                     #endif
@@ -2555,7 +2654,7 @@ extension ContentView {
     
         let activeKey = storedApiKey.isEmpty ? ProcessInfo.processInfo.environment["OPENAI_API_KEY"] : storedApiKey
 
-        if var draft = await intentService.infer(from: text, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint, userName: userName, agentName: agentName) ?? intentAnalyzer.infer(from: text, agentName: agentName) {
+        if var draft = await intentService.infer(from: text, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint, userName: userName, agentName: agentName, appContext: buildAIContextSnapshot()) ?? intentAnalyzer.infer(from: text, agentName: agentName) {
             lastIntentSource = intentService.usedOpenAI ? "openai" : "fallback"
             lastIntentReason = intentService.lastReason
             
@@ -2833,6 +2932,8 @@ extension ContentView {
             dueDate: Date(),
             priority: 3 // Low priority for log/history
         )
+        // Log message
+        historyManager.addLog(actionType: "Message", description: "Sent to \(recipient): \(String(body.prefix(20)))")
         // We insert it directly. "insertTask" does calendar stuff which we might not want for a just-completed log.
         // But the user said "add that as a complete tasks". 
         // Let's just append and sort.
@@ -2884,6 +2985,11 @@ extension ContentView {
         tasks.append(newTask)
         reprioritize()
         scheduleReminder(for: newTask)
+        // Log task creation
+        historyManager.addLog(
+            actionType: newTask.executor == .agent ? (newTask.actionPayload?.type ?? "Task") : "Task",
+            description: "Added: \(newTask.title)"
+        )
         Task { await addCalendarEvent(for: newTask) }
 
         guard announce else { return }
@@ -3044,7 +3150,6 @@ extension ContentView {
     }
 
     private func scheduleReminder(for task: TaskItem) {
-        // Check permissions first for debugging purposes
         UNUserNotificationCenter.current().getNotificationSettings { settings in
             if settings.authorizationStatus != .authorized {
                 print("⚠️ Notification permission not authorized: \(settings.authorizationStatus.rawValue)")
@@ -3067,31 +3172,35 @@ extension ContentView {
             content.interruptionLevel = .timeSensitive
         }
 
-        // Calculate trigger date from task.startDate
         let triggerDate = task.startDate
         let timeInterval = triggerDate.timeIntervalSinceNow
-        
-        // Fix: If the time is in the past (e.g. "now" which is 0s, or "1 min ago"), but RECENT, 
-        // we fire immediately (1s delay). 
-        // We only skip if it's genuinely old (e.g. > 15 mins ago).
-        
-        // Also handle the case where timeInterval is barely positive (0.1s) to ensure OS handles it.
         let effectiveInterval = max(timeInterval, 1.0)
-        
-        // Trigger if future OR recent past (>-900s)
-        if timeInterval > -900 {
-            let trigger = UNTimeIntervalNotificationTrigger(timeInterval: effectiveInterval, repeats: false)
-            
-            let request = UNNotificationRequest(identifier: task.id.uuidString, content: content, trigger: trigger)
-            UNUserNotificationCenter.current().add(request) { error in
-                if let e = error {
-                     print("Error scheduling notification: \(e)")
-                } else {
-                    print("✅ Notification scheduled for \(triggerDate) (using interval \(effectiveInterval)s)")
+
+        guard timeInterval > -900 else {
+            print("⚠️ Skipping notification: Time \(triggerDate) is too far in the past (\(timeInterval)s).")
+            return
+        }
+
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: effectiveInterval, repeats: false)
+        UNUserNotificationCenter.current().getPendingNotificationRequests { requests in
+            DispatchQueue.main.async {
+                let currentPending = requests.count
+                let currentBadge = UIApplication.shared.applicationIconBadgeNumber
+                content.badge = NSNumber(value: currentBadge + currentPending + 1)
+
+                let request = UNNotificationRequest(identifier: task.id.uuidString, content: content, trigger: trigger)
+                UNUserNotificationCenter.current().add(request) { error in
+                    if let e = error {
+                        print("Error scheduling notification: \(e)")
+                    } else {
+                        print("✅ Notification scheduled for \(triggerDate) (using interval \(effectiveInterval)s)")
+                    }
                 }
             }
-        } else {
-             print("⚠️ Skipping notification: Time \(triggerDate) is too far in the past (\(timeInterval)s).")
+        }
+
+        Task { @MainActor in
+            notificationManager.addNotification(title: content.title, body: content.body)
         }
     }
 
@@ -3121,6 +3230,84 @@ extension ContentView {
         }
     }
 
+    private func buildAIContextSnapshot() -> String {
+        let calendar = Calendar.current
+        let now = Date()
+        let startOfToday = calendar.startOfDay(for: now)
+
+        func clipped(_ text: String, max: Int = 90) -> String {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.count > max else { return trimmed }
+            return String(trimmed.prefix(max)) + "…"
+        }
+
+        let todayOpenTasks = tasks
+            .filter { !$0.isDone && calendar.isDate($0.dueDate, inSameDayAs: now) }
+            .sorted { $0.priority < $1.priority }
+            .prefix(5)
+            .map { "- \(clipped($0.title, max: 55)) (\($0.dueDate.formatted(date: .omitted, time: .shortened)), p\($0.priority))" }
+            .joined(separator: "\n")
+
+        let todayDoneTasks = tasks
+            .filter { $0.status == .completed && calendar.isDate($0.dueDate, inSameDayAs: now) }
+            .prefix(4)
+            .map { "- \(clipped($0.title, max: 55))" }
+            .joined(separator: "\n")
+
+        let todayCanceledTasks = tasks
+            .filter { $0.status == .canceled && calendar.isDate($0.dueDate, inSameDayAs: now) }
+            .prefix(4)
+            .map { "- \(clipped($0.title, max: 55))" }
+            .joined(separator: "\n")
+
+        let upcomingTasks = tasks
+            .filter { !$0.isDone && $0.dueDate >= calendar.startOfDay(for: now) }
+            .sorted { $0.dueDate < $1.dueDate }
+            .prefix(5)
+            .map { "- \(clipped($0.title, max: 55)) (\($0.dueDate.formatted(date: .abbreviated, time: .shortened)), p\($0.priority))" }
+            .joined(separator: "\n")
+
+        let recentActivity = historyManager.history
+            .filter { $0.date >= startOfToday }
+            .prefix(6)
+            .map { "- [\($0.actionType)] \(clipped($0.description))" }
+            .joined(separator: "\n")
+
+        let unreadCount = notificationManager.notifications.filter { !$0.isRead }.count
+        let recentNotifications = notificationManager.notifications
+            .prefix(5)
+            .map { "- \(clipped($0.title, max: 40)): \(clipped($0.body, max: 70)) [\($0.isRead ? "r" : "u")]" }
+            .joined(separator: "\n")
+
+        let recentChat = messages
+            .suffix(4)
+            .map { "\($0.isUser ? "U" : "A"): \(clipped($0.text, max: 100))" }
+            .joined(separator: "\n")
+
+        return """
+        TODAY_OPEN:
+        \(todayOpenTasks.isEmpty ? "- none" : todayOpenTasks)
+
+        TODAY_DONE:
+        \(todayDoneTasks.isEmpty ? "- none" : todayDoneTasks)
+
+        TODAY_CANCELED:
+        \(todayCanceledTasks.isEmpty ? "- none" : todayCanceledTasks)
+
+        UPCOMING:
+        \(upcomingTasks.isEmpty ? "- none" : upcomingTasks)
+
+        TODAY_ACTIVITY:
+        \(recentActivity.isEmpty ? "- none" : recentActivity)
+
+        NOTIFS_UNREAD=\(unreadCount)
+        \(recentNotifications.isEmpty ? "- none" : recentNotifications)
+
+        CHAT_RECENT:
+        \(recentChat.isEmpty ? "- none" : recentChat)
+        """
+    }
+
     // MARK: Helpers
 
     private func saveTasks() {
@@ -3146,6 +3333,12 @@ extension ContentView {
                .init(title: "Review roadmap with PM", tag: "Work", startDate: .now, dueDate: .now.addingTimeInterval(86_400.0 * 2), priority: 1)
            ]
         }
+
+        for index in baseTasks.indices {
+            if baseTasks[index].status == .open && baseTasks[index].isDone {
+                baseTasks[index].status = .completed
+            }
+        }
         
         // Combine with system items
         // Note: In a real app we would not effectively re-append system items to the 'tasks' array on every load 
@@ -3169,9 +3362,28 @@ extension ContentView {
         }
     }
 
+    private func statusColor(_ status: TaskItem.TaskStatus) -> Color {
+        switch status {
+        case .open: return .secondary
+        case .completed: return .green
+        case .canceled: return .red
+        }
+    }
+
     private func toggleTask(_ task: TaskItem) {
         guard let index = tasks.firstIndex(of: task) else { return }
-        tasks[index].isDone.toggle()
+        tasks[index].toggleDoneState()
+    }
+
+    private var agentAccentColor: Color {
+        switch agentIconColor {
+        case "blue": return .blue
+        case "green": return .green
+        case "orange": return .orange
+        case "red": return .red
+        case "pink": return .pink
+        default: return .purple
+        }
     }
 }
 
@@ -3179,6 +3391,7 @@ extension ContentView {
 import MessageUI
 
 struct MessageComposerView: UIViewControllerRepresentable {
+    @Environment(\.presentationMode) var presentationMode
     var recipients: [String]
     var body: String
     var completion: (MessageComposeResult) -> Void
@@ -3188,31 +3401,32 @@ struct MessageComposerView: UIViewControllerRepresentable {
         controller.recipients = recipients
         controller.body = body
         controller.messageComposeDelegate = context.coordinator
+        controller.modalPresentationStyle = .overFullScreen // Ensure full screen or system decision
         return controller
     }
 
     func updateUIViewController(_ uiViewController: MFMessageComposeViewController, context: Context) {}
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(completion: completion)
+        Coordinator(parent: self)
     }
 
     class Coordinator: NSObject, MFMessageComposeViewControllerDelegate {
-        var completion: (MessageComposeResult) -> Void
+        var parent: MessageComposerView
 
-        init(completion: @escaping (MessageComposeResult) -> Void) {
-            self.completion = completion
+        init(parent: MessageComposerView) {
+            self.parent = parent
         }
 
         func messageComposeViewController(_ controller: MFMessageComposeViewController, didFinishWith result: MessageComposeResult) {
-            controller.dismiss(animated: true) {
-                self.completion(result)
-            }
+            parent.presentationMode.wrappedValue.dismiss()
+            parent.completion(result)
         }
     }
 }
 
 struct EmailComposerView: UIViewControllerRepresentable {
+    @Environment(\.presentationMode) var presentationMode
     var recipient: String
     var subject: String
     var body: String
@@ -3225,6 +3439,7 @@ struct EmailComposerView: UIViewControllerRepresentable {
             controller.setSubject(subject)
             controller.setMessageBody(body, isHTML: false)
             controller.mailComposeDelegate = context.coordinator
+            controller.modalPresentationStyle = .overFullScreen
             return controller
         } else {
             return MFMailComposeViewController() 
@@ -3234,20 +3449,19 @@ struct EmailComposerView: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: MFMailComposeViewController, context: Context) {}
     
     func makeCoordinator() -> Coordinator {
-        Coordinator(completion: completion)
+        Coordinator(parent: self)
     }
 
     class Coordinator: NSObject, MFMailComposeViewControllerDelegate {
-        var completion: (MFMailComposeResult, Error?) -> Void
+        var parent: EmailComposerView
 
-        init(completion: @escaping (MFMailComposeResult, Error?) -> Void) {
-            self.completion = completion
+        init(parent: EmailComposerView) {
+            self.parent = parent
         }
 
          func mailComposeController(_ controller: MFMailComposeViewController, didFinishWith result: MFMailComposeResult, error: Error?) {
-            controller.dismiss(animated: true) {
-                self.completion(result, error)
-            }
+            parent.presentationMode.wrappedValue.dismiss()
+            parent.completion(result, error)
         }
     }
 }

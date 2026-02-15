@@ -8,7 +8,8 @@ struct SettingsView: View {
     @AppStorage("OPENAI_AZURE_ENDPOINT") private var azureEndpoint: String = "https://admin-mev0a1yu-eastus2.openai.azure.com/openai/deployments/gpt-5.2/chat/completions?api-version=2024-12-01-preview"
     @AppStorage("AGENT_NAME") private var storedAgentName: String = "Nexa"
     @AppStorage("USER_NAME") private var storedUserName: String = ""
-    @AppStorage("AGENT_ICON") private var agentIcon: String = "waveform.circle.fill"
+    @AppStorage("AGENT_ICON") private var agentIcon: String = "brain.head.profile"
+    @AppStorage("AGENT_ICON_COLOR") private var agentIconColor: String = "purple"
     @AppStorage("USER_ICON") private var userIcon: String = "person.circle.fill"
     
     @State private var localKey: String = ""
@@ -17,11 +18,18 @@ struct SettingsView: View {
     @State private var localEndpoint: String = ""
     
     @State private var connectionStatus: String = "not tested"
+    @ObservedObject var historyManager: ActivityHistoryManager
     private let intentService = IntentService()
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("Activity") {
+                     NavigationLink("View Activity History") {
+                         ActivityHistoryView(historyManager: historyManager)
+                     }
+                }
+
                 Section("Identity") {
                     TextField("Your Name", text: $storedUserName)
                     TextField("Agent Name", text: $storedAgentName)
@@ -30,7 +38,15 @@ struct SettingsView: View {
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                         Image(systemName: agentIcon)
-                            .foregroundStyle(.purple)
+                            .foregroundStyle(agentColor)
+                    }
+                    Picker("Agent Icon Color", selection: $agentIconColor) {
+                        Text("Purple").tag("purple")
+                        Text("Blue").tag("blue")
+                        Text("Green").tag("green")
+                        Text("Orange").tag("orange")
+                        Text("Red").tag("red")
+                        Text("Pink").tag("pink")
                     }
                     HStack {
                         TextField("User Icon (SF Symbol)", text: $userIcon)
@@ -141,6 +157,17 @@ struct SettingsView: View {
                 localUseAzure = useAzure
                 localEndpoint = azureEndpoint
             }
+        }
+    }
+
+    private var agentColor: Color {
+        switch agentIconColor {
+        case "blue": return .blue
+        case "green": return .green
+        case "orange": return .orange
+        case "red": return .red
+        case "pink": return .pink
+        default: return .purple
         }
     }
 }
