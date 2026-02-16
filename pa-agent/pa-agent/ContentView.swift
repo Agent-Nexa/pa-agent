@@ -4257,12 +4257,12 @@ extension ContentView {
                 }
                 .disabled(trimmedDraft.isEmpty && pendingAttachment == nil)
 
-                Button(action: dismissKeyboard) {
-                    Image(systemName: "keyboard.chevron.compact.down")
+                Button(action: toggleKeyboard) {
+                    Image(systemName: isInputFocused ? "keyboard.chevron.compact.down" : "keyboard")
                         .font(.title2)
                         .foregroundStyle(.secondary)
                 }
-                .accessibilityLabel("Hide keyboard")
+                .accessibilityLabel(isInputFocused ? "Hide keyboard" : "Show keyboard")
             }
             .padding(.horizontal)
             .padding(.bottom, 10)
@@ -6918,6 +6918,14 @@ extension ContentView {
     private func dismissKeyboard() {
         isInputFocused = false
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
+
+    private func toggleKeyboard() {
+        if isInputFocused {
+            dismissKeyboard()
+        } else {
+            isInputFocused = true
+        }
     }
 }
 
