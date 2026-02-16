@@ -219,6 +219,7 @@ struct TaskItem: Identifiable, Hashable, Codable {
     var tag: String = "General"
     var startDate: Date = .now
     var dueDate: Date = .now.addingTimeInterval(60 * 60 * 24)
+    var completedAt: Date? = nil
     var priority: Int = 2
     var type: SourceType = .app
     var externalId: String? = nil
@@ -271,16 +272,19 @@ struct TaskItem: Identifiable, Hashable, Codable {
     mutating func markCompleted() {
         isDone = true
         status = .completed
+        completedAt = Date()
     }
 
     mutating func markCanceled() {
         isDone = true
         status = .canceled
+        completedAt = nil
     }
 
     mutating func markOpen() {
         isDone = false
         status = .open
+        completedAt = nil
     }
 
     mutating func toggleDoneState() {
@@ -3469,7 +3473,11 @@ struct ContentView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }
-            Text("Start: \(task.startDate.formatted(date: .abbreviated, time: .omitted))")
+            Text(
+                task.status == .completed || task.isDone
+                    ? "Completed: \((task.completedAt ?? task.startDate).formatted(date: .abbreviated, time: .omitted))"
+                    : "Start: \(task.startDate.formatted(date: .abbreviated, time: .omitted))"
+            )
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
@@ -3548,15 +3556,30 @@ struct TasksListSheet: View {
             case .all:
                 return true
             case .today:
-                return targetDate < tomorrowStart 
+                if task.status == .open, !task.isDone, task.dueDate < now {
+                    return true
+                }
+
+                if task.status == .completed || task.isDone {
+                    if let completedAt = task.completedAt {
+                        return calendar.isDate(completedAt, inSameDayAs: now)
+                    }
+                    return calendar.isDate(targetDate, inSameDayAs: now)
+                }
+
+                return targetDate >= todayStart && targetDate < tomorrowStart
             case .upcoming:
                 return targetDate >= tomorrowStart && targetDate < nextWeekStart
             }
         }
-        // Consistent sorting logic
-        .sorted { 
-             if $0.startDate != $1.startDate { return $0.startDate < $1.startDate }
-             return $0.priority < $1.priority 
+        .sorted {
+            let lhsRank = statusSortRank(for: $0)
+            let rhsRank = statusSortRank(for: $1)
+
+            if lhsRank != rhsRank { return lhsRank < rhsRank }
+            if $0.dueDate != $1.dueDate { return $0.dueDate < $1.dueDate }
+            if $0.startDate != $1.startDate { return $0.startDate < $1.startDate }
+            return $0.priority < $1.priority
         }
     }
 
@@ -3585,7 +3608,11 @@ struct TasksListSheet: View {
                             Text(task.statusLabel)
                                 .font(.caption2)
                                 .foregroundStyle(statusColor(for: task))
-                            Text("\(task.type == .calendar ? "📅 " : "")Start: \(task.startDate.formatted(date: .abbreviated, time: .shortened))")
+                            Text(
+                                task.status == .completed || task.isDone
+                                    ? "Completed: \((task.completedAt ?? task.startDate).formatted(date: .abbreviated, time: .shortened))"
+                                    : "\(task.type == .calendar ? "📅 " : "")Start: \(task.startDate.formatted(date: .abbreviated, time: .shortened))"
+                            )
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -3740,6 +3767,16 @@ struct TasksListSheet: View {
         } else {
             selectedCalendarName = "Default"
         }
+    }
+
+    private func statusSortRank(for task: TaskItem) -> Int {
+        if task.status == .canceled {
+            return 2
+        }
+        if task.status == .completed || task.isDone {
+            return 1
+        }
+        return 0
     }
 
     private func printFilteredTaskList() {
