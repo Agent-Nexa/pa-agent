@@ -1881,17 +1881,24 @@ final class SpeechManager: NSObject, ObservableObject, SFSpeechRecognizerDelegat
     func stopRecording() {
         silenceTimer?.invalidate()
         silenceTimer = nil
+
+        task?.cancel()
+        task = nil
         
         audioEngine.stop()
         request?.endAudio()
+        request = nil
         audioEngine.inputNode.removeTap(onBus: 0)
         isRecording = false
+
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 }
 
 // MARK: - View
 
 struct ContentView: View {
+    private let maxChatMessages = 250
     @State private var tasks: [TaskItem] = []
     @State private var messages: [ChatMessage] = []
     @State private var draft: String = ""
@@ -2024,9 +2031,6 @@ struct ContentView: View {
             .sheet(isPresented: $showTasksList) {
                 TasksListSheet(
                     tasks: $tasks,
-                    onRefresh: {
-                        Task { await refreshSystemTasks() }
-                    },
                     onTaskChanged: { task in
                         syncTaskStatusToCalendarIfNeeded(task)
                     },
@@ -2437,7 +2441,7 @@ struct ContentView: View {
                     Image(systemName: "bell")
                         .font(.title3)
                     
-                    let count = notificationManager.notifications.filter { !$0.isRead }.count
+                    let count = notificationManager.unreadCount
                     if count > 0 {
                         Text("\(count)")
                             .font(.caption2.bold())
@@ -2590,6 +2594,11 @@ struct ContentView: View {
                 .padding(.horizontal)
                 .padding(.vertical, 16)
                 .onChange(of: messages) { oldValue, newValue in
+                    if newValue.count > maxChatMessages {
+                        messages = Array(newValue.suffix(maxChatMessages))
+                        return
+                    }
+
                     // Scroll to bottom whenever messages change
                     withAnimation(.easeOut(duration: 0.2)) {
                         proxy.scrollTo("bottom", anchor: .bottom)
@@ -2870,7 +2879,6 @@ struct ContentView: View {
 struct TasksListSheet: View {
     @Binding var tasks: [TaskItem]
     @AppStorage("PREFERRED_TASK_CALENDAR_ID") private var preferredTaskCalendarId: String = ""
-    var onRefresh: () -> Void = {}
     var onTaskChanged: (TaskItem) -> Void = { _ in }
     var onRequestCalendarAccess: () -> Void = {}
     var onRequestRemindersAccess: () -> Void = {}
@@ -3037,7 +3045,6 @@ struct TasksListSheet: View {
                 }
                 ToolbarItem(placement: .topBarLeading) {
                     Menu {
-                        Button("Sync Now") { onRefresh() }
                         Button("Enable Calendar Access") { onRequestCalendarAccess() }
                         Button("Enable Reminders Access") { onRequestRemindersAccess() }
                     } label: {
@@ -3085,7 +3092,7 @@ struct TasksListSheet: View {
                     ContentUnavailableView(
                         "No \(selectedStatusFilter.rawValue.lowercased()) tasks for \(selectedFilter.rawValue.lowercased())",
                         systemImage: "checklist",
-                        description: Text("Try Sync Now from the top-left menu, or add tasks by chatting with the agent.")
+                        description: Text("Use the top-left menu to enable Calendar and Reminders access, or add tasks by chatting with the agent.")
                     )
                 }
             }
@@ -5621,7 +5628,7 @@ extension ContentView {
             .map { "- [\($0.actionType)] \(clipped($0.description))" }
             .joined(separator: "\n")
 
-        let unreadCount = notificationManager.notifications.filter { !$0.isRead }.count
+        let unreadCount = notificationManager.unreadCount
         let recentNotifications = notificationManager.notifications
             .prefix(5)
             .map { "- \(clipped($0.title, max: 40)): \(clipped($0.body, max: 70)) [\($0.isRead ? "r" : "u")]" }

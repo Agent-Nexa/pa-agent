@@ -22,6 +22,11 @@ struct NotificationItem: Identifiable, Codable {
 class NotificationManager: NSObject, ObservableObject {
     static let shared = NotificationManager()
     @Published var notifications: [NotificationItem] = []
+    private let maxStoredNotifications = 200
+
+    var unreadCount: Int {
+        notifications.lazy.filter { !$0.isRead }.count
+    }
     
     override init() {
         super.init()
@@ -33,6 +38,7 @@ class NotificationManager: NSObject, ObservableObject {
     func addNotification(title: String, body: String) {
         let item = NotificationItem(title: title, body: body)
         notifications.insert(item, at: 0)
+        trimNotificationsIfNeeded()
         save()
         updateBadgeCount()
     }
@@ -58,9 +64,9 @@ class NotificationManager: NSObject, ObservableObject {
     }
     
     private func updateBadgeCount() {
-        let unreadCount = notifications.filter { !$0.isRead }.count
+        let currentUnreadCount = unreadCount
         DispatchQueue.main.async {
-            UNUserNotificationCenter.current().setBadgeCount(unreadCount) { error in
+            UNUserNotificationCenter.current().setBadgeCount(currentUnreadCount) { error in
                 if let error = error {
                     print("Error setting badge count: \(error)")
                 }
@@ -78,6 +84,12 @@ class NotificationManager: NSObject, ObservableObject {
         if let data = UserDefaults.standard.data(forKey: "NotificationHistory"),
            let decoded = try? JSONDecoder().decode([NotificationItem].self, from: data) {
             notifications = decoded
+            trimNotificationsIfNeeded()
         }
+    }
+
+    private func trimNotificationsIfNeeded() {
+        guard notifications.count > maxStoredNotifications else { return }
+        notifications = Array(notifications.prefix(maxStoredNotifications))
     }
 }

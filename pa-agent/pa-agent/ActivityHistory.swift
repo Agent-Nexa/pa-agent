@@ -18,6 +18,7 @@ struct ActivityLog: Identifiable, Codable {
 
 class ActivityHistoryManager: NSObject, ObservableObject {
     @Published var history: [ActivityLog] = []
+    private let maxStoredHistory = 500
     
     override init() {
         super.init()
@@ -27,6 +28,7 @@ class ActivityHistoryManager: NSObject, ObservableObject {
     func addLog(actionType: String, description: String) {
         let log = ActivityLog(actionType: actionType, description: description)
         history.insert(log, at: 0)
+        trimHistoryIfNeeded()
         save()
     }
     
@@ -50,6 +52,12 @@ class ActivityHistoryManager: NSObject, ObservableObject {
         if let data = UserDefaults.standard.data(forKey: "ActivityHistory"),
            let decoded = try? JSONDecoder().decode([ActivityLog].self, from: data) {
             history = decoded
+            trimHistoryIfNeeded()
         }
+    }
+
+    private func trimHistoryIfNeeded() {
+        guard history.count > maxStoredHistory else { return }
+        history = Array(history.prefix(maxStoredHistory))
     }
 }

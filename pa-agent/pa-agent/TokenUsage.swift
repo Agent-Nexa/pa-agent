@@ -73,6 +73,7 @@ final class TokenUsageManager: ObservableObject {
 
     private let storageKey = "AI_TOKEN_USAGE_ENTRIES"
     private let calendar = Calendar.current
+    private let maxStoredEntries = 3000
 
     private init() {
         load()
@@ -103,6 +104,7 @@ final class TokenUsageManager: ObservableObject {
 
         DispatchQueue.main.async {
             self.entries.insert(entry, at: 0)
+            self.trimEntriesIfNeeded()
             self.save()
         }
     }
@@ -220,5 +222,11 @@ final class TokenUsageManager: ObservableObject {
             return
         }
         entries = decoded.sorted { $0.date > $1.date }
+        trimEntriesIfNeeded()
+    }
+
+    private func trimEntriesIfNeeded() {
+        guard entries.count > maxStoredEntries else { return }
+        entries = Array(entries.prefix(maxStoredEntries))
     }
 }
