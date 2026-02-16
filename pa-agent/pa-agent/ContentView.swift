@@ -2875,7 +2875,7 @@ struct TasksListSheet: View {
     var onRequestCalendarAccess: () -> Void = {}
     var onRequestRemindersAccess: () -> Void = {}
     @Environment(\.dismiss) private var dismiss
-    @State private var selectedFilter: TaskFilter = .all
+    @State private var selectedFilter: TaskFilter = .today
     @State private var selectedStatusFilter: StatusFilter = .all
     @State private var selectedTaskForDetail: TaskItem?
     @State private var selectedCalendarName: String = "Default"
