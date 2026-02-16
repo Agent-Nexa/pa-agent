@@ -14,6 +14,14 @@ import EventKit
 import NaturalLanguage
 import Contacts
 import CryptoKit
+import UniformTypeIdentifiers
+import ImageIO
+#if canImport(PhotosUI)
+import PhotosUI
+#endif
+#if canImport(Photos)
+import Photos
+#endif
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -313,7 +321,7 @@ final class IntentService {
     private let session = URLSession(configuration: .default)
     private let tokenUsageManager = TokenUsageManager.shared
 
-    func infer(from text: String, apiKey: String?, model: String?, useAzure: Bool, azureEndpoint: String?, userName: String?, agentName: String = "Nexa", appContext: String? = nil) async -> IntentResult? {
+    func infer(from text: String, imageDataURL: String? = nil, apiKey: String?, model: String?, useAzure: Bool, azureEndpoint: String?, userName: String?, agentName: String = "Nexa", appContext: String? = nil) async -> IntentResult? {
         guard let rawKey = apiKey, !rawKey.isEmpty else {
             usedOpenAI = false
             lastReason = "missing API key"
@@ -425,17 +433,27 @@ final class IntentService {
         Respond ONLY with valid JSON.
         """
 
+        let userMessageContent: Any
+        if let imageDataURL, !imageDataURL.isEmpty {
+            userMessageContent = [
+                ["type": "text", "text": text.isEmpty ? "Please analyze this image and respond based on what you see." : text],
+                ["type": "image_url", "image_url": ["url": imageDataURL]]
+            ]
+        } else {
+            userMessageContent = text
+        }
+
         let body: [String: Any] = [
             "model": chosenModel,
             "temperature": 0,
             "response_format": ["type": "json_object"],
             "messages": [
                 ["role": "system", "content": systemPrompt],
-                ["role": "user", "content": text]
+                ["role": "user", "content": userMessageContent]
             ]
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        let requestText = "\(systemPrompt)\n\nUser:\n\(text)"
+        let requestText = "\(systemPrompt)\n\nUser:\n\(text)\n\nHasImage:\(imageDataURL?.isEmpty == false)"
         let provider = useAzure ? "azure-openai" : "openai"
 
         do {
@@ -474,6 +492,7 @@ final class IntentService {
 
     func streamAnswer(
         for text: String,
+        imageDataURL: String? = nil,
         apiKey: String?,
         model: String?,
         useAzure: Bool,
@@ -523,18 +542,28 @@ final class IntentService {
         \(contextBlock)
         """
 
+        let userMessageContent: Any
+        if let imageDataURL, !imageDataURL.isEmpty {
+            userMessageContent = [
+                ["type": "text", "text": text.isEmpty ? "Please analyze this image and answer the user request." : text],
+                ["type": "image_url", "image_url": ["url": imageDataURL]]
+            ]
+        } else {
+            userMessageContent = text
+        }
+
         let body: [String: Any] = [
             "model": chosenModel,
             "temperature": 0.6,
             "stream": true,
             "messages": [
                 ["role": "system", "content": systemPrompt],
-                ["role": "user", "content": text]
+                ["role": "user", "content": userMessageContent]
             ]
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
-        let requestText = "answer_stream userText=\(text)"
+        let requestText = "answer_stream userText=\(text) hasImage=\(imageDataURL?.isEmpty == false)"
         let provider = useAzure ? "azure-openai" : "openai"
 
         do {
@@ -1912,6 +1941,25 @@ struct MessageDraft {
     var body: String = ""
 }
 
+struct PendingAttachment: Equatable {
+    var fileName: String
+    var fileSizeBytes: Int
+    var fileTypeIdentifier: String
+    var pixelWidth: Int?
+    var pixelHeight: Int?
+    var thumbnailJPEGData: Data?
+    var visionImageDataURL: String?
+
+    var fileSizeLabel: String {
+        ByteCountFormatter.string(fromByteCount: Int64(fileSizeBytes), countStyle: .file)
+    }
+
+    var imageResolutionLabel: String? {
+        guard let pixelWidth, let pixelHeight, pixelWidth > 0, pixelHeight > 0 else { return nil }
+        return "\(pixelWidth)×\(pixelHeight)"
+    }
+}
+
 struct EmailDraft: Equatable {
     var recipient: String = ""
     var recipientName: String = ""
@@ -2391,6 +2439,10 @@ struct ContentView: View {
     @State private var showTasksList = false
     @State private var showMessageComposer = false
     @State private var showEmailComposer = false
+    #if canImport(PhotosUI)
+    @State private var selectedPhotoItem: PhotosPickerItem?
+    #endif
+    @State private var pendingAttachment: PendingAttachment?
     @AppStorage("OPENAI_API_KEY") private var storedApiKey: String = ""
     @AppStorage("OPENAI_MODEL") private var storedModel: String = "gpt-5.2"
     @AppStorage("OPENAI_USE_AZURE") private var useAzure: Bool = true
@@ -2445,13 +2497,14 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showPermissionSetupSheet) {
-            PermissionSetupSheet(allowSkip: permissionSetupShown) { notifications, speech, calendar, reminders in
+            PermissionSetupSheet(allowSkip: permissionSetupShown) { notifications, speech, calendar, reminders, photos in
                 Task {
                     await requestSelectedPermissions(
                         notifications: notifications,
                         speech: speech,
                         calendar: calendar,
-                        reminders: reminders
+                        reminders: reminders,
+                        photos: photos
                     )
                     permissionSetupShown = true
                     showPermissionSetupSheet = false
@@ -2567,6 +2620,17 @@ struct ContentView: View {
                     pendingAgentTask = nil
                 }
             }
+            #if canImport(PhotosUI)
+            .onChange(of: selectedPhotoItem) { _, newItem in
+                guard let newItem else { return }
+                Task {
+                    await loadPendingAttachment(from: newItem)
+                    await MainActor.run {
+                        selectedPhotoItem = nil
+                    }
+                }
+            }
+            #endif
             // Modified Alert similar to legacy but optimized for agent confirmation
             .alert(isPresented: $showingAgentTaskAlert) {
                 let title = pendingAgentTask?.title ?? "Agent Task Ready"
@@ -3822,13 +3886,14 @@ struct PermissionWelcomeView: View {
 
 struct PermissionSetupSheet: View {
     var allowSkip: Bool = true
-    let onContinue: (_ notifications: Bool, _ speech: Bool, _ calendar: Bool, _ reminders: Bool) -> Void
+    let onContinue: (_ notifications: Bool, _ speech: Bool, _ calendar: Bool, _ reminders: Bool, _ photos: Bool) -> Void
     let onSkip: () -> Void
 
     @State private var askNotifications = true
     @State private var askSpeech = true
     @State private var askCalendar = true
     @State private var askReminders = true
+    @State private var askPhotos = true
 
     var body: some View {
         NavigationStack {
@@ -3844,6 +3909,7 @@ struct PermissionSetupSheet: View {
                     Toggle("Speech + Microphone", isOn: $askSpeech)
                     Toggle("Calendar", isOn: $askCalendar)
                     Toggle("Reminders", isOn: $askReminders)
+                    Toggle("Photos", isOn: $askPhotos)
                 }
             }
             .navigationTitle("Permission Setup")
@@ -3855,7 +3921,7 @@ struct PermissionSetupSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Continue") {
-                        onContinue(askNotifications, askSpeech, askCalendar, askReminders)
+                        onContinue(askNotifications, askSpeech, askCalendar, askReminders, askPhotos)
                     }
                 }
             }
@@ -4026,8 +4092,82 @@ extension ContentView {
 
     private var inputBar: some View {
         VStack(spacing: 8) {
+            let trimmedDraft = draft.trimmingCharacters(in: .whitespacesAndNewlines)
             Divider()
+
+            if let attachment = pendingAttachment {
+                HStack(spacing: 10) {
+                    #if canImport(UIKit)
+                    if let previewData = attachment.thumbnailJPEGData,
+                       let previewImage = UIImage(data: previewData) {
+                        Image(uiImage: previewImage)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: 34, height: 34)
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    } else {
+                        Image(systemName: "photo.fill")
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    #elseif canImport(AppKit)
+                    if let previewData = attachment.thumbnailJPEGData,
+                       let previewImage = NSImage(data: previewData) {
+                        Image(nsImage: previewImage)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: 34, height: 34)
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    } else {
+                        Image(systemName: "photo.fill")
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    #else
+                    Image(systemName: "photo.fill")
+                        .foregroundStyle(Color.accentColor)
+                    #endif
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(attachment.fileName)
+                            .font(.caption)
+                            .lineLimit(1)
+                        Text(attachment.imageResolutionLabel.map { "\($0) • \(attachment.fileSizeLabel)" } ?? attachment.fileSizeLabel)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    Button {
+                        pendingAttachment = nil
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Remove attachment")
+                }
+                .padding(.horizontal)
+            }
+
             HStack(spacing: 10) {
+                #if canImport(PhotosUI)
+                PhotosPicker(selection: $selectedPhotoItem, matching: .images, photoLibrary: .shared()) {
+                    Image(systemName: "photo.circle.fill")
+                        .font(.title2)
+                        .foregroundStyle(Color.accentColor)
+                }
+                .accessibilityLabel("Choose photo")
+                #else
+                Button {
+                    messages.append(.init(isUser: false, text: "Photo selection is not supported on this platform."))
+                } label: {
+                    Image(systemName: "photo.circle.fill")
+                        .font(.title2)
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityLabel("Choose photo")
+                #endif
+
                 Button {
                     speechManager.isRecording ? speechManager.stopRecording() : speechManager.startRecording()
                     draft = speechManager.transcript
@@ -4048,7 +4188,7 @@ extension ContentView {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.title2)
                 }
-                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(trimmedDraft.isEmpty && pendingAttachment == nil)
 
                 Button(action: dismissKeyboard) {
                     Image(systemName: "keyboard.chevron.compact.down")
@@ -4115,14 +4255,165 @@ extension ContentView {
 
     private func sendMessage() {
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        let attachment = pendingAttachment
+        guard !trimmed.isEmpty || attachment != nil else { return }
 
-        let userMessage = ChatMessage(isUser: true, text: trimmed)
+        let messageText = composeUserVisibleMessage(text: trimmed, attachment: attachment)
+        let intentInput = composeIntentInput(text: trimmed, attachment: attachment)
+
+        let userMessage = ChatMessage(isUser: true, text: messageText)
         messages.append(userMessage)
         draft = ""
+        pendingAttachment = nil
         dismissKeyboard()
 
-        Task { await handleIntent(for: trimmed) }
+        Task { await handleIntent(for: intentInput, attachedImageDataURL: attachment?.visionImageDataURL) }
+    }
+
+    private func composeUserVisibleMessage(text: String, attachment: PendingAttachment?) -> String {
+        var lines: [String] = []
+        if !text.isEmpty {
+            lines.append(text)
+        }
+        if let attachment {
+            lines.append("🖼️ \(attachment.fileName)")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func composeIntentInput(text: String, attachment: PendingAttachment?) -> String {
+        guard let attachment else {
+            return text
+        }
+
+        let attachmentHeader = """
+        [Attached image]
+        Name: \(attachment.fileName)
+        Size: \(attachment.fileSizeLabel)
+        Type: \(attachment.fileTypeIdentifier)
+        Resolution: \(attachment.imageResolutionLabel ?? "Unknown")
+        """
+
+        var segments: [String] = []
+        if !text.isEmpty {
+            segments.append(text)
+        }
+
+        segments.append("\(attachmentHeader)\nThe user attached an image for context.")
+
+        return segments.joined(separator: "\n\n")
+    }
+
+    #if canImport(PhotosUI)
+    private func loadPendingAttachment(from photoItem: PhotosPickerItem) async {
+        do {
+            guard let data = try await photoItem.loadTransferable(type: Data.self) else {
+                await MainActor.run {
+                    messages.append(.init(isUser: false, text: "I couldn’t read that image. Try another one."))
+                }
+                return
+            }
+
+            let typeIdentifier = photoItem.supportedContentTypes.first?.identifier ?? "public.image"
+            let fileName = suggestedPhotoFileName(typeIdentifier: typeIdentifier)
+
+            let attachment = await Task.detached(priority: .userInitiated) {
+                buildPendingAttachment(fromImageData: data, fileName: fileName, fileTypeIdentifier: typeIdentifier)
+            }.value
+
+            await MainActor.run {
+                if let attachment {
+                    pendingAttachment = attachment
+                    messages.append(.init(isUser: false, text: "Attached image: \(attachment.fileName)."))
+                } else {
+                    messages.append(.init(isUser: false, text: "I couldn’t read that image. Try another one."))
+                }
+            }
+        } catch {
+            await MainActor.run {
+                messages.append(.init(isUser: false, text: "Couldn’t attach image: \(error.localizedDescription)"))
+            }
+        }
+    }
+    #endif
+
+    private func suggestedPhotoFileName(typeIdentifier: String) -> String {
+        let ext = UTType(typeIdentifier)?.preferredFilenameExtension ?? "jpg"
+        return "Photo.\(ext)"
+    }
+
+    private func buildPendingAttachment(fromImageData data: Data, fileName: String, fileTypeIdentifier: String) -> PendingAttachment? {
+        if let type = UTType(fileTypeIdentifier), !type.conforms(to: .image) {
+            return nil
+        }
+
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+            return nil
+        }
+
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        let pixelWidth = properties?[kCGImagePropertyPixelWidth] as? Int
+        let pixelHeight = properties?[kCGImagePropertyPixelHeight] as? Int
+
+        var thumbnailJPEGData: Data?
+        var visionJPEGData: Data?
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 256
+        ]
+        if let cgThumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
+            let outputData = NSMutableData()
+            if let destination = CGImageDestinationCreateWithData(outputData, UTType.jpeg.identifier as CFString, 1, nil) {
+                let destOptions: [CFString: Any] = [
+                    kCGImageDestinationLossyCompressionQuality: 0.75
+                ]
+                CGImageDestinationAddImage(destination, cgThumbnail, destOptions as CFDictionary)
+                if CGImageDestinationFinalize(destination) {
+                    thumbnailJPEGData = outputData as Data
+                }
+            }
+        }
+
+        let visionOptions: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 1280
+        ]
+        if let visionImage = CGImageSourceCreateThumbnailAtIndex(source, 0, visionOptions as CFDictionary) {
+            visionJPEGData = jpegData(from: visionImage, quality: 0.78)
+            if let size = visionJPEGData?.count, size > 1_200_000 {
+                visionJPEGData = jpegData(from: visionImage, quality: 0.62)
+            }
+            if let size = visionJPEGData?.count, size > 1_200_000 {
+                visionJPEGData = jpegData(from: visionImage, quality: 0.5)
+            }
+        }
+
+        let visionImageDataURL = visionJPEGData.map { "data:image/jpeg;base64,\($0.base64EncodedString())" }
+
+        return PendingAttachment(
+            fileName: fileName,
+            fileSizeBytes: data.count,
+            fileTypeIdentifier: fileTypeIdentifier,
+            pixelWidth: pixelWidth,
+            pixelHeight: pixelHeight,
+            thumbnailJPEGData: thumbnailJPEGData,
+            visionImageDataURL: visionImageDataURL
+        )
+    }
+
+    private func jpegData(from image: CGImage, quality: CGFloat) -> Data? {
+        let outputData = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(outputData, UTType.jpeg.identifier as CFString, 1, nil) else {
+            return nil
+        }
+        let options: [CFString: Any] = [
+            kCGImageDestinationLossyCompressionQuality: quality
+        ]
+        CGImageDestinationAddImage(destination, image, options as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return outputData as Data
     }
 
     private func copyAgentResponse(_ message: ChatMessage) {
@@ -4439,7 +4730,7 @@ extension ContentView {
         }
     }
 
-    private func handleIntent(for text: String) async {
+    private func handleIntent(for text: String, attachedImageDataURL: String? = nil) async {
         // Global cancel check
         let lower = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if ["cancel", "stop", "never mind", "abort"].contains(lower) {
@@ -4750,7 +5041,7 @@ extension ContentView {
                     isAgentThinking = true
                 }
             }
-            inferred = await intentService.infer(from: text, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint, userName: userName, agentName: agentName, appContext: buildAIContextSnapshot()) ?? intentAnalyzer.infer(from: text, agentName: agentName)
+            inferred = await intentService.infer(from: text, imageDataURL: attachedImageDataURL, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint, userName: userName, agentName: agentName, appContext: buildAIContextSnapshot()) ?? intentAnalyzer.infer(from: text, agentName: agentName)
             await MainActor.run {
                 withAnimation {
                     isAgentThinking = false
@@ -4962,6 +5253,7 @@ extension ContentView {
 
                     let streamed = await intentService.streamAnswer(
                         for: text,
+                        imageDataURL: attachedImageDataURL,
                         apiKey: activeKey,
                         model: storedModel,
                         useAzure: useAzure,
@@ -6234,7 +6526,7 @@ extension ContentView {
         }
     }
 
-    private func requestSelectedPermissions(notifications: Bool, speech: Bool, calendar: Bool, reminders: Bool) async {
+    private func requestSelectedPermissions(notifications: Bool, speech: Bool, calendar: Bool, reminders: Bool, photos: Bool) async {
         if notifications {
             _ = await requestNotificationPermission()
         }
@@ -6248,6 +6540,31 @@ extension ContentView {
         if reminders {
             await requestRemindersAccessIfNeeded()
         }
+        if photos {
+            _ = await requestPhotoLibraryPermission()
+        }
+    }
+
+    private func requestPhotoLibraryPermission() async -> Bool {
+        #if canImport(Photos)
+        let current = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        switch current {
+        case .authorized, .limited:
+            return true
+        case .denied, .restricted:
+            return false
+        case .notDetermined:
+            return await withCheckedContinuation { continuation in
+                PHPhotoLibrary.requestAuthorization(for: .readWrite) { status in
+                    continuation.resume(returning: status == .authorized || status == .limited)
+                }
+            }
+        @unknown default:
+            return false
+        }
+        #else
+        return false
+        #endif
     }
 
     private func requestNotificationPermission() async -> Bool {

@@ -5,6 +5,9 @@ import StoreKit
 import Speech
 import EventKit
 import UniformTypeIdentifiers
+#if canImport(Photos)
+import Photos
+#endif
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -51,6 +54,7 @@ struct SettingsView: View {
     @State private var speechPermissionText: String = "Unknown"
     @State private var calendarPermissionText: String = "Unknown"
     @State private var remindersPermissionText: String = "Unknown"
+    @State private var photosPermissionText: String = "Unknown"
     @State private var taskCalendarChoices: [EKCalendar] = []
     @State private var isEditing: Bool = false
     @State private var previewSynthesizer = AVSpeechSynthesizer()
@@ -452,6 +456,12 @@ struct SettingsView: View {
                             Text(remindersPermissionText)
                                 .foregroundStyle(.secondary)
                         }
+                        HStack {
+                            Text("Photos")
+                            Spacer()
+                            Text(photosPermissionText)
+                                .foregroundStyle(.secondary)
+                        }
 
                         Button("Request Notifications") {
                             Task {
@@ -479,6 +489,13 @@ struct SettingsView: View {
                         Button("Request Reminders") {
                             Task {
                                 await requestReminderPermission()
+                                refreshPermissionStatuses()
+                            }
+                        }
+
+                        Button("Request Photos") {
+                            Task {
+                                _ = await requestPhotoLibraryPermission()
                                 refreshPermissionStatuses()
                             }
                         }
@@ -750,6 +767,15 @@ struct SettingsView: View {
 
         calendarPermissionText = calendarStatusLabel(EKEventStore.authorizationStatus(for: .event))
         remindersPermissionText = reminderStatusLabel(EKEventStore.authorizationStatus(for: .reminder))
+        photosPermissionText = photoLibraryStatusLabel(currentPhotoLibraryStatus())
+    }
+
+    private func currentPhotoLibraryStatus() -> PHAuthorizationStatus {
+        #if canImport(Photos)
+        return PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        #else
+        return .notDetermined
+        #endif
     }
 
     private func refreshTaskCalendarChoices() {
@@ -819,6 +845,28 @@ struct SettingsView: View {
         }
     }
 
+    private func requestPhotoLibraryPermission() async -> Bool {
+        #if canImport(Photos)
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        switch status {
+        case .authorized, .limited:
+            return true
+        case .denied, .restricted:
+            return false
+        case .notDetermined:
+            return await withCheckedContinuation { continuation in
+                PHPhotoLibrary.requestAuthorization(for: .readWrite) { newStatus in
+                    continuation.resume(returning: newStatus == .authorized || newStatus == .limited)
+                }
+            }
+        @unknown default:
+            return false
+        }
+        #else
+        return false
+        #endif
+    }
+
     private func notificationStatusLabel(_ status: UNAuthorizationStatus) -> String {
         switch status {
         case .authorized: return "Allowed"
@@ -866,6 +914,17 @@ struct SettingsView: View {
         case .fullAccess: return "Full Access"
         case .writeOnly: return "Write Only"
         case .authorized: return "Authorized"
+        case .denied: return "Denied"
+        case .restricted: return "Restricted"
+        case .notDetermined: return "Not Set"
+        @unknown default: return "Unknown"
+        }
+    }
+
+    private func photoLibraryStatusLabel(_ status: PHAuthorizationStatus) -> String {
+        switch status {
+        case .authorized: return "Allowed"
+        case .limited: return "Limited"
         case .denied: return "Denied"
         case .restricted: return "Restricted"
         case .notDetermined: return "Not Set"
