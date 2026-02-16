@@ -13,6 +13,9 @@ import AVFoundation
 import EventKit
 import NaturalLanguage
 import Contacts
+#if canImport(UIKit)
+import UIKit
+#endif
 #if canImport(Charts)
 import Charts
 #endif
@@ -2893,7 +2896,7 @@ struct TasksListSheet: View {
     var onRequestRemindersAccess: () -> Void = {}
     @Environment(\.dismiss) private var dismiss
     @State private var selectedFilter: TaskFilter = .today
-    @State private var selectedStatusFilter: StatusFilter = .all
+    @State private var selectedStatusFilter: StatusFilter = .open
     @State private var selectedTaskForDetail: TaskItem?
     @State private var selectedCalendarName: String = "Default"
     private let eventStore = EKEventStore()
@@ -3060,6 +3063,14 @@ struct TasksListSheet: View {
                         Image(systemName: "arrow.triangle.2.circlepath")
                     }
                 }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        printFilteredTaskList()
+                    } label: {
+                        Image(systemName: "printer")
+                    }
+                    .accessibilityLabel("Print Task List")
+                }
             }
             .onAppear {
                 refreshSelectedCalendarName()
@@ -3123,6 +3134,44 @@ struct TasksListSheet: View {
         } else {
             selectedCalendarName = "Default"
         }
+    }
+
+    private func printFilteredTaskList() {
+#if canImport(UIKit)
+        let printController = UIPrintInteractionController.shared
+        let printInfo = UIPrintInfo.printInfo()
+        printInfo.outputType = .general
+        printInfo.jobName = "Task List"
+        printController.printInfo = printInfo
+        printController.printFormatter = UISimpleTextPrintFormatter(text: taskListPrintText())
+        printController.present(animated: true)
+#endif
+    }
+
+    private func taskListPrintText() -> String {
+        var lines: [String] = [
+            "Task List",
+            "Status: \(selectedStatusFilter.rawValue)",
+            "Date Filter: \(selectedFilter.rawValue)",
+            "Generated: \(Date().formatted(date: .abbreviated, time: .shortened))",
+            ""
+        ]
+
+        if filteredTasks.isEmpty {
+            lines.append("No tasks found.")
+            return lines.joined(separator: "\n")
+        }
+
+        for (index, task) in filteredTasks.enumerated() {
+            lines.append("\(index + 1). \(task.title)")
+            lines.append("   Status: \(task.statusLabel)")
+            lines.append("   Priority: \(task.priorityLabel)")
+            lines.append("   Start: \(task.startDate.formatted(date: .abbreviated, time: .shortened))")
+            lines.append("   Due: \(task.dueDate.formatted(date: .abbreviated, time: .shortened))")
+            lines.append("")
+        }
+
+        return lines.joined(separator: "\n")
     }
     
     private func priorityColor(_ value: Int) -> Color {
