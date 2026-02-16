@@ -1915,6 +1915,7 @@ struct ContentView: View {
     @State private var lastIntentReason: String = "not-run"
     @State private var showKeySheet = false
     @State private var showSettingsSheet = false
+    @State private var showHelpSheet = false
     @State private var showAIUsageSheet = false
     @State private var showTasksList = false
     @State private var showMessageComposer = false
@@ -2024,6 +2025,11 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showSettingsSheet) {
                 SettingsView(historyManager: historyManager)
+            }
+            .sheet(isPresented: $showHelpSheet) {
+                NavigationStack {
+                    HelpView()
+                }
             }
             .sheet(isPresented: $showAIUsageSheet) {
                 AIUsageView()
@@ -2467,6 +2473,9 @@ struct ContentView: View {
                 }
                 Button(action: { showSettingsSheet = true }) {
                     Label("Settings", systemImage: "gearshape")
+                }
+                Button(action: { showHelpSheet = true }) {
+                    Label("Help", systemImage: "questionmark.circle")
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
