@@ -405,6 +405,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Nexa;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "Allow access so tasks can be added to your Calendar.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Allow camera access so you can take photos to attach in chat.";
 				INFOPLIST_KEY_NSContactsUsageDescription = "This app needs access to find friends in your contact list";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "We use the microphone to capture your spoken tasks.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Allow photo access so you can attach images in chat.";
@@ -445,6 +446,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Nexa;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "Allow access so tasks can be added to your Calendar.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Allow camera access so you can take photos to attach in chat.";
 				INFOPLIST_KEY_NSContactsUsageDescription = "This app needs access to find friends in your contact list";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "We use the microphone to capture your spoken tasks.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Allow photo access so you can attach images in chat.";

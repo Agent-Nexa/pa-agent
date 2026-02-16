@@ -55,6 +55,7 @@ struct SettingsView: View {
     @State private var calendarPermissionText: String = "Unknown"
     @State private var remindersPermissionText: String = "Unknown"
     @State private var photosPermissionText: String = "Unknown"
+    @State private var cameraPermissionText: String = "Unknown"
     @State private var taskCalendarChoices: [EKCalendar] = []
     @State private var isEditing: Bool = false
     @State private var previewSynthesizer = AVSpeechSynthesizer()
@@ -432,45 +433,22 @@ struct SettingsView: View {
 
                 case .permissions:
                     Section("Permissions") {
-                        HStack {
-                            Text("Notifications")
-                            Spacer()
-                            Text(notificationsPermissionText)
-                                .foregroundStyle(.secondary)
-                        }
-                        HStack {
-                            Text("Speech + Mic")
-                            Spacer()
-                            Text(speechPermissionText)
-                                .foregroundStyle(.secondary)
-                        }
-                        HStack {
-                            Text("Calendar")
-                            Spacer()
-                            Text(calendarPermissionText)
-                                .foregroundStyle(.secondary)
-                        }
-                        HStack {
-                            Text("Reminders")
-                            Spacer()
-                            Text(remindersPermissionText)
-                                .foregroundStyle(.secondary)
-                        }
-                        HStack {
-                            Text("Photos")
-                            Spacer()
-                            Text(photosPermissionText)
-                                .foregroundStyle(.secondary)
-                        }
-
-                        Button("Request Notifications") {
+                        permissionRow(
+                            title: "Notifications",
+                            description: "Required for reminders and task alerts.",
+                            status: notificationsPermissionText
+                        ) {
                             Task {
                                 _ = await requestNotificationPermission()
                                 refreshPermissionStatuses()
                             }
                         }
 
-                        Button("Request Speech + Microphone") {
+                        permissionRow(
+                            title: "Speech + Mic",
+                            description: "Required for voice input and speech recognition.",
+                            status: speechPermissionText
+                        ) {
                             Task {
                                 _ = await requestSpeechPermission()
                                 _ = await requestMicrophonePermission()
@@ -478,7 +456,11 @@ struct SettingsView: View {
                             }
                         }
 
-                        Button("Request Calendar") {
+                        permissionRow(
+                            title: "Calendar",
+                            description: "Required to sync tasks with Calendar events.",
+                            status: calendarPermissionText
+                        ) {
                             Task {
                                 await requestCalendarPermission()
                                 refreshPermissionStatuses()
@@ -486,16 +468,35 @@ struct SettingsView: View {
                             }
                         }
 
-                        Button("Request Reminders") {
+                        permissionRow(
+                            title: "Reminders",
+                            description: "Required to read and sync Apple Reminders.",
+                            status: remindersPermissionText
+                        ) {
                             Task {
                                 await requestReminderPermission()
                                 refreshPermissionStatuses()
                             }
                         }
 
-                        Button("Request Photos") {
+                        permissionRow(
+                            title: "Photos",
+                            description: "Required to select existing images for chat attachments.",
+                            status: photosPermissionText
+                        ) {
                             Task {
                                 _ = await requestPhotoLibraryPermission()
+                                refreshPermissionStatuses()
+                            }
+                        }
+
+                        permissionRow(
+                            title: "Camera",
+                            description: "Required to take new photos for chat attachments.",
+                            status: cameraPermissionText
+                        ) {
+                            Task {
+                                _ = await requestCameraPermission()
                                 refreshPermissionStatuses()
                             }
                         }
@@ -647,6 +648,36 @@ struct SettingsView: View {
         }
     }
 
+    private func permissionRow(
+        title: String,
+        description: String,
+        status: String,
+        onChange: @escaping () -> Void
+    ) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                Text(description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 12)
+
+            VStack(alignment: .trailing, spacing: 8) {
+                Text(status)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.trailing)
+
+                Button("Change", action: onChange)
+                    .buttonStyle(.bordered)
+            }
+            .frame(width: 130, alignment: .trailing)
+        }
+        .padding(.vertical, 2)
+    }
+
     private var agentColor: Color {
         switch localAgentIconColor {
         case "blue": return .blue
@@ -768,6 +799,7 @@ struct SettingsView: View {
         calendarPermissionText = calendarStatusLabel(EKEventStore.authorizationStatus(for: .event))
         remindersPermissionText = reminderStatusLabel(EKEventStore.authorizationStatus(for: .reminder))
         photosPermissionText = photoLibraryStatusLabel(currentPhotoLibraryStatus())
+        cameraPermissionText = cameraStatusLabel(AVCaptureDevice.authorizationStatus(for: .video))
     }
 
     private func currentPhotoLibraryStatus() -> PHAuthorizationStatus {
@@ -867,6 +899,24 @@ struct SettingsView: View {
         #endif
     }
 
+    private func requestCameraPermission() async -> Bool {
+        let status = AVCaptureDevice.authorizationStatus(for: .video)
+        switch status {
+        case .authorized:
+            return true
+        case .denied, .restricted:
+            return false
+        case .notDetermined:
+            return await withCheckedContinuation { continuation in
+                AVCaptureDevice.requestAccess(for: .video) { granted in
+                    continuation.resume(returning: granted)
+                }
+            }
+        @unknown default:
+            return false
+        }
+    }
+
     private func notificationStatusLabel(_ status: UNAuthorizationStatus) -> String {
         switch status {
         case .authorized: return "Allowed"
@@ -925,6 +975,16 @@ struct SettingsView: View {
         switch status {
         case .authorized: return "Allowed"
         case .limited: return "Limited"
+        case .denied: return "Denied"
+        case .restricted: return "Restricted"
+        case .notDetermined: return "Not Set"
+        @unknown default: return "Unknown"
+        }
+    }
+
+    private func cameraStatusLabel(_ status: AVAuthorizationStatus) -> String {
+        switch status {
+        case .authorized: return "Allowed"
         case .denied: return "Denied"
         case .restricted: return "Restricted"
         case .notDetermined: return "Not Set"

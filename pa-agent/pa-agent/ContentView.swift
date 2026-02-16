@@ -2439,6 +2439,9 @@ struct ContentView: View {
     @State private var showTasksList = false
     @State private var showMessageComposer = false
     @State private var showEmailComposer = false
+    #if canImport(UIKit)
+    @State private var showCameraCapture = false
+    #endif
     #if canImport(PhotosUI)
     @State private var selectedPhotoItem: PhotosPickerItem?
     #endif
@@ -2497,14 +2500,15 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showPermissionSetupSheet) {
-            PermissionSetupSheet(allowSkip: permissionSetupShown) { notifications, speech, calendar, reminders, photos in
+            PermissionSetupSheet(allowSkip: permissionSetupShown) { notifications, speech, calendar, reminders, photos, camera in
                 Task {
                     await requestSelectedPermissions(
                         notifications: notifications,
                         speech: speech,
                         calendar: calendar,
                         reminders: reminders,
-                        photos: photos
+                        photos: photos,
+                        camera: camera
                     )
                     permissionSetupShown = true
                     showPermissionSetupSheet = false
@@ -2620,6 +2624,15 @@ struct ContentView: View {
                     pendingAgentTask = nil
                 }
             }
+            #if canImport(UIKit)
+            .sheet(isPresented: $showCameraCapture) {
+                CameraCaptureView { image in
+                    Task {
+                        await processCapturedImage(image)
+                    }
+                }
+            }
+            #endif
             #if canImport(PhotosUI)
             .onChange(of: selectedPhotoItem) { _, newItem in
                 guard let newItem else { return }
@@ -3864,7 +3877,7 @@ struct PermissionWelcomeView: View {
                         Text("Set Up Nexa")
                             .font(.largeTitle.bold())
 
-                        Text("This is the first step to set up Nexa. Please grant the required permissions so Nexa can be fully functional for tasks, reminders, speech, and notifications.")
+                        Text("This is the first step to set up Nexa. Please grant the required permissions so Nexa can be fully functional for tasks, reminders, speech, notifications, photos, and camera.")
                             .font(.body)
                             .foregroundStyle(.secondary)
                     }
@@ -3886,7 +3899,7 @@ struct PermissionWelcomeView: View {
 
 struct PermissionSetupSheet: View {
     var allowSkip: Bool = true
-    let onContinue: (_ notifications: Bool, _ speech: Bool, _ calendar: Bool, _ reminders: Bool, _ photos: Bool) -> Void
+    let onContinue: (_ notifications: Bool, _ speech: Bool, _ calendar: Bool, _ reminders: Bool, _ photos: Bool, _ camera: Bool) -> Void
     let onSkip: () -> Void
 
     @State private var askNotifications = true
@@ -3894,6 +3907,7 @@ struct PermissionSetupSheet: View {
     @State private var askCalendar = true
     @State private var askReminders = true
     @State private var askPhotos = true
+    @State private var askCamera = true
 
     var body: some View {
         NavigationStack {
@@ -3910,6 +3924,7 @@ struct PermissionSetupSheet: View {
                     Toggle("Calendar", isOn: $askCalendar)
                     Toggle("Reminders", isOn: $askReminders)
                     Toggle("Photos", isOn: $askPhotos)
+                    Toggle("Camera", isOn: $askCamera)
                 }
             }
             .navigationTitle("Permission Setup")
@@ -3921,7 +3936,7 @@ struct PermissionSetupSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Continue") {
-                        onContinue(askNotifications, askSpeech, askCalendar, askReminders, askPhotos)
+                        onContinue(askNotifications, askSpeech, askCalendar, askReminders, askPhotos, askCamera)
                     }
                 }
             }
@@ -4150,6 +4165,21 @@ extension ContentView {
             }
 
             HStack(spacing: 10) {
+                #if canImport(UIKit)
+                Button {
+                    if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                        showCameraCapture = true
+                    } else {
+                        messages.append(.init(isUser: false, text: "Camera is not available on this device."))
+                    }
+                } label: {
+                    Image(systemName: "camera.circle.fill")
+                        .font(.title2)
+                        .foregroundStyle(Color.accentColor)
+                }
+                .accessibilityLabel("Take photo")
+                #endif
+
                 #if canImport(PhotosUI)
                 PhotosPicker(selection: $selectedPhotoItem, matching: .images, photoLibrary: .shared()) {
                     Image(systemName: "photo.circle.fill")
@@ -4332,6 +4362,37 @@ extension ContentView {
         } catch {
             await MainActor.run {
                 messages.append(.init(isUser: false, text: "Couldn’t attach image: \(error.localizedDescription)"))
+            }
+        }
+    }
+    #endif
+
+    #if canImport(UIKit)
+    private func processCapturedImage(_ image: UIImage?) async {
+        guard let image else {
+            await MainActor.run {
+                messages.append(.init(isUser: false, text: "No photo captured."))
+            }
+            return
+        }
+
+        guard let data = image.jpegData(compressionQuality: 0.92) else {
+            await MainActor.run {
+                messages.append(.init(isUser: false, text: "Couldn’t process captured image."))
+            }
+            return
+        }
+
+        let attachment = await Task.detached(priority: .userInitiated) {
+            buildPendingAttachment(fromImageData: data, fileName: "CameraPhoto.jpg", fileTypeIdentifier: UTType.jpeg.identifier)
+        }.value
+
+        await MainActor.run {
+            if let attachment {
+                pendingAttachment = attachment
+                messages.append(.init(isUser: false, text: "Attached image: \(attachment.fileName)."))
+            } else {
+                messages.append(.init(isUser: false, text: "Couldn’t read captured image. Try again."))
             }
         }
     }
@@ -6526,7 +6587,7 @@ extension ContentView {
         }
     }
 
-    private func requestSelectedPermissions(notifications: Bool, speech: Bool, calendar: Bool, reminders: Bool, photos: Bool) async {
+    private func requestSelectedPermissions(notifications: Bool, speech: Bool, calendar: Bool, reminders: Bool, photos: Bool, camera: Bool) async {
         if notifications {
             _ = await requestNotificationPermission()
         }
@@ -6542,6 +6603,27 @@ extension ContentView {
         }
         if photos {
             _ = await requestPhotoLibraryPermission()
+        }
+        if camera {
+            _ = await requestCameraPermission()
+        }
+    }
+
+    private func requestCameraPermission() async -> Bool {
+        let current = AVCaptureDevice.authorizationStatus(for: .video)
+        switch current {
+        case .authorized:
+            return true
+        case .denied, .restricted:
+            return false
+        case .notDetermined:
+            return await withCheckedContinuation { continuation in
+                AVCaptureDevice.requestAccess(for: .video) { granted in
+                    continuation.resume(returning: granted)
+                }
+            }
+        @unknown default:
+            return false
         }
     }
 
@@ -6801,6 +6883,46 @@ extension ContentView {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
 }
+
+#if canImport(UIKit)
+struct CameraCaptureView: UIViewControllerRepresentable {
+    @Environment(\.dismiss) private var dismiss
+    var onComplete: (UIImage?) -> Void
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.allowsEditing = false
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    final class Coordinator: NSObject, UINavigationControllerDelegate, UIImagePickerControllerDelegate {
+        let parent: CameraCaptureView
+
+        init(parent: CameraCaptureView) {
+            self.parent = parent
+        }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            parent.onComplete(nil)
+            parent.dismiss()
+        }
+
+        func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey : Any]) {
+            let image = info[.originalImage] as? UIImage
+            parent.onComplete(image)
+            parent.dismiss()
+        }
+    }
+}
+#endif
 
 #if canImport(MessageUI)
 import MessageUI
