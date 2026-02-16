@@ -39,6 +39,7 @@ struct SettingsView: View {
     @State private var localUserIcon: String = "person.circle.fill"
     @State private var localAgentVoiceEnabled: Bool = true
     @State private var localAgentVoiceIdentifier: String = ""
+    @State private var selectedSettingsTab: SettingsTab = .editable
     
     @State private var connectionStatus: String = "not tested"
     @State private var embeddingConnectionStatus: String = "not tested"
@@ -61,9 +62,37 @@ struct SettingsView: View {
     private let intentService = IntentService()
     private let eventStore = EKEventStore()
 
+    private enum SettingsTab: String, CaseIterable, Identifiable {
+        case editable
+        case diagnosticsTools
+        case permissions
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .editable:
+                return "Profile"
+            case .diagnosticsTools:
+                return "Diagnostics"
+            case .permissions:
+                return "Permissions"
+            }
+        }
+    }
+
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    Picker("Category", selection: $selectedSettingsTab) {
+                        ForEach(SettingsTab.allCases) { tab in
+                            Text(tab.title).tag(tab)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+
                 if isEditing && hasUnsavedChanges {
                     Section {
                         Label("You have unsaved changes. Tap Save Settings.", systemImage: "exclamationmark.circle")
@@ -72,415 +101,420 @@ struct SettingsView: View {
                     }
                 }
 
-                Section("Editable Settings") {
-                    HStack(spacing: 8) {
-                        Text("Environment")
-                            .font(.caption)
+                switch selectedSettingsTab {
+                case .editable:
+                    Section {
+                        HStack(spacing: 8) {
+                            Text("Environment")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(environmentLabel)
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(environmentColor.opacity(0.16))
+                                .foregroundStyle(environmentColor)
+                                .clipShape(Capsule())
+                        }
+                        HStack(spacing: 8) {
+                            Text("Version")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(appVersionLabel)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Text(isEditing ? "Edit settings below, then tap Save." : "Settings are read-only. Tap Edit to make changes.")
+                            .font(.footnote)
                             .foregroundStyle(.secondary)
-                        Text(environmentLabel)
-                            .font(.caption.weight(.semibold))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(environmentColor.opacity(0.16))
-                            .foregroundStyle(environmentColor)
-                            .clipShape(Capsule())
                     }
-                    HStack(spacing: 8) {
-                        Text("Version")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text(appVersionLabel)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+
+                    Section("Subscription") {
+                        if isProductionBuild {
+                            Text("To subscribe, iPhone must be signed in to App Store. If prompted for account, sign in first, then tap Subscribe again.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            HStack {
+                                Text("Status")
+                                Spacer()
+                                Text(subscriptionManager.displayStatus)
+                                    .foregroundStyle(subscriptionManager.hasActiveSubscription ? .green : .secondary)
+                            }
+
+                            if let product = subscriptionManager.primaryProduct {
+                                HStack {
+                                    Text(product.displayName)
+                                    Spacer()
+                                    Text(product.displayPrice)
+                                        .foregroundStyle(.secondary)
+                                }
+                            } else if subscriptionManager.isLoadingProducts {
+                                HStack {
+                                    ProgressView()
+                                    Text("Loading subscription...")
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+
+                            Button(subscriptionManager.isPurchasing ? "Processing..." : "Subscribe") {
+                                Task { await subscriptionManager.purchasePrimarySubscription() }
+                            }
+                            .disabled(subscriptionManager.isPurchasing || subscriptionManager.primaryProduct == nil)
+
+                            Button("Restore Purchases") {
+                                Task { await subscriptionManager.restorePurchases() }
+                            }
+
+                            Button("Open App Store Subscriptions") {
+                                guard let url = URL(string: "https://apps.apple.com/account/subscriptions") else { return }
+                                openURL(url)
+                            }
+
+                            if !subscriptionManager.statusMessage.isEmpty {
+                                Text(subscriptionManager.statusMessage)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        } else {
+                            Text("Debug mode: AI is always enabled and subscription status is not checked.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
-                    Text(isEditing ? "Edit settings below, then tap Save." : "Settings are read-only. Tap Edit to make changes.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
 
-                Section("Subscription") {
-                    if isProductionBuild {
-                        Text("To subscribe, iPhone must be signed in to App Store. If prompted for account, sign in first, then tap Subscribe again.")
+                    Section("Identity") {
+                        HStack(spacing: 8) {
+                            Image(systemName: isEditing ? "lock.open.fill" : "lock.fill")
+                                .foregroundStyle(isEditing ? .green : .secondary)
+                            Text(isEditing ? "Fields are unlocked" : "Fields are locked")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        TextField("Your Name", text: $localUserName)
+                        TextField("Agent Name", text: $localAgentName)
+                        HStack {
+                            TextField("Agent Icon (SF Symbol)", text: $localAgentIcon)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                            Image(systemName: localAgentIcon)
+                                .foregroundStyle(agentColor)
+                        }
+                        Picker("Agent Icon Color", selection: $localAgentIconColor) {
+                            Text("Purple").tag("purple")
+                            Text("Blue").tag("blue")
+                            Text("Green").tag("green")
+                            Text("Orange").tag("orange")
+                            Text("Red").tag("red")
+                            Text("Pink").tag("pink")
+                        }
+                        HStack {
+                            TextField("User Icon (SF Symbol)", text: $localUserIcon)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                            Image(systemName: localUserIcon)
+                                .foregroundStyle(.blue)
+                        }
+                    }
+                    .disabled(!isEditing)
+
+                    if !isProductionBuild {
+                        Section("OpenAI") {
+                            HStack(spacing: 8) {
+                                Image(systemName: isEditing ? "lock.open.fill" : "lock.fill")
+                                    .foregroundStyle(isEditing ? .green : .secondary)
+                                Text(isEditing ? "Fields are unlocked" : "Fields are locked")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            SecureField("sk-...", text: $localKey)
+                                .textInputAutocapitalization(.none)
+                                .disableAutocorrection(true)
+                            Picker("Model", selection: $localModel) {
+                                Text("gpt-5.2").tag("gpt-5.2")
+                                Text("gpt-4o").tag("gpt-4o")
+                                Text("gpt-4o-mini").tag("gpt-4o-mini")
+                                Text("gpt-3.5-turbo").tag("gpt-3.5-turbo")
+                            }
+                            .pickerStyle(.segmented)
+                        }
+                        .disabled(!isEditing)
+
+                        Section("Azure") {
+                            HStack(spacing: 8) {
+                                Image(systemName: isEditing ? "lock.open.fill" : "lock.fill")
+                                    .foregroundStyle(isEditing ? .green : .secondary)
+                                Text(isEditing ? "Fields are unlocked" : "Fields are locked")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Toggle("Use Azure", isOn: $localUseAzure)
+                            if localUseAzure {
+                                TextField("Endpoint URL", text: $localEndpoint)
+                                    .textInputAutocapitalization(.none)
+                                    .disableAutocorrection(true)
+                                    .font(.caption)
+                                Text("Format: https://{resource}.openai.azure.com/openai/deployments/{deployment}/chat/completions?api-version=...")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+
+                                TextField("Embedding Endpoint URL", text: $localEmbeddingEndpoint)
+                                    .textInputAutocapitalization(.none)
+                                    .disableAutocorrection(true)
+                                    .font(.caption)
+                                Text("Format: https://{resource}.cognitiveservices.azure.com")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .disabled(!isEditing)
+                    }
+
+                    Section("Voice") {
+                        HStack(spacing: 8) {
+                            Image(systemName: isEditing ? "lock.open.fill" : "lock.fill")
+                                .foregroundStyle(isEditing ? .green : .secondary)
+                            Text(isEditing ? "Fields are unlocked" : "Fields are locked")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Toggle("Allow Agent Voice", isOn: $localAgentVoiceEnabled)
+
+                        Text(selectedVoiceLine)
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
+                        Picker("Voice", selection: $localAgentVoiceIdentifier) {
+                            Text("System Default").tag("")
+                            ForEach(voiceOptions) { option in
+                                Text(voiceDisplayName(option))
+                                    .tag(option.identifier)
+                            }
+                        }
+                        .disabled(!localAgentVoiceEnabled)
+
+                        Button("Preview Voice") {
+                            previewVoice()
+                        }
+                        .disabled(!localAgentVoiceEnabled)
+                    }
+                    .disabled(!isEditing)
+
+                case .diagnosticsTools:
+                    Section("Diagnostics") {
                         HStack {
                             Text("Status")
                             Spacer()
-                            Text(subscriptionManager.displayStatus)
-                                .foregroundStyle(subscriptionManager.hasActiveSubscription ? .green : .secondary)
+                            Text(connectionStatus)
+                                .foregroundStyle(.secondary)
                         }
-
-                        if let product = subscriptionManager.primaryProduct {
-                            HStack {
-                                Text(product.displayName)
-                                Spacer()
-                                Text(product.displayPrice)
-                                    .foregroundStyle(.secondary)
+                        HStack {
+                            Text("Embeddings")
+                            Spacer()
+                            Text(embeddingConnectionStatus)
+                                .foregroundStyle(.secondary)
+                        }
+                        Button("Test Connection") {
+                            Task {
+                                guard isAIFeatureEnabled else {
+                                    connectionStatus = "subscription required"
+                                    return
+                                }
+                                connectionStatus = "testing..."
+                                // Use localModel (what is currently selected) instead of storedModel (what was last saved)
+                                // so the user can test before saving.
+                                connectionStatus = await intentService.testConnection(
+                                    apiKey: localKey.trimmingCharacters(in: .whitespacesAndNewlines),
+                                    model: localModel,
+                                    useAzure: localUseAzure,
+                                    azureEndpoint: localEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+                                )
                             }
-                        } else if subscriptionManager.isLoadingProducts {
-                            HStack {
-                                ProgressView()
-                                Text("Loading subscription...")
-                                    .foregroundStyle(.secondary)
+                        }
+                        .disabled(!isAIFeatureEnabled)
+
+                        Button("Test Embedding Connection") {
+                            Task {
+                                guard isAIFeatureEnabled else {
+                                    embeddingConnectionStatus = "subscription required"
+                                    return
+                                }
+
+                                embeddingConnectionStatus = "testing..."
+                                let keyForTest = localKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                                let modelForTest = storedEmbeddingModel.trimmingCharacters(in: .whitespacesAndNewlines)
+                                embeddingConnectionStatus = await ChatHistoryStore.shared.testEmbeddingConnection(
+                                    apiKey: keyForTest,
+                                    model: modelForTest.isEmpty ? nil : modelForTest,
+                                    useAzure: localUseAzure,
+                                    azureEndpoint: localEmbeddingEndpoint
+                                )
                             }
                         }
+                        .disabled(!isAIFeatureEnabled)
+                    }
 
-                        Button(subscriptionManager.isPurchasing ? "Processing..." : "Subscribe") {
-                            Task { await subscriptionManager.purchasePrimarySubscription() }
+                    Section("Tools") {
+                        Menu {
+                            ShareLink(item: referralMessage) {
+                                Label("Share Invite", systemImage: "square.and.arrow.up")
+                            }
+
+                            Button {
+                                copyReferralText()
+                            } label: {
+                                Label("Copy Invite Text", systemImage: "doc.on.doc")
+                            }
+                        } label: {
+                            Label("Refer a Friend", systemImage: "person.2.badge.plus")
                         }
-                        .disabled(subscriptionManager.isPurchasing || subscriptionManager.primaryProduct == nil)
 
-                        Button("Restore Purchases") {
-                            Task { await subscriptionManager.restorePurchases() }
-                        }
-
-                        Button("Open App Store Subscriptions") {
-                            guard let url = URL(string: "https://apps.apple.com/account/subscriptions") else { return }
-                            openURL(url)
-                        }
-
-                        if !subscriptionManager.statusMessage.isEmpty {
-                            Text(subscriptionManager.statusMessage)
+                        if !referralStatusText.isEmpty {
+                            Text(referralStatusText)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
-                    } else {
-                        Text("Debug mode: AI is always enabled and subscription status is not checked.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
 
-                Section("Identity") {
-                    HStack(spacing: 8) {
-                        Image(systemName: isEditing ? "lock.open.fill" : "lock.fill")
-                            .foregroundStyle(isEditing ? .green : .secondary)
-                        Text(isEditing ? "Fields are unlocked" : "Fields are locked")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    TextField("Your Name", text: $localUserName)
-                    TextField("Agent Name", text: $localAgentName)
-                    HStack {
-                        TextField("Agent Icon (SF Symbol)", text: $localAgentIcon)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                        Image(systemName: localAgentIcon)
-                            .foregroundStyle(agentColor)
-                    }
-                    Picker("Agent Icon Color", selection: $localAgentIconColor) {
-                        Text("Purple").tag("purple")
-                        Text("Blue").tag("blue")
-                        Text("Green").tag("green")
-                        Text("Orange").tag("orange")
-                        Text("Red").tag("red")
-                        Text("Pink").tag("pink")
-                    }
-                    HStack {
-                        TextField("User Icon (SF Symbol)", text: $localUserIcon)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                        Image(systemName: localUserIcon)
-                            .foregroundStyle(.blue)
-                    }
-                }
-                .disabled(!isEditing)
-
-                if !isProductionBuild {
-                    Section("OpenAI") {
-                        HStack(spacing: 8) {
-                            Image(systemName: isEditing ? "lock.open.fill" : "lock.fill")
-                                .foregroundStyle(isEditing ? .green : .secondary)
-                            Text(isEditing ? "Fields are unlocked" : "Fields are locked")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                        NavigationLink("About") {
+                            AboutView()
                         }
-                        SecureField("sk-...", text: $localKey)
-                            .textInputAutocapitalization(.none)
-                            .disableAutocorrection(true)
-                        Picker("Model", selection: $localModel) {
-                            Text("gpt-5.2").tag("gpt-5.2")
-                            Text("gpt-4o").tag("gpt-4o")
-                            Text("gpt-4o-mini").tag("gpt-4o-mini")
-                            Text("gpt-3.5-turbo").tag("gpt-3.5-turbo")
-                        }
-                        .pickerStyle(.segmented)
-                    }
-                    .disabled(!isEditing)
-                    
-                    Section("Azure") {
-                        HStack(spacing: 8) {
-                            Image(systemName: isEditing ? "lock.open.fill" : "lock.fill")
-                                .foregroundStyle(isEditing ? .green : .secondary)
-                            Text(isEditing ? "Fields are unlocked" : "Fields are locked")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Toggle("Use Azure", isOn: $localUseAzure)
-                        if localUseAzure {
-                            TextField("Endpoint URL", text: $localEndpoint)
-                                .textInputAutocapitalization(.none)
-                                .disableAutocorrection(true)
-                                .font(.caption)
-                            Text("Format: https://{resource}.openai.azure.com/openai/deployments/{deployment}/chat/completions?api-version=...")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-
-                            TextField("Embedding Endpoint URL", text: $localEmbeddingEndpoint)
-                                .textInputAutocapitalization(.none)
-                                .disableAutocorrection(true)
-                                .font(.caption)
-                            Text("Format: https://{resource}.cognitiveservices.azure.com")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
+                        NavigationLink("View Activity History") {
+                            ActivityHistoryView(historyManager: historyManager)
                         }
                     }
-                    .disabled(!isEditing)
-                }
 
-                Section("Voice") {
-                    HStack(spacing: 8) {
-                        Image(systemName: isEditing ? "lock.open.fill" : "lock.fill")
-                            .foregroundStyle(isEditing ? .green : .secondary)
-                        Text(isEditing ? "Fields are unlocked" : "Fields are locked")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Toggle("Allow Agent Voice", isOn: $localAgentVoiceEnabled)
-
-                    Text(selectedVoiceLine)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    Picker("Voice", selection: $localAgentVoiceIdentifier) {
-                        Text("System Default").tag("")
-                        ForEach(voiceOptions) { option in
-                            Text(voiceDisplayName(option))
-                                .tag(option.identifier)
-                        }
-                    }
-                    .disabled(!localAgentVoiceEnabled)
-
-                    Button("Preview Voice") {
-                        previewVoice()
-                    }
-                    .disabled(!localAgentVoiceEnabled)
-                }
-                .disabled(!isEditing)
-
-                Section("Tools") {
-                    Menu {
-                        ShareLink(item: referralMessage) {
-                            Label("Share Invite", systemImage: "square.and.arrow.up")
+                    Section("Chat History") {
+                        Button {
+                            prepareChatHistoryExport()
+                        } label: {
+                            Label("Backup Chat History", systemImage: "square.and.arrow.up")
                         }
 
                         Button {
-                            copyReferralText()
+                            isImportingChatHistory = true
                         } label: {
-                            Label("Copy Invite Text", systemImage: "doc.on.doc")
+                            Label("Import Chat History", systemImage: "square.and.arrow.down")
                         }
-                    } label: {
-                        Label("Refer a Friend", systemImage: "person.2.badge.plus")
-                    }
 
-                    if !referralStatusText.isEmpty {
-                        Text(referralStatusText)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    NavigationLink("About") {
-                        AboutView()
-                    }
-                    NavigationLink("View Activity History") {
-                        ActivityHistoryView(historyManager: historyManager)
-                    }
-                }
-
-                Section("Chat History") {
-                    Button {
-                        prepareChatHistoryExport()
-                    } label: {
-                        Label("Backup Chat History", systemImage: "square.and.arrow.up")
-                    }
-
-                    Button {
-                        isImportingChatHistory = true
-                    } label: {
-                        Label("Import Chat History", systemImage: "square.and.arrow.down")
-                    }
-
-                    if !chatHistoryStatusText.isEmpty {
-                        Text(chatHistoryStatusText)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                Section("Permissions") {
-                    HStack {
-                        Text("Notifications")
-                        Spacer()
-                        Text(notificationsPermissionText)
-                            .foregroundStyle(.secondary)
-                    }
-                    HStack {
-                        Text("Speech + Mic")
-                        Spacer()
-                        Text(speechPermissionText)
-                            .foregroundStyle(.secondary)
-                    }
-                    HStack {
-                        Text("Calendar")
-                        Spacer()
-                        Text(calendarPermissionText)
-                            .foregroundStyle(.secondary)
-                    }
-                    HStack {
-                        Text("Reminders")
-                        Spacer()
-                        Text(remindersPermissionText)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Button("Request Notifications") {
-                        Task {
-                            _ = await requestNotificationPermission()
-                            refreshPermissionStatuses()
+                        if !chatHistoryStatusText.isEmpty {
+                            Text(chatHistoryStatusText)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                     }
 
-                    Button("Request Speech + Microphone") {
-                        Task {
-                            _ = await requestSpeechPermission()
-                            _ = await requestMicrophonePermission()
-                            refreshPermissionStatuses()
-                        }
-                    }
-
-                    Button("Request Calendar") {
-                        Task {
-                            await requestCalendarPermission()
-                            refreshPermissionStatuses()
-                            refreshTaskCalendarChoices()
-                        }
-                    }
-
-                    Button("Request Reminders") {
-                        Task {
-                            await requestReminderPermission()
-                            refreshPermissionStatuses()
-                        }
-                    }
-
-                    Button("Open iOS App Settings") {
-                        #if canImport(UIKit)
-                        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
-                        openURL(url)
-                        #endif
-                    }
-
-                    Button("Reset Permission Setup Prompt") {
-                        permissionSetupShown = false
-                        permissionStatusText = "Permission setup prompt reset. It will appear next app launch."
-                    }
-
-                    if !permissionStatusText.isEmpty {
-                        Text(permissionStatusText)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                Section("Task Calendar") {
-                    if taskCalendarChoices.isEmpty {
-                        Text("No writable calendars available. Grant Calendar access first.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Picker("Default Task Calendar", selection: $preferredTaskCalendarId) {
-                            Text("Default Calendar").tag("")
-                            ForEach(taskCalendarChoices, id: \.calendarIdentifier) { calendar in
-                                Text(calendar.title).tag(calendar.calendarIdentifier)
+                    Section("Notifications Tools") {
+                        Button("Request Permissions") {
+                            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { granted, _ in
+                                print("Permission granted: \(granted)")
                             }
                         }
-                        .pickerStyle(.menu)
-                    }
-                }
+                        Button("Test Notification (5s)") {
+                            let content = UNMutableNotificationContent()
+                            content.title = "Test Notification"
+                            content.body = "This is a test notification from PA-Agent."
+                            content.sound = .default
 
-                Section("Diagnostics") {
-                    HStack {
-                        Text("Status")
-                        Spacer()
-                        Text(connectionStatus)
-                            .foregroundStyle(.secondary)
-                    }
-                    HStack {
-                        Text("Embeddings")
-                        Spacer()
-                        Text(embeddingConnectionStatus)
-                            .foregroundStyle(.secondary)
-                    }
-                    Button("Test Connection") {
-                        Task {
-                            guard isAIFeatureEnabled else {
-                                connectionStatus = "subscription required"
-                                return
+                            let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 5, repeats: false)
+                            let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: trigger)
+
+                            UNUserNotificationCenter.current().add(request) { error in
+                                if let error = error {
+                                    print("Error scheduling test notification: \(error)")
+                                }
                             }
-                            connectionStatus = "testing..."
-                            // Use localModel (what is currently selected) instead of storedModel (what was last saved)
-                            // so the user can test before saving.
-                            connectionStatus = await intentService.testConnection(
-                                apiKey: localKey.trimmingCharacters(in: .whitespacesAndNewlines),
-                                model: localModel,
-                                useAzure: localUseAzure,
-                                azureEndpoint: localEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
-                            )
                         }
                     }
-                    .disabled(!isAIFeatureEnabled)
 
-                    Button("Test Embedding Connection") {
-                        Task {
-                            guard isAIFeatureEnabled else {
-                                embeddingConnectionStatus = "subscription required"
-                                return
+                case .permissions:
+                    Section("Permissions") {
+                        HStack {
+                            Text("Notifications")
+                            Spacer()
+                            Text(notificationsPermissionText)
+                                .foregroundStyle(.secondary)
+                        }
+                        HStack {
+                            Text("Speech + Mic")
+                            Spacer()
+                            Text(speechPermissionText)
+                                .foregroundStyle(.secondary)
+                        }
+                        HStack {
+                            Text("Calendar")
+                            Spacer()
+                            Text(calendarPermissionText)
+                                .foregroundStyle(.secondary)
+                        }
+                        HStack {
+                            Text("Reminders")
+                            Spacer()
+                            Text(remindersPermissionText)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Button("Request Notifications") {
+                            Task {
+                                _ = await requestNotificationPermission()
+                                refreshPermissionStatuses()
                             }
+                        }
 
-                            embeddingConnectionStatus = "testing..."
-                            let keyForTest = localKey.trimmingCharacters(in: .whitespacesAndNewlines)
-                            let modelForTest = storedEmbeddingModel.trimmingCharacters(in: .whitespacesAndNewlines)
-                            embeddingConnectionStatus = await ChatHistoryStore.shared.testEmbeddingConnection(
-                                apiKey: keyForTest,
-                                model: modelForTest.isEmpty ? nil : modelForTest,
-                                useAzure: localUseAzure,
-                                azureEndpoint: localEmbeddingEndpoint
-                            )
+                        Button("Request Speech + Microphone") {
+                            Task {
+                                _ = await requestSpeechPermission()
+                                _ = await requestMicrophonePermission()
+                                refreshPermissionStatuses()
+                            }
+                        }
+
+                        Button("Request Calendar") {
+                            Task {
+                                await requestCalendarPermission()
+                                refreshPermissionStatuses()
+                                refreshTaskCalendarChoices()
+                            }
+                        }
+
+                        Button("Request Reminders") {
+                            Task {
+                                await requestReminderPermission()
+                                refreshPermissionStatuses()
+                            }
+                        }
+
+                        Button("Open iOS App Settings") {
+                            #if canImport(UIKit)
+                            guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+                            openURL(url)
+                            #endif
+                        }
+
+                        Button("Reset Permission Setup Prompt") {
+                            permissionSetupShown = false
+                            permissionStatusText = "Permission setup prompt reset. It will appear next app launch."
+                        }
+
+                        if !permissionStatusText.isEmpty {
+                            Text(permissionStatusText)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                     }
-                    .disabled(!isAIFeatureEnabled)
-                }
-                
-                Section("Notifications Tools") {
-                    Button("Request Permissions") {
-                        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { granted, _ in
-                            print("Permission granted: \(granted)")
-                        }
-                    }
-                    Button("Test Notification (5s)") {
-                        let content = UNMutableNotificationContent()
-                        content.title = "Test Notification"
-                        content.body = "This is a test notification from PA-Agent."
-                        content.sound = .default
-                        
-                        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 5, repeats: false)
-                        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: trigger)
-                        
-                        UNUserNotificationCenter.current().add(request) { error in
-                            if let error = error {
-                                print("Error scheduling test notification: \(error)")
+
+                    Section("Task Calendar") {
+                        if taskCalendarChoices.isEmpty {
+                            Text("No writable calendars available. Grant Calendar access first.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Picker("Default Task Calendar", selection: $preferredTaskCalendarId) {
+                                Text("Default Calendar").tag("")
+                                ForEach(taskCalendarChoices, id: \.calendarIdentifier) { calendar in
+                                    Text(calendar.title).tag(calendar.calendarIdentifier)
+                                }
                             }
+                            .pickerStyle(.menu)
                         }
                     }
                 }

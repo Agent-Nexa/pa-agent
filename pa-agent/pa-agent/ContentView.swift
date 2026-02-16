@@ -1430,6 +1430,90 @@ struct TaskStatusSnapshot: Hashable, Codable {
     let completed: Int
     let overdue: Int
     let upcoming: Int
+    let completedWork: Int
+    let completedPersonal: Int
+    let completedOther: Int
+    let overdueWork: Int
+    let overduePersonal: Int
+    let overdueOther: Int
+    let upcomingWork: Int
+    let upcomingPersonal: Int
+    let upcomingOther: Int
+
+    init(
+        completed: Int,
+        overdue: Int,
+        upcoming: Int,
+        completedWork: Int = 0,
+        completedPersonal: Int = 0,
+        completedOther: Int = 0,
+        overdueWork: Int = 0,
+        overduePersonal: Int = 0,
+        overdueOther: Int = 0,
+        upcomingWork: Int = 0,
+        upcomingPersonal: Int = 0,
+        upcomingOther: Int = 0
+    ) {
+        self.completed = completed
+        self.overdue = overdue
+        self.upcoming = upcoming
+        self.completedWork = completedWork
+        self.completedPersonal = completedPersonal
+        self.completedOther = completedOther
+        self.overdueWork = overdueWork
+        self.overduePersonal = overduePersonal
+        self.overdueOther = overdueOther
+        self.upcomingWork = upcomingWork
+        self.upcomingPersonal = upcomingPersonal
+        self.upcomingOther = upcomingOther
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case completed
+        case overdue
+        case upcoming
+        case completedWork
+        case completedPersonal
+        case completedOther
+        case overdueWork
+        case overduePersonal
+        case overdueOther
+        case upcomingWork
+        case upcomingPersonal
+        case upcomingOther
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        completed = try container.decode(Int.self, forKey: .completed)
+        overdue = try container.decode(Int.self, forKey: .overdue)
+        upcoming = try container.decode(Int.self, forKey: .upcoming)
+        completedWork = try container.decodeIfPresent(Int.self, forKey: .completedWork) ?? 0
+        completedPersonal = try container.decodeIfPresent(Int.self, forKey: .completedPersonal) ?? 0
+        completedOther = try container.decodeIfPresent(Int.self, forKey: .completedOther) ?? completed
+        overdueWork = try container.decodeIfPresent(Int.self, forKey: .overdueWork) ?? 0
+        overduePersonal = try container.decodeIfPresent(Int.self, forKey: .overduePersonal) ?? 0
+        overdueOther = try container.decodeIfPresent(Int.self, forKey: .overdueOther) ?? overdue
+        upcomingWork = try container.decodeIfPresent(Int.self, forKey: .upcomingWork) ?? 0
+        upcomingPersonal = try container.decodeIfPresent(Int.self, forKey: .upcomingPersonal) ?? 0
+        upcomingOther = try container.decodeIfPresent(Int.self, forKey: .upcomingOther) ?? upcoming
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(completed, forKey: .completed)
+        try container.encode(overdue, forKey: .overdue)
+        try container.encode(upcoming, forKey: .upcoming)
+        try container.encode(completedWork, forKey: .completedWork)
+        try container.encode(completedPersonal, forKey: .completedPersonal)
+        try container.encode(completedOther, forKey: .completedOther)
+        try container.encode(overdueWork, forKey: .overdueWork)
+        try container.encode(overduePersonal, forKey: .overduePersonal)
+        try container.encode(overdueOther, forKey: .overdueOther)
+        try container.encode(upcomingWork, forKey: .upcomingWork)
+        try container.encode(upcomingPersonal, forKey: .upcomingPersonal)
+        try container.encode(upcomingOther, forKey: .upcomingOther)
+    }
 }
 
 extension ChatMessage: Codable {}
@@ -1452,10 +1536,23 @@ struct ChatHistoryBackupPayloadV2: Codable {
 
 struct EmbeddedChatRecord: Codable {
     let message: ChatMessage
-    let embedding: [Double]?
     let embeddingModel: String?
     let embeddedAt: Date?
     let textHash: String
+}
+
+struct StatusCategoryRow: Identifiable {
+    let id = UUID()
+    let status: String
+    let category: String
+    let count: Int
+}
+
+struct ChatSessionArchive: Codable {
+    let id: UUID
+    let createdAt: Date
+    let endedAt: Date
+    let records: [EmbeddedChatRecord]
 }
 
 @MainActor
@@ -1463,7 +1560,9 @@ final class ChatHistoryStore {
     static let shared = ChatHistoryStore()
 
     private let storageKey = "chat_history_v1"
-    private let maxStoredMessages = 1000
+    private let sessionsStorageKey = "chat_history_sessions_v1"
+    private let maxStoredMessages = 300
+    private let maxStoredSessions = 40
     private var saveTask: Task<Void, Never>?
 
     private init() {}
@@ -1477,10 +1576,36 @@ final class ChatHistoryStore {
         saveTask?.cancel()
         saveTask = Task { [weak self, trimmed] in
             guard let self else { return }
-            try? await Task.sleep(nanoseconds: 800_000_000)
+            try? await Task.sleep(nanoseconds: 300_000_000)
             if Task.isCancelled { return }
-            await self.embedAndPersist(trimmed)
+            self.persistMessages(trimmed)
         }
+    }
+
+    func archiveCurrentSession(_ messages: [ChatMessage]) {
+        let meaningful = messages.filter {
+            !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        guard !meaningful.isEmpty else { return }
+
+        let records = records(from: meaningful)
+        guard !records.isEmpty else { return }
+
+        let createdAt = meaningful.first?.timestamp ?? Date()
+        let endedAt = meaningful.last?.timestamp ?? Date()
+        let archive = ChatSessionArchive(id: UUID(), createdAt: createdAt, endedAt: endedAt, records: records)
+
+        var sessions = loadSessionArchives()
+        sessions.append(archive)
+        if sessions.count > maxStoredSessions {
+            sessions = Array(sessions.suffix(maxStoredSessions))
+        }
+        persistSessionArchives(sessions)
+    }
+
+    func clearCurrentSession() {
+        saveTask?.cancel()
+        persistRecords([])
     }
 
     func testEmbeddingConnection(apiKey: String?, model: String?, useAzure: Bool? = nil, azureEndpoint: String? = nil) async -> String {
@@ -1544,7 +1669,6 @@ final class ChatHistoryStore {
             let records = payload.messages.map { message in
                 EmbeddedChatRecord(
                     message: message,
-                    embedding: nil,
                     embeddingModel: nil,
                     embeddedAt: nil,
                     textHash: textHash(for: message.text)
@@ -1559,7 +1683,6 @@ final class ChatHistoryStore {
         let records = directMessages.map { message in
             EmbeddedChatRecord(
                 message: message,
-                embedding: nil,
                 embeddingModel: nil,
                 embeddedAt: nil,
                 textHash: textHash(for: message.text)
@@ -1570,45 +1693,33 @@ final class ChatHistoryStore {
         return directMessages.count
     }
 
-    private func embedAndPersist(_ messages: [ChatMessage]) async {
-        let existingById = Dictionary(uniqueKeysWithValues: loadStoredRecords().map { ($0.message.id, $0) })
-        let config = resolvedEmbeddingConfig()
-        let embeddingModel = config.model
-        let apiKey = config.apiKey
+    private func persistMessages(_ messages: [ChatMessage]) {
+        let output = records(from: messages)
+        persistRecords(output)
+    }
 
+    private func records(from messages: [ChatMessage]) -> [EmbeddedChatRecord] {
+        let existingById = Dictionary(uniqueKeysWithValues: loadStoredRecords().map { ($0.message.id, $0) })
         var output: [EmbeddedChatRecord] = []
         output.reserveCapacity(messages.count)
 
         for message in messages {
-            if Task.isCancelled { return }
-
             let hash = textHash(for: message.text)
-            if let existing = existingById[message.id], existing.textHash == hash, existing.embedding != nil {
+            if let existing = existingById[message.id], existing.textHash == hash {
                 output.append(existing)
                 continue
             }
-
-            let embedding = await fetchEmbedding(
-                text: message.text,
-                model: embeddingModel,
-                apiKey: apiKey,
-                useAzure: config.useAzure,
-                azureEndpoint: config.azureEndpoint
-            )
             output.append(
                 EmbeddedChatRecord(
                     message: message,
-                    embedding: embedding,
-                    embeddingModel: embedding == nil ? nil : embeddingModel,
-                    embeddedAt: embedding == nil ? nil : Date(),
+                    embeddingModel: nil,
+                    embeddedAt: nil,
                     textHash: hash
                 )
             )
         }
 
-        if !Task.isCancelled {
-            persistRecords(output)
-        }
+        return output
     }
 
     private func loadStoredRecords() -> [EmbeddedChatRecord] {
@@ -1616,19 +1727,24 @@ final class ChatHistoryStore {
         let decoder = JSONDecoder()
 
         if let records = try? decoder.decode([EmbeddedChatRecord].self, from: data) {
-            return Array(records.suffix(maxStoredMessages))
+            let trimmed = Array(records.suffix(maxStoredMessages))
+            if records.count != trimmed.count || data.count > 1_000_000 {
+                persistRecords(trimmed)
+            }
+            return trimmed
         }
 
         if let legacyMessages = try? decoder.decode([ChatMessage].self, from: data) {
-            return Array(legacyMessages.suffix(maxStoredMessages)).map {
+            let trimmed = Array(legacyMessages.suffix(maxStoredMessages)).map {
                 EmbeddedChatRecord(
                     message: $0,
-                    embedding: nil,
                     embeddingModel: nil,
                     embeddedAt: nil,
                     textHash: textHash(for: $0.text)
                 )
             }
+            persistRecords(trimmed)
+            return trimmed
         }
 
         return []
@@ -1638,6 +1754,21 @@ final class ChatHistoryStore {
         let trimmed = Array(records.suffix(maxStoredMessages))
         guard let data = try? JSONEncoder().encode(trimmed) else { return }
         UserDefaults.standard.set(data, forKey: storageKey)
+    }
+
+    private func loadSessionArchives() -> [ChatSessionArchive] {
+        guard let data = UserDefaults.standard.data(forKey: sessionsStorageKey),
+              let decoded = try? JSONDecoder().decode([ChatSessionArchive].self, from: data)
+        else {
+            return []
+        }
+        return decoded
+    }
+
+    private func persistSessionArchives(_ sessions: [ChatSessionArchive]) {
+        let trimmed = Array(sessions.suffix(maxStoredSessions))
+        guard let data = try? JSONEncoder().encode(trimmed) else { return }
+        UserDefaults.standard.set(data, forKey: sessionsStorageKey)
     }
 
     private func resolvedEmbeddingConfig(
@@ -2542,6 +2673,12 @@ struct ContentView: View {
                 // Start timer
                 timerCancellable = taskTimer.connect()
             }
+            .onDisappear {
+                timerCancellable?.cancel()
+                timerCancellable = nil
+                speechManager.stopRecording()
+                speechManager.onSilence = nil
+            }
             .onReceive(taskTimer) { time in
                 checkAgentTasks(at: time)
             }
@@ -2805,6 +2942,13 @@ struct ContentView: View {
                     .font(.title3)
             }
             .padding(.trailing, 8)
+
+            Button(action: startNewChatSession) {
+                Image(systemName: "square.and.pencil")
+                    .font(.title3)
+            }
+            .padding(.trailing, 8)
+            .accessibilityLabel("New chat")
             
             Menu {
                 Button(action: { showAIUsageSheet = true }) {
@@ -3010,6 +3154,10 @@ struct ContentView: View {
                     if let snapshot = message.taskStatusSnapshot {
                         taskStatusChart(snapshot)
                     }
+
+                    Text(message.timestamp.formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
                 .padding()
                 .background(message.isUser ? Color.accentColor.opacity(0.15) : Color.white)
@@ -3041,25 +3189,37 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
 
             #if canImport(Charts)
-            let rows: [(String, Int, Color)] = [
-                ("Completed", snapshot.completed, .green),
-                ("Overdue", snapshot.overdue, .orange),
-                ("Upcoming", snapshot.upcoming, .blue)
+            let rows: [StatusCategoryRow] = [
+                .init(status: "Completed", category: "Work", count: snapshot.completedWork),
+                .init(status: "Completed", category: "Personal", count: snapshot.completedPersonal),
+                .init(status: "Completed", category: "Other", count: snapshot.completedOther),
+                .init(status: "Overdue", category: "Work", count: snapshot.overdueWork),
+                .init(status: "Overdue", category: "Personal", count: snapshot.overduePersonal),
+                .init(status: "Overdue", category: "Other", count: snapshot.overdueOther),
+                .init(status: "Upcoming", category: "Work", count: snapshot.upcomingWork),
+                .init(status: "Upcoming", category: "Personal", count: snapshot.upcomingPersonal),
+                .init(status: "Upcoming", category: "Other", count: snapshot.upcomingOther)
             ]
+            .filter { $0.count > 0 }
 
-            Chart(rows, id: \.0) { row in
+            Chart(rows) { row in
                 BarMark(
-                    x: .value("Status", row.0),
-                    y: .value("Count", row.1)
+                    x: .value("Status", row.status),
+                    y: .value("Count", row.count)
                 )
-                .foregroundStyle(row.2)
+                .foregroundStyle(by: .value("Category", row.category))
             }
+            .chartForegroundStyleScale([
+                "Work": .purple,
+                "Personal": .mint,
+                "Other": .gray
+            ])
             .frame(height: 130)
             .chartYAxis {
                 AxisMarks(position: .leading)
             }
             #else
-            Text("Completed: \(snapshot.completed) • Overdue: \(snapshot.overdue) • Upcoming: \(snapshot.upcoming)")
+            Text("Completed W/P/O: \(snapshot.completedWork)/\(snapshot.completedPersonal)/\(snapshot.completedOther) • Overdue W/P/O: \(snapshot.overdueWork)/\(snapshot.overduePersonal)/\(snapshot.overdueOther) • Upcoming W/P/O: \(snapshot.upcomingWork)/\(snapshot.upcomingPersonal)/\(snapshot.upcomingOther)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             #endif
@@ -3932,6 +4092,29 @@ extension ContentView {
         dismissKeyboard()
 
         Task { await handleIntent(for: trimmed) }
+    }
+
+    private func startNewChatSession() {
+        ChatHistoryStore.shared.archiveCurrentSession(messages)
+        ChatHistoryStore.shared.clearCurrentSession()
+        messages.removeAll()
+
+        let displayUser = userName.isEmpty ? "You" : userName
+        messages.append(.init(isUser: false, text: "Hi \(displayUser)! I’m \(agentName). Tell me what you need and I’ll track and prioritize tasks for you."))
+
+        interactionState = .idle
+        draft = ""
+        pendingMessage = .init()
+        pendingEmail = .init()
+        pendingCallRecipient = ""
+        pendingAgentTask = nil
+        pendingOverdueTask = nil
+        pendingConflictTask = nil
+        pendingConflictMatches = []
+        showingAgentTaskAlert = false
+        showingOverdueTaskAlert = false
+        showScheduleConflictAlert = false
+        isAgentThinking = false
     }
     
     private func confirmContact(_ contact: SimpleContact) async {
@@ -4987,6 +5170,8 @@ extension ContentView {
             lower.contains("overdue") ||
             lower.contains("upcoming") ||
             lower.contains("completed") ||
+            lower.contains("work") ||
+            lower.contains("personal") ||
             lower.contains("what did i do")
 
         let hasTaskContext =
@@ -4995,7 +5180,7 @@ extension ContentView {
             lower.contains("todo") ||
             lower.contains("reminder")
 
-        return hasStatusIntent && (hasTaskContext || lower.contains("overdue") || lower.contains("upcoming") || lower.contains("completed"))
+        return hasStatusIntent && (hasTaskContext || lower.contains("overdue") || lower.contains("upcoming") || lower.contains("completed") || lower.contains("work") || lower.contains("personal"))
     }
 
     private func normalizedTaskTag(_ raw: String?) -> String? {
@@ -5064,7 +5249,68 @@ extension ContentView {
             !$0.isDone && $0.status == .open && $0.dueDate >= now
         }.count
 
-        return TaskStatusSnapshot(completed: completed, overdue: overdue, upcoming: upcoming)
+        var completedWork = 0
+        var completedPersonal = 0
+        var completedOther = 0
+        var overdueWork = 0
+        var overduePersonal = 0
+        var overdueOther = 0
+        var upcomingWork = 0
+        var upcomingPersonal = 0
+        var upcomingOther = 0
+
+        for task in appTasks {
+            let category = task.categoryLabel
+
+            let bucket: String
+            if task.status == .completed || (task.isDone && task.status != .canceled) {
+                bucket = "completed"
+            } else if task.isOverdue(now: now) {
+                bucket = "overdue"
+            } else if !task.isDone && task.status == .open && task.dueDate >= now {
+                bucket = "upcoming"
+            } else {
+                continue
+            }
+
+            switch (bucket, category) {
+            case ("completed", "Work"):
+                completedWork += 1
+            case ("completed", "Personal"):
+                completedPersonal += 1
+            case ("completed", _):
+                completedOther += 1
+            case ("overdue", "Work"):
+                overdueWork += 1
+            case ("overdue", "Personal"):
+                overduePersonal += 1
+            case ("overdue", _):
+                overdueOther += 1
+            case ("upcoming", "Work"):
+                upcomingWork += 1
+            case ("upcoming", "Personal"):
+                upcomingPersonal += 1
+            case ("upcoming", _):
+                upcomingOther += 1
+            default:
+                break
+            }
+        }
+
+        return TaskStatusSnapshot(
+            completed: completed,
+            overdue: overdue,
+            upcoming: upcoming,
+            completedWork: completedWork,
+            completedPersonal: completedPersonal,
+            completedOther: completedOther,
+            overdueWork: overdueWork,
+            overduePersonal: overduePersonal,
+            overdueOther: overdueOther,
+            upcomingWork: upcomingWork,
+            upcomingPersonal: upcomingPersonal,
+            upcomingOther: upcomingOther
+        )
     }
 
     private func beginTaskConfirmationFlow(draft: TaskDraft, actionPayload: TaskItem.AgentAction?) {
