@@ -13,6 +13,7 @@ import AVFoundation
 import EventKit
 import NaturalLanguage
 import Contacts
+import CryptoKit
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -1425,10 +1426,337 @@ struct ChatMessage: Identifiable, Hashable {
     }
 }
 
-struct TaskStatusSnapshot: Hashable {
+struct TaskStatusSnapshot: Hashable, Codable {
     let completed: Int
     let overdue: Int
     let upcoming: Int
+}
+
+extension ChatMessage: Codable {}
+
+extension Notification.Name {
+    static let chatHistoryDidImport = Notification.Name("chatHistoryDidImport")
+}
+
+struct ChatHistoryBackupPayload: Codable {
+    let version: Int
+    let exportedAt: Date
+    let messages: [ChatMessage]
+}
+
+struct ChatHistoryBackupPayloadV2: Codable {
+    let version: Int
+    let exportedAt: Date
+    let records: [EmbeddedChatRecord]
+}
+
+struct EmbeddedChatRecord: Codable {
+    let message: ChatMessage
+    let embedding: [Double]?
+    let embeddingModel: String?
+    let embeddedAt: Date?
+    let textHash: String
+}
+
+@MainActor
+final class ChatHistoryStore {
+    static let shared = ChatHistoryStore()
+
+    private let storageKey = "chat_history_v1"
+    private let maxStoredMessages = 1000
+    private var saveTask: Task<Void, Never>?
+
+    private init() {}
+
+    func loadMessages() -> [ChatMessage] {
+        return loadStoredRecords().map(\.message)
+    }
+
+    func saveMessages(_ messages: [ChatMessage]) {
+        let trimmed = Array(messages.suffix(maxStoredMessages))
+        saveTask?.cancel()
+        saveTask = Task { [weak self, trimmed] in
+            guard let self else { return }
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            if Task.isCancelled { return }
+            await self.embedAndPersist(trimmed)
+        }
+    }
+
+    func testEmbeddingConnection(apiKey: String?, model: String?, useAzure: Bool? = nil, azureEndpoint: String? = nil) async -> String {
+        let config = resolvedEmbeddingConfig(
+            overrideApiKey: apiKey,
+            overrideModel: model,
+            overrideUseAzure: useAzure,
+            overrideAzureEndpoint: azureEndpoint
+        )
+        guard !config.apiKey.isEmpty else { return "missing API key" }
+
+        guard let request = makeEmbeddingRequest(
+            text: "embedding connection test",
+            model: config.model,
+            apiKey: config.apiKey,
+            useAzure: config.useAzure,
+            azureEndpoint: config.azureEndpoint
+        ) else {
+            return "invalid endpoint"
+        }
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return "no http response"
+            }
+            guard 200..<300 ~= http.statusCode else {
+                return "HTTP \(http.statusCode)"
+            }
+
+            struct EmbeddingResponse: Decodable {
+                struct Item: Decodable {
+                    let embedding: [Double]
+                }
+                let data: [Item]
+            }
+
+            let decoded = try JSONDecoder().decode(EmbeddingResponse.self, from: data)
+            return decoded.data.first?.embedding.isEmpty == false ? "ok" : "empty embedding"
+        } catch {
+            return "network/error"
+        }
+    }
+
+    func exportBackupData() throws -> Data {
+        let payload = ChatHistoryBackupPayloadV2(version: 2, exportedAt: Date(), records: loadStoredRecords())
+        return try JSONEncoder().encode(payload)
+    }
+
+    @discardableResult
+    func importBackupData(_ data: Data) throws -> Int {
+        let decoder = JSONDecoder()
+
+        if let payloadV2 = try? decoder.decode(ChatHistoryBackupPayloadV2.self, from: data) {
+            persistRecords(payloadV2.records)
+            NotificationCenter.default.post(name: .chatHistoryDidImport, object: nil)
+            return payloadV2.records.count
+        }
+
+        if let payload = try? decoder.decode(ChatHistoryBackupPayload.self, from: data) {
+            let records = payload.messages.map { message in
+                EmbeddedChatRecord(
+                    message: message,
+                    embedding: nil,
+                    embeddingModel: nil,
+                    embeddedAt: nil,
+                    textHash: textHash(for: message.text)
+                )
+            }
+            persistRecords(records)
+            NotificationCenter.default.post(name: .chatHistoryDidImport, object: nil)
+            return payload.messages.count
+        }
+
+        let directMessages = try decoder.decode([ChatMessage].self, from: data)
+        let records = directMessages.map { message in
+            EmbeddedChatRecord(
+                message: message,
+                embedding: nil,
+                embeddingModel: nil,
+                embeddedAt: nil,
+                textHash: textHash(for: message.text)
+            )
+        }
+        persistRecords(records)
+        NotificationCenter.default.post(name: .chatHistoryDidImport, object: nil)
+        return directMessages.count
+    }
+
+    private func embedAndPersist(_ messages: [ChatMessage]) async {
+        let existingById = Dictionary(uniqueKeysWithValues: loadStoredRecords().map { ($0.message.id, $0) })
+        let config = resolvedEmbeddingConfig()
+        let embeddingModel = config.model
+        let apiKey = config.apiKey
+
+        var output: [EmbeddedChatRecord] = []
+        output.reserveCapacity(messages.count)
+
+        for message in messages {
+            if Task.isCancelled { return }
+
+            let hash = textHash(for: message.text)
+            if let existing = existingById[message.id], existing.textHash == hash, existing.embedding != nil {
+                output.append(existing)
+                continue
+            }
+
+            let embedding = await fetchEmbedding(
+                text: message.text,
+                model: embeddingModel,
+                apiKey: apiKey,
+                useAzure: config.useAzure,
+                azureEndpoint: config.azureEndpoint
+            )
+            output.append(
+                EmbeddedChatRecord(
+                    message: message,
+                    embedding: embedding,
+                    embeddingModel: embedding == nil ? nil : embeddingModel,
+                    embeddedAt: embedding == nil ? nil : Date(),
+                    textHash: hash
+                )
+            )
+        }
+
+        if !Task.isCancelled {
+            persistRecords(output)
+        }
+    }
+
+    private func loadStoredRecords() -> [EmbeddedChatRecord] {
+        guard let data = UserDefaults.standard.data(forKey: storageKey) else { return [] }
+        let decoder = JSONDecoder()
+
+        if let records = try? decoder.decode([EmbeddedChatRecord].self, from: data) {
+            return Array(records.suffix(maxStoredMessages))
+        }
+
+        if let legacyMessages = try? decoder.decode([ChatMessage].self, from: data) {
+            return Array(legacyMessages.suffix(maxStoredMessages)).map {
+                EmbeddedChatRecord(
+                    message: $0,
+                    embedding: nil,
+                    embeddingModel: nil,
+                    embeddedAt: nil,
+                    textHash: textHash(for: $0.text)
+                )
+            }
+        }
+
+        return []
+    }
+
+    private func persistRecords(_ records: [EmbeddedChatRecord]) {
+        let trimmed = Array(records.suffix(maxStoredMessages))
+        guard let data = try? JSONEncoder().encode(trimmed) else { return }
+        UserDefaults.standard.set(data, forKey: storageKey)
+    }
+
+    private func resolvedEmbeddingConfig(
+        overrideApiKey: String? = nil,
+        overrideModel: String? = nil,
+        overrideUseAzure: Bool? = nil,
+        overrideAzureEndpoint: String? = nil
+    ) -> (apiKey: String, model: String, useAzure: Bool, azureEndpoint: String?) {
+        let env = ProcessInfo.processInfo.environment
+
+        let directApiKey = overrideApiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let envApiKey = env["OPENAI_API_KEY"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let storedApiKey = UserDefaults.standard.string(forKey: "OPENAI_API_KEY")?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let apiKey = (directApiKey?.isEmpty == false ? directApiKey : nil)
+            ?? (envApiKey?.isEmpty == false ? envApiKey : nil)
+            ?? (storedApiKey?.isEmpty == false ? storedApiKey : nil)
+            ?? ""
+
+        let directModel = overrideModel?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let envEmbeddingModel = env["OPENAI_EMBEDDING_MODEL"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let storedEmbeddingModel = UserDefaults.standard.string(forKey: "OPENAI_EMBEDDING_MODEL")?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = (directModel?.isEmpty == false ? directModel : nil)
+            ?? (envEmbeddingModel?.isEmpty == false ? envEmbeddingModel : nil)
+            ?? (storedEmbeddingModel?.isEmpty == false ? storedEmbeddingModel : nil)
+            ?? "text-embedding-3-small"
+
+        let envUseAzureRaw = env["OPENAI_USE_AZURE"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let envUseAzure = (envUseAzureRaw == "1" || envUseAzureRaw == "true" || envUseAzureRaw == "yes")
+        let storedUseAzure = UserDefaults.standard.bool(forKey: "OPENAI_USE_AZURE")
+        let useAzure = overrideUseAzure ?? envUseAzure || storedUseAzure
+
+        let directAzureEndpoint = overrideAzureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let envAzureEndpoint = env["OPENAI_AZURE_EMBEDDING_ENDPOINT"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let storedAzureEndpoint = UserDefaults.standard.string(forKey: "OPENAI_AZURE_EMBEDDING_ENDPOINT")?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallbackAzureEndpoint = UserDefaults.standard.string(forKey: "OPENAI_AZURE_ENDPOINT")?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let azureEndpoint = (directAzureEndpoint?.isEmpty == false ? directAzureEndpoint : nil)
+            ?? (envAzureEndpoint?.isEmpty == false ? envAzureEndpoint : nil)
+            ?? (storedAzureEndpoint?.isEmpty == false ? storedAzureEndpoint : nil)
+            ?? (fallbackAzureEndpoint?.isEmpty == false ? fallbackAzureEndpoint : nil)
+
+        return (apiKey, model, useAzure, azureEndpoint)
+    }
+
+    private func textHash(for text: String) -> String {
+        let digest = SHA256.hash(data: Data(text.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func fetchEmbedding(text: String, model: String, apiKey: String, useAzure: Bool, azureEndpoint: String?) async -> [Double]? {
+        guard !apiKey.isEmpty else { return nil }
+        guard let request = makeEmbeddingRequest(text: text, model: model, apiKey: apiKey, useAzure: useAzure, azureEndpoint: azureEndpoint) else { return nil }
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else { return nil }
+
+            struct EmbeddingResponse: Decodable {
+                struct Item: Decodable {
+                    let embedding: [Double]
+                }
+                let data: [Item]
+            }
+
+            let decoded = try JSONDecoder().decode(EmbeddingResponse.self, from: data)
+            return decoded.data.first?.embedding
+        } catch {
+            return nil
+        }
+    }
+
+    private func makeEmbeddingRequest(text: String, model: String, apiKey: String, useAzure: Bool, azureEndpoint: String?) -> URLRequest? {
+        let request: URLRequest
+
+        if useAzure {
+            guard let endpointString = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  var components = URLComponents(string: endpointString),
+                  let host = components.host
+            else {
+                return nil
+            }
+
+            let lowerHost = host.lowercased()
+            guard lowerHost.contains("openai.azure.com") || lowerHost.contains("cognitiveservices.azure.com") else {
+                return nil
+            }
+
+            let apiVersion = components.queryItems?.first(where: { $0.name.lowercased() == "api-version" })?.value ?? "2024-12-01-preview"
+            components.path = "/openai/deployments/\(model)/embeddings"
+            components.queryItems = [URLQueryItem(name: "api-version", value: apiVersion)]
+
+            guard let azureURL = components.url else { return nil }
+            var azureRequest = URLRequest(url: azureURL)
+            azureRequest.httpMethod = "POST"
+            azureRequest.timeoutInterval = 30
+            azureRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            azureRequest.setValue(apiKey, forHTTPHeaderField: "api-key")
+            let body: [String: Any] = [
+                "model": model,
+                "input": text
+            ]
+            azureRequest.httpBody = try? JSONSerialization.data(withJSONObject: body)
+            request = azureRequest
+            return request
+        } else {
+            guard let openAIURL = URL(string: "https://api.openai.com/v1/embeddings") else { return nil }
+            var openAIRequest = URLRequest(url: openAIURL)
+            openAIRequest.httpMethod = "POST"
+            openAIRequest.timeoutInterval = 30
+            openAIRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            openAIRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            let body: [String: Any] = [
+                "model": model,
+                "input": text
+            ]
+            openAIRequest.httpBody = try? JSONSerialization.data(withJSONObject: body)
+            request = openAIRequest
+            return request
+        }
+    }
 }
 
 struct TaskDraft: Equatable {
@@ -2200,6 +2528,11 @@ struct ContentView: View {
                     }
                 }
 
+                let persistedMessages = ChatHistoryStore.shared.loadMessages()
+                if !persistedMessages.isEmpty {
+                    messages = persistedMessages
+                }
+
                 if messages.isEmpty {
                     let displayUser = userName.isEmpty ? "You" : userName
                     messages.append(.init(isUser: false, text: "Hi \(displayUser)! I’m \(agentName). Tell me what you need and I’ll track and prioritize tasks for you."))
@@ -2211,6 +2544,9 @@ struct ContentView: View {
             }
             .onReceive(taskTimer) { time in
                 checkAgentTasks(at: time)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .chatHistoryDidImport)) { _ in
+                messages = ChatHistoryStore.shared.loadMessages()
             }
             .onChange(of: tasks) { _, _ in saveTasks() }
             .onTapGesture {
@@ -2610,6 +2946,8 @@ struct ContentView: View {
                         messages = Array(newValue.suffix(maxChatMessages))
                         return
                     }
+
+                    ChatHistoryStore.shared.saveMessages(newValue)
 
                     // Scroll to bottom whenever messages change
                     withAnimation(.easeOut(duration: 0.2)) {

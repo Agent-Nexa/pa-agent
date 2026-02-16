@@ -4,11 +4,6 @@
 <dict>
 	<key>SchemeUserState</key>
 	<dict>
-		<key>pa-agent-prod.xcscheme</key>
-		<dict>
-			<key>orderHint</key>
-			<integer>1</integer>
-		</dict>
 		<key>pa-agent.xcscheme_^#shared#^_</key>
 		<dict>
 			<key>isShown</key>

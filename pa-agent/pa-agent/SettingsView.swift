@@ -4,6 +4,7 @@ import AVFoundation
 import StoreKit
 import Speech
 import EventKit
+import UniformTypeIdentifiers
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -11,9 +12,11 @@ import UIKit
 struct SettingsView: View {
     @Environment(\.openURL) private var openURL
     @AppStorage("OPENAI_API_KEY") private var storedApiKey: String = ""
+    @AppStorage("OPENAI_EMBEDDING_MODEL") private var storedEmbeddingModel: String = "text-embedding-3-small"
     @AppStorage("OPENAI_MODEL") private var storedModel: String = "gpt-5.2"
     @AppStorage("OPENAI_USE_AZURE") private var useAzure: Bool = true
     @AppStorage("OPENAI_AZURE_ENDPOINT") private var azureEndpoint: String = "https://admin-mev0a1yu-eastus2.openai.azure.com/openai/deployments/gpt-5.2/chat/completions?api-version=2024-12-01-preview"
+    @AppStorage("OPENAI_AZURE_EMBEDDING_ENDPOINT") private var azureEmbeddingEndpoint: String = "https://admin-mev0a1yu-eastus2.cognitiveservices.azure.com"
     @AppStorage("AGENT_NAME") private var storedAgentName: String = "Nexa"
     @AppStorage("USER_NAME") private var storedUserName: String = ""
     @AppStorage("AGENT_ICON") private var agentIcon: String = "brain.head.profile"
@@ -28,6 +31,7 @@ struct SettingsView: View {
     @State private var localModel: String = "gpt-5.2"
     @State private var localUseAzure: Bool = false
     @State private var localEndpoint: String = ""
+    @State private var localEmbeddingEndpoint: String = ""
     @State private var localAgentName: String = "Nexa"
     @State private var localUserName: String = ""
     @State private var localAgentIcon: String = "brain.head.profile"
@@ -37,8 +41,10 @@ struct SettingsView: View {
     @State private var localAgentVoiceIdentifier: String = ""
     
     @State private var connectionStatus: String = "not tested"
+    @State private var embeddingConnectionStatus: String = "not tested"
     @State private var savedMessage: String = ""
     @State private var referralStatusText: String = ""
+    @State private var chatHistoryStatusText: String = ""
     @State private var permissionStatusText: String = ""
     @State private var notificationsPermissionText: String = "Unknown"
     @State private var speechPermissionText: String = "Unknown"
@@ -47,6 +53,9 @@ struct SettingsView: View {
     @State private var taskCalendarChoices: [EKCalendar] = []
     @State private var isEditing: Bool = false
     @State private var previewSynthesizer = AVSpeechSynthesizer()
+    @State private var isExportingChatHistory = false
+    @State private var isImportingChatHistory = false
+    @State private var chatBackupDocument = ChatHistoryBackupDocument(data: Data())
     @StateObject private var subscriptionManager = SubscriptionManager.shared
     @ObservedObject var historyManager: ActivityHistoryManager
     private let intentService = IntentService()
@@ -217,6 +226,14 @@ struct SettingsView: View {
                             Text("Format: https://{resource}.openai.azure.com/openai/deployments/{deployment}/chat/completions?api-version=...")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
+
+                            TextField("Embedding Endpoint URL", text: $localEmbeddingEndpoint)
+                                .textInputAutocapitalization(.none)
+                                .disableAutocorrection(true)
+                                .font(.caption)
+                            Text("Format: https://{resource}.cognitiveservices.azure.com")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
                         }
                     }
                     .disabled(!isEditing)
@@ -278,6 +295,26 @@ struct SettingsView: View {
                     }
                     NavigationLink("View Activity History") {
                         ActivityHistoryView(historyManager: historyManager)
+                    }
+                }
+
+                Section("Chat History") {
+                    Button {
+                        prepareChatHistoryExport()
+                    } label: {
+                        Label("Backup Chat History", systemImage: "square.and.arrow.up")
+                    }
+
+                    Button {
+                        isImportingChatHistory = true
+                    } label: {
+                        Label("Import Chat History", systemImage: "square.and.arrow.down")
+                    }
+
+                    if !chatHistoryStatusText.isEmpty {
+                        Text(chatHistoryStatusText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
 
@@ -379,6 +416,12 @@ struct SettingsView: View {
                         Text(connectionStatus)
                             .foregroundStyle(.secondary)
                     }
+                    HStack {
+                        Text("Embeddings")
+                        Spacer()
+                        Text(embeddingConnectionStatus)
+                            .foregroundStyle(.secondary)
+                    }
                     Button("Test Connection") {
                         Task {
                             guard isAIFeatureEnabled else {
@@ -393,6 +436,26 @@ struct SettingsView: View {
                                 model: localModel,
                                 useAzure: localUseAzure,
                                 azureEndpoint: localEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+                            )
+                        }
+                    }
+                    .disabled(!isAIFeatureEnabled)
+
+                    Button("Test Embedding Connection") {
+                        Task {
+                            guard isAIFeatureEnabled else {
+                                embeddingConnectionStatus = "subscription required"
+                                return
+                            }
+
+                            embeddingConnectionStatus = "testing..."
+                            let keyForTest = localKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let modelForTest = storedEmbeddingModel.trimmingCharacters(in: .whitespacesAndNewlines)
+                            embeddingConnectionStatus = await ChatHistoryStore.shared.testEmbeddingConnection(
+                                apiKey: keyForTest,
+                                model: modelForTest.isEmpty ? nil : modelForTest,
+                                useAzure: localUseAzure,
+                                azureEndpoint: localEmbeddingEndpoint
                             )
                         }
                     }
@@ -469,6 +532,7 @@ struct SettingsView: View {
                 localModel = storedModel
                 localUseAzure = useAzure
                 localEndpoint = azureEndpoint
+                localEmbeddingEndpoint = azureEmbeddingEndpoint
                 localAgentName = storedAgentName
                 localUserName = storedUserName
                 localAgentIcon = agentIcon
@@ -484,6 +548,49 @@ struct SettingsView: View {
                         await subscriptionManager.loadProducts()
                         await subscriptionManager.refreshSubscriptionStatus()
                     }
+                }
+            }
+            .fileExporter(
+                isPresented: $isExportingChatHistory,
+                document: chatBackupDocument,
+                contentType: .json,
+                defaultFilename: chatHistoryBackupFileName
+            ) { result in
+                switch result {
+                case .success:
+                    chatHistoryStatusText = "Backup exported."
+                case .failure(let error):
+                    chatHistoryStatusText = "Backup failed: \(error.localizedDescription)"
+                }
+            }
+            .fileImporter(
+                isPresented: $isImportingChatHistory,
+                allowedContentTypes: [.json],
+                allowsMultipleSelection: false
+            ) { result in
+                switch result {
+                case .success(let urls):
+                    guard let url = urls.first else {
+                        chatHistoryStatusText = "Import cancelled."
+                        return
+                    }
+
+                    do {
+                        let accessGranted = url.startAccessingSecurityScopedResource()
+                        defer {
+                            if accessGranted {
+                                url.stopAccessingSecurityScopedResource()
+                            }
+                        }
+
+                        let data = try Data(contentsOf: url)
+                        let importedCount = try ChatHistoryStore.shared.importBackupData(data)
+                        chatHistoryStatusText = "Imported \(importedCount) messages."
+                    } catch {
+                        chatHistoryStatusText = "Import failed: \(error.localizedDescription)"
+                    }
+                case .failure(let error):
+                    chatHistoryStatusText = "Import failed: \(error.localizedDescription)"
                 }
             }
         }
@@ -503,7 +610,11 @@ struct SettingsView: View {
     private var hasUnsavedChanges: Bool {
         let keyChanged = !isProductionBuild && (localKey.trimmingCharacters(in: .whitespacesAndNewlines) != storedApiKey)
         let modelChanged = !isProductionBuild && (localModel != storedModel)
-        let azureChanged = !isProductionBuild && (localUseAzure != useAzure || localEndpoint.trimmingCharacters(in: .whitespacesAndNewlines) != azureEndpoint)
+        let azureChanged = !isProductionBuild && (
+            localUseAzure != useAzure ||
+            localEndpoint.trimmingCharacters(in: .whitespacesAndNewlines) != azureEndpoint ||
+            localEmbeddingEndpoint.trimmingCharacters(in: .whitespacesAndNewlines) != azureEmbeddingEndpoint
+        )
         let identityChanged =
             localAgentName.trimmingCharacters(in: .whitespacesAndNewlines) != storedAgentName ||
             localUserName.trimmingCharacters(in: .whitespacesAndNewlines) != storedUserName ||
@@ -522,6 +633,7 @@ struct SettingsView: View {
             storedModel = localModel
             useAzure = localUseAzure
             azureEndpoint = localEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+            azureEmbeddingEndpoint = localEmbeddingEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         storedAgentName = localAgentName.trimmingCharacters(in: .whitespacesAndNewlines)
         storedUserName = localUserName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -575,6 +687,20 @@ struct SettingsView: View {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "-"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "-"
         return "v\(version).\(build)"
+    }
+
+    private var chatHistoryBackupFileName: String {
+        let dateText = Date().formatted(.iso8601.year().month().day())
+        return "nexa-chat-history-\(dateText)"
+    }
+
+    private func prepareChatHistoryExport() {
+        do {
+            chatBackupDocument = ChatHistoryBackupDocument(data: try ChatHistoryStore.shared.exportBackupData())
+            isExportingChatHistory = true
+        } catch {
+            chatHistoryStatusText = "Backup failed: \(error.localizedDescription)"
+        }
     }
 
     private func refreshPermissionStatuses() {
@@ -799,5 +925,23 @@ struct SettingsView: View {
         let identifier: String
         let name: String
         let genderLabel: String
+    }
+}
+
+struct ChatHistoryBackupDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.json] }
+
+    var data: Data
+
+    init(data: Data) {
+        self.data = data
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        self.data = configuration.file.regularFileContents ?? Data()
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
     }
 }

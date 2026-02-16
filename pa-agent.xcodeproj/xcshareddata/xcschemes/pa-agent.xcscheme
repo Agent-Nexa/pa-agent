@@ -90,6 +90,16 @@
             value = "https://admin-mev0a1yu-eastus2.openai.azure.com/"
             isEnabled = "YES">
          </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "OPENAI_EMBEDDING_MODEL"
+            value = "text-embedding-3-small"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "OPENAI_AZURE_EMBEDDING_ENDPOINT"
+            value = "https://admin-mev0a1yu-eastus2.cognitiveservices.azure.com"
+            isEnabled = "YES">
+         </EnvironmentVariable>
       </EnvironmentVariables>
    </LaunchAction>
    <ProfileAction
