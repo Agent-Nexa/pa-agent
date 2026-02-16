@@ -1585,6 +1585,12 @@ final class ChatHistoryStore {
         }
     }
 
+    func flushMessages(_ messages: [ChatMessage]) {
+        saveTask?.cancel()
+        let trimmed = Array(messages.suffix(maxStoredMessages))
+        persistMessages(trimmed)
+    }
+
     func archiveCurrentSession(_ messages: [ChatMessage]) {
         let meaningful = messages.filter {
             !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -2483,6 +2489,8 @@ struct ContentView: View {
                 if newPhase == .active {
                      checkAgentTasks(at: Date())
                      Task { await refreshSystemTasks() }
+                } else if newPhase == .inactive || newPhase == .background {
+                    ChatHistoryStore.shared.flushMessages(messages)
                 }
             }
             .navigationBarHidden(true)
@@ -2678,6 +2686,7 @@ struct ContentView: View {
                 timerCancellable = taskTimer.connect()
             }
             .onDisappear {
+                ChatHistoryStore.shared.flushMessages(messages)
                 timerCancellable?.cancel()
                 timerCancellable = nil
                 speechManager.stopRecording()
