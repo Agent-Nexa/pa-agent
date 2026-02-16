@@ -72,7 +72,12 @@ final class TokenUsageManager: ObservableObject {
     @Published private(set) var entries: [TokenUsageEntry] = []
 
     private let storageKey = "AI_TOKEN_USAGE_ENTRIES"
-    private let calendar = Calendar.current
+    private var calendar: Calendar {
+        var value = Calendar(identifier: .gregorian)
+        value.locale = .autoupdatingCurrent
+        value.timeZone = .autoupdatingCurrent
+        return value
+    }
     private let maxStoredEntries = 3000
 
     private init() {
@@ -116,33 +121,37 @@ final class TokenUsageManager: ObservableObject {
 
     func summary(for date: Date) -> DailyTokenUsage {
         let dayStart = calendar.startOfDay(for: date)
-        let nextDay = calendar.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart
-        let rows = entries.filter { $0.date >= dayStart && $0.date < nextDay }
+        let rows = entries(inSameDayAs: dayStart)
         return buildSummary(for: dayStart, rows: rows)
     }
 
     func dailySummaries(limit: Int = 14) -> [DailyTokenUsage] {
-        let grouped = Dictionary(grouping: entries) { calendar.startOfDay(for: $0.date) }
-        let sortedDays = grouped.keys.sorted(by: >).prefix(max(limit, 1))
-        return sortedDays.map { day in
-            let rows = grouped[day] ?? []
+        let grouped = Dictionary(grouping: entries) { entry in
+            dayBucket(for: entry.date)
+        }
+        let sortedBuckets = grouped.keys.sorted(by: >).prefix(max(limit, 1))
+        return sortedBuckets.compactMap { bucket in
+            guard let day = dayStart(for: bucket) else { return nil }
+            let rows = grouped[bucket] ?? []
             return buildSummary(for: day, rows: rows)
         }
     }
 
     func monthlySummaries(limit: Int = 12) -> [MonthlyTokenUsage] {
-        let grouped = Dictionary(grouping: entries) { monthStart(for: $0.date) }
-        let sortedMonths = grouped.keys.sorted(by: >).prefix(max(limit, 1))
-        return sortedMonths.map { month in
-            let rows = grouped[month] ?? []
+        let grouped = Dictionary(grouping: entries) { entry in
+            monthBucket(for: entry.date)
+        }
+        let sortedBuckets = grouped.keys.sorted(by: >).prefix(max(limit, 1))
+        return sortedBuckets.compactMap { bucket in
+            guard let month = monthStart(for: bucket) else { return nil }
+            let rows = grouped[bucket] ?? []
             return buildMonthlySummary(for: month, rows: rows)
         }
     }
 
     func monthlySummary(for date: Date) -> MonthlyTokenUsage {
         let month = monthStart(for: date)
-        let nextMonth = calendar.date(byAdding: .month, value: 1, to: month) ?? month
-        let rows = entries.filter { $0.date >= month && $0.date < nextMonth }
+        let rows = entries(inSameMonthAs: month)
         return buildMonthlySummary(for: month, rows: rows)
     }
 
@@ -188,6 +197,73 @@ final class TokenUsageManager: ObservableObject {
     private func monthStart(for date: Date) -> Date {
         let components = calendar.dateComponents([.year, .month], from: date)
         return calendar.date(from: components) ?? calendar.startOfDay(for: date)
+    }
+
+    private struct DayBucket: Hashable, Comparable {
+        let year: Int
+        let month: Int
+        let day: Int
+
+        static func < (lhs: DayBucket, rhs: DayBucket) -> Bool {
+            if lhs.year != rhs.year { return lhs.year < rhs.year }
+            if lhs.month != rhs.month { return lhs.month < rhs.month }
+            return lhs.day < rhs.day
+        }
+    }
+
+    private struct MonthBucket: Hashable, Comparable {
+        let year: Int
+        let month: Int
+
+        static func < (lhs: MonthBucket, rhs: MonthBucket) -> Bool {
+            if lhs.year != rhs.year { return lhs.year < rhs.year }
+            return lhs.month < rhs.month
+        }
+    }
+
+    private func dayBucket(for date: Date) -> DayBucket {
+        let components = calendar.dateComponents([.year, .month, .day], from: date)
+        return DayBucket(
+            year: components.year ?? 0,
+            month: components.month ?? 1,
+            day: components.day ?? 1
+        )
+    }
+
+    private func monthBucket(for date: Date) -> MonthBucket {
+        let components = calendar.dateComponents([.year, .month], from: date)
+        return MonthBucket(
+            year: components.year ?? 0,
+            month: components.month ?? 1
+        )
+    }
+
+    private func dayStart(for bucket: DayBucket) -> Date? {
+        calendar.date(from: DateComponents(year: bucket.year, month: bucket.month, day: bucket.day))
+    }
+
+    private func monthStart(for bucket: MonthBucket) -> Date? {
+        calendar.date(from: DateComponents(year: bucket.year, month: bucket.month, day: 1))
+    }
+
+    private func entries(inSameDayAs day: Date) -> [TokenUsageEntry] {
+        let dayStart = calendar.startOfDay(for: day)
+        guard let nextDay = calendar.date(byAdding: .day, value: 1, to: dayStart) else {
+            return entries.filter { calendar.isDate($0.date, inSameDayAs: dayStart) }
+        }
+        return entries.filter { $0.date >= dayStart && $0.date < nextDay }
+    }
+
+    private func entries(inSameMonthAs date: Date) -> [TokenUsageEntry] {
+        let month = monthStart(for: date)
+        guard let nextMonth = calendar.date(byAdding: .month, value: 1, to: month) else {
+            let components = calendar.dateComponents([.year, .month], from: month)
+            return entries.filter {
+                let rowComponents = calendar.dateComponents([.year, .month], from: $0.date)
+                return rowComponents.year == components.year && rowComponents.month == components.month
+            }
+        }
+        return entries.filter { $0.date >= month && $0.date < nextMonth }
     }
 
     private func buildMonthlySummary(for monthStart: Date, rows: [TokenUsageEntry]) -> MonthlyTokenUsage {

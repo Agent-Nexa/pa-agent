@@ -418,6 +418,7 @@ final class IntentService {
         
         3. INQUIRIES / GREETINGS:
            - If the user greets you or asks a question: Return action='answer' with the response in 'answer'.
+              - For action='answer', set 'title' to a short meaningful label (3-8 words) that summarizes the response topic.
               - If the user asks for summaries/status (e.g. "summarize today's tasks", "what did I do today", "what notifications do I have"), use APP CONTEXT to answer concretely.
               - Never say you cannot access the data if APP CONTEXT is provided.
         
@@ -1456,13 +1457,15 @@ struct ChatMessage: Identifiable, Hashable {
     let text: String
     let timestamp: Date
     let taskStatusSnapshot: TaskStatusSnapshot?
+    let responseTitle: String?
 
-    init(id: UUID = UUID(), isUser: Bool, text: String, timestamp: Date = .init(), taskStatusSnapshot: TaskStatusSnapshot? = nil) {
+    init(id: UUID = UUID(), isUser: Bool, text: String, timestamp: Date = .init(), taskStatusSnapshot: TaskStatusSnapshot? = nil, responseTitle: String? = nil) {
         self.id = id
         self.isUser = isUser
         self.text = text
         self.timestamp = timestamp
         self.taskStatusSnapshot = taskStatusSnapshot
+        self.responseTitle = responseTitle
     }
 }
 
@@ -1586,6 +1589,77 @@ struct StatusCategoryRow: Identifiable {
     let status: String
     let category: String
     let count: Int
+}
+
+struct SavedAgentItem: Identifiable, Hashable, Codable {
+    var id: UUID = UUID()
+    var title: String
+    var content: String
+    var createdAt: Date = .now
+    var savedAt: Date = .now
+    var sourceMessageID: UUID? = nil
+
+    static func titleFrom(content: String) -> String {
+        let fallback = "Saved response"
+        let firstLine = content
+            .split(separator: "\n")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: { !$0.isEmpty })
+
+        guard let firstLine, !firstLine.isEmpty else { return fallback }
+        if firstLine.count <= 70 { return firstLine }
+        let clipped = firstLine.prefix(67).trimmingCharacters(in: .whitespacesAndNewlines)
+        return "\(clipped)..."
+    }
+
+    var shareText: String {
+        "\(title)\n\n\(content)"
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case content
+        case createdAt
+        case savedAt
+        case sourceMessageID
+    }
+
+    init(
+        id: UUID = UUID(),
+        title: String,
+        content: String,
+        createdAt: Date = .now,
+        savedAt: Date = .now,
+        sourceMessageID: UUID? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.content = content
+        self.createdAt = createdAt
+        self.savedAt = savedAt
+        self.sourceMessageID = sourceMessageID
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        title = try container.decode(String.self, forKey: .title)
+        content = try container.decode(String.self, forKey: .content)
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? .now
+        savedAt = try container.decodeIfPresent(Date.self, forKey: .savedAt) ?? createdAt
+        sourceMessageID = try container.decodeIfPresent(UUID.self, forKey: .sourceMessageID)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(title, forKey: .title)
+        try container.encode(content, forKey: .content)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(savedAt, forKey: .savedAt)
+        try container.encodeIfPresent(sourceMessageID, forKey: .sourceMessageID)
+    }
 }
 
 struct ChatSessionArchive: Codable {
@@ -2806,6 +2880,7 @@ struct ContentView: View {
     @StateObject private var speechManager = SpeechManager()
     @StateObject private var subscriptionManager = SubscriptionManager.shared
     @State private var showNotificationList = false
+    @State private var showSavedItemsSheet = false
     @State private var selectedTaskForDetail: TaskItem?
     @AppStorage("PERMISSION_SETUP_SHOWN") private var permissionSetupShown: Bool = false
     @State private var showPermissionSetupSheet = false
@@ -2828,8 +2903,10 @@ struct ContentView: View {
     @State private var showScheduleConflictAlert = false
     @State private var pendingConflictTask: TaskItem?
     @State private var pendingConflictMatches: [TaskItem] = []
+    @State private var savedAgentItems: [SavedAgentItem] = []
     @State private var recentCalendarOccurrenceStatuses: [String: TaskItem.TaskStatus] = [:]
     private let calendarOccurrenceStatusesStoreKey = "calendar_occurrence_statuses_v1"
+    private let savedAgentItemsStoreKey = "saved_agent_items_v1"
     
     @Environment(\.scenePhase) private var scenePhase
 
@@ -2929,6 +3006,9 @@ struct ContentView: View {
                         }
                     }
                 )
+            }
+            .sheet(isPresented: $showSavedItemsSheet) {
+                SavedItemsSheet(items: $savedAgentItems)
             }
             .sheet(item: $selectedTaskForDetail) { task in
                 TaskDetailsSheet(task: task)
@@ -3102,6 +3182,7 @@ struct ContentView: View {
                     let displayUser = userName.isEmpty ? "You" : userName
                     messages.append(.init(isUser: false, text: "Hi \(displayUser)! I’m \(agentName). Tell me what you need and I’ll track and prioritize tasks for you."))
                 }
+                loadSavedAgentItems()
                 loadTasks()
                 Task { await refreshSystemTasks() }
                 // Start timer
@@ -3121,6 +3202,7 @@ struct ContentView: View {
                 messages = ChatHistoryStore.shared.loadMessages()
             }
             .onChange(of: tasks) { _, _ in saveTasks() }
+            .onChange(of: savedAgentItems) { _, _ in saveSavedAgentItems() }
             .onTapGesture {
                 dismissKeyboard()
             }
@@ -3352,31 +3434,19 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            // Notification Bell
-            Button(action: { showNotificationList = true }) {
-                ZStack(alignment: .topTrailing) {
-                    Image(systemName: "bell")
-                        .font(.title3)
-                    
-                    let count = notificationManager.unreadCount
-                    if count > 0 {
-                        Text("\(count)")
-                            .font(.caption2.bold())
-                            .foregroundStyle(.white)
-                            .padding(4)
-                            .background(Color.red)
-                            .clipShape(Circle())
-                            .offset(x: 10, y: -10)
-                    }
-                }
-            }
-            .padding(.trailing, 8)
 
             Button(action: { showTasksList = true }) {
                 Image(systemName: "checklist")
                     .font(.title3)
             }
             .padding(.trailing, 8)
+
+            Button(action: { showSavedItemsSheet = true }) {
+                Image(systemName: "bookmark")
+                    .font(.title3)
+            }
+            .padding(.trailing, 8)
+            .accessibilityLabel("Saved items")
 
             Button(action: startNewChatSession) {
                 Image(systemName: "square.and.pencil")
@@ -3386,6 +3456,9 @@ struct ContentView: View {
             .accessibilityLabel("New chat")
             
             Menu {
+                Button(action: { showNotificationList = true }) {
+                    Label("Notifications", systemImage: "bell")
+                }
                 Button(action: { showAIUsageSheet = true }) {
                     Label("AI usage", systemImage: "chart.bar")
                 }
@@ -3583,6 +3656,15 @@ struct ContentView: View {
                         .padding(.leading, 4)
                 }
                 VStack(alignment: message.isUser ? .trailing : .leading, spacing: 10) {
+                    if !message.isUser,
+                       let responseTitle = message.responseTitle,
+                       !responseTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text(responseTitle)
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(.secondary)
+                    }
+
                     Text(message.text)
                         .foregroundStyle(.primary)
 
@@ -3600,6 +3682,15 @@ struct ContentView: View {
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                             Spacer(minLength: 0)
+                            Button {
+                                toggleSavedAgentResponse(message)
+                            } label: {
+                                Image(systemName: isSavedAgentResponse(message) ? "bookmark.fill" : "bookmark")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(isSavedAgentResponse(message) ? "Remove from saved items" : "Save response")
                             Button {
                                 copyAgentResponse(message)
                             } label: {
@@ -4242,6 +4333,238 @@ struct TaskDetailsSheet: View {
     }
 }
 
+struct SavedItemsSheet: View {
+    @Binding var items: [SavedAgentItem]
+    @Environment(\.openURL) private var openURL
+    @State private var editingItem: SavedAgentItem?
+    @State private var emailingItem: SavedAgentItem?
+
+    private var sortedItems: [SavedAgentItem] {
+        items.sorted { $0.savedAt > $1.savedAt }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if sortedItems.isEmpty {
+                    ContentUnavailableView(
+                        "No saved items",
+                        systemImage: "bookmark",
+                        description: Text("Favorite an agent response to save it here.")
+                    )
+                } else {
+                    ForEach(sortedItems) { item in
+                        HStack(alignment: .top, spacing: 10) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(item.title)
+                                    .lineLimit(2)
+                                    .multilineTextAlignment(.leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Text("Saved \(item.savedAt.formatted(date: .abbreviated, time: .shortened))")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 0)
+                            HStack(spacing: 12) {
+                                Button {
+                                    sendSavedItemViaEmail(item)
+                                } label: {
+                                    Image(systemName: "envelope")
+                                }
+                                .buttonStyle(.borderless)
+                                .accessibilityLabel("Send via email")
+
+                                ShareLink(item: item.shareText) {
+                                    Image(systemName: "square.and.arrow.up")
+                                }
+                                .buttonStyle(.borderless)
+
+                                Button {
+                                    printSavedItem(item)
+                                } label: {
+                                    Image(systemName: "printer")
+                                }
+                                .buttonStyle(.borderless)
+                                .accessibilityLabel("Print favorite item")
+                            }
+                            .foregroundStyle(.secondary)
+                        }
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button {
+                                editingItem = item
+                            } label: {
+                                Label("View", systemImage: "eye")
+                            }
+                            .tint(.indigo)
+
+                            Button(role: .destructive) {
+                                deleteItem(id: item.id)
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Saved Items")
+            .navigationBarTitleDisplayMode(.inline)
+            .sheet(item: $editingItem) { selectedItem in
+                if let itemBinding = bindingForItem(id: selectedItem.id) {
+                    NavigationStack {
+                        SavedItemDetailView(item: itemBinding)
+                    }
+                } else {
+                    ContentUnavailableView("Item unavailable", systemImage: "exclamationmark.triangle")
+                }
+            }
+            .sheet(item: $emailingItem) { selectedItem in
+                EmailComposerView(recipient: "", subject: selectedItem.title, body: selectedItem.shareText) { _, _ in
+                    emailingItem = nil
+                }
+            }
+        }
+    }
+
+    private func deleteItem(id: UUID) {
+        items.removeAll { $0.id == id }
+    }
+
+    private func bindingForItem(id: UUID) -> Binding<SavedAgentItem>? {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return nil }
+        return $items[index]
+    }
+
+    private func printSavedItem(_ item: SavedAgentItem) {
+        #if canImport(UIKit)
+        let printController = UIPrintInteractionController.shared
+        let printInfo = UIPrintInfo.printInfo()
+        printInfo.outputType = .general
+        printInfo.jobName = item.title
+        printController.printInfo = printInfo
+        printController.printFormatter = UISimpleTextPrintFormatter(text: item.shareText)
+        printController.present(animated: true)
+        #endif
+    }
+
+    private func sendSavedItemViaEmail(_ item: SavedAgentItem) {
+        #if canImport(MessageUI)
+        if MFMailComposeViewController.canSendMail() {
+            emailingItem = item
+            return
+        }
+        #endif
+        sendViaMailto(item)
+    }
+
+    private func sendViaMailto(_ item: SavedAgentItem) {
+        var components = URLComponents()
+        components.scheme = "mailto"
+        components.path = ""
+        components.queryItems = [
+            URLQueryItem(name: "subject", value: item.title),
+            URLQueryItem(name: "body", value: item.shareText)
+        ]
+        if let url = components.url {
+            openURL(url)
+        }
+    }
+}
+
+struct SavedItemDetailView: View {
+    @Binding var item: SavedAgentItem
+    var startsInEditMode: Bool = false
+    @State private var isEditing = false
+    @State private var draftTitle: String = ""
+    @State private var draftContent: String = ""
+    @State private var initialEditModeApplied = false
+
+    var body: some View {
+        Group {
+            if isEditing {
+                Form {
+                    Section("Title") {
+                        TextField("Title", text: $draftTitle)
+                    }
+
+                    Section("Content") {
+                        TextEditor(text: $draftContent)
+                            .frame(minHeight: 220)
+                    }
+                }
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(item.title)
+                            .font(.headline)
+                        Text(item.content)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    }
+                    .padding()
+                }
+            }
+        }
+        .navigationTitle("Favorite Item")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if isEditing {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") {
+                        cancelEditing()
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Save") {
+                        saveEdits()
+                    }
+                    .disabled(draftContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            } else {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        beginEditing()
+                    } label: {
+                        Image(systemName: "pencil")
+                    }
+                    .accessibilityLabel("Edit favorite item")
+                }
+            }
+        }
+        .onAppear {
+            syncDraftFromItem()
+            if startsInEditMode && !initialEditModeApplied {
+                isEditing = true
+                initialEditModeApplied = true
+            }
+        }
+    }
+
+    private func beginEditing() {
+        syncDraftFromItem()
+        isEditing = true
+    }
+
+    private func cancelEditing() {
+        syncDraftFromItem()
+        isEditing = false
+    }
+
+    private func saveEdits() {
+        let cleanedContent = draftContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanedContent.isEmpty else { return }
+
+        let cleanedTitle = draftTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        item.content = cleanedContent
+        item.title = cleanedTitle.isEmpty ? SavedAgentItem.titleFrom(content: cleanedContent) : String(cleanedTitle.prefix(70))
+        isEditing = false
+    }
+
+    private func syncDraftFromItem() {
+        draftTitle = item.title
+        draftContent = item.content
+    }
+}
+
 struct PermissionWelcomeView: View {
     let onStart: () -> Void
 
@@ -4876,6 +5199,63 @@ extension ContentView {
         }
     }
 
+    private func isSavedAgentResponse(_ message: ChatMessage) -> Bool {
+        savedAgentItems.contains { $0.sourceMessageID == message.id }
+    }
+
+    private func toggleSavedAgentResponse(_ message: ChatMessage) {
+        if let index = savedAgentItems.firstIndex(where: { $0.sourceMessageID == message.id }) {
+            savedAgentItems.remove(at: index)
+            return
+        }
+
+        let trimmed = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let messageTitle = message.responseTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let savedTitle = messageTitle.flatMap { $0.isEmpty ? nil : $0 } ?? SavedAgentItem.titleFrom(content: trimmed)
+
+        let item = SavedAgentItem(
+            title: savedTitle,
+            content: trimmed,
+            createdAt: message.timestamp,
+            savedAt: Date(),
+            sourceMessageID: message.id
+        )
+        savedAgentItems.insert(item, at: 0)
+    }
+
+    private func resolveResponseTitle(userText: String, modelTitle: String?, replyText: String) -> String {
+        let bannedTitles: Set<String> = [
+            "new task", "task", "answer", "response", "assistant response", "nexa"
+        ]
+
+        if let modelTitle = modelTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !modelTitle.isEmpty {
+            let normalized = modelTitle.lowercased()
+            if !bannedTitles.contains(normalized) {
+                return String(modelTitle.prefix(70))
+            }
+        }
+
+        let normalizedUserText = userText
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+
+        if !normalizedUserText.isEmpty {
+            let words = normalizedUserText.split(separator: " ").map(String.init)
+            let concise = words.prefix(8).joined(separator: " ")
+            if !concise.isEmpty {
+                if concise.count <= 70 {
+                    return concise.prefix(1).uppercased() + String(concise.dropFirst())
+                }
+                let clipped = concise.prefix(67).trimmingCharacters(in: .whitespacesAndNewlines)
+                return "\(clipped)..."
+            }
+        }
+
+        return SavedAgentItem.titleFrom(content: replyText)
+    }
+
     private func startNewChatSession() {
         ChatHistoryStore.shared.archiveCurrentSession(messages)
         ChatHistoryStore.shared.clearCurrentSession()
@@ -5507,8 +5887,9 @@ extension ContentView {
         if var draft = inferred {
             if draft.action == "answer", isWeatherInquiry(text) {
                 let weatherReply = await weatherService.response(for: text)
+                let weatherTitle = resolveResponseTitle(userText: text, modelTitle: draft.title, replyText: weatherReply)
                 withAnimation {
-                    messages.append(.init(isUser: false, text: weatherReply))
+                    messages.append(.init(isUser: false, text: weatherReply, responseTitle: weatherTitle))
                 }
                 return
             }
@@ -5699,12 +6080,14 @@ extension ContentView {
             
             if draft.action == "greeting" || draft.action == "answer" {
                 let statusSnapshot = shouldShowTaskStatusChart(for: text) ? currentTaskStatusSnapshot() : nil
+                let fallbackReply = draft.answer ?? "I'm here to help."
+                let responseTitle = resolveResponseTitle(userText: text, modelTitle: draft.title, replyText: fallbackReply)
                 if isAIFeatureEnabled, lastIntentSource == "openai" {
                     let placeholderId = UUID()
                     var didReceiveStreamEvent = false
                     withAnimation {
                         isAgentThinking = true
-                        messages.append(.init(id: placeholderId, isUser: false, text: "", taskStatusSnapshot: statusSnapshot))
+                        messages.append(.init(id: placeholderId, isUser: false, text: "", taskStatusSnapshot: statusSnapshot, responseTitle: responseTitle))
                     }
 
                     let streamed = await intentService.streamAnswer(
@@ -5728,7 +6111,7 @@ extension ContentView {
                     ) { partial in
                         if let index = messages.firstIndex(where: { $0.id == placeholderId }) {
                             let existing = messages[index]
-                            messages[index] = .init(id: existing.id, isUser: existing.isUser, text: partial, timestamp: existing.timestamp, taskStatusSnapshot: existing.taskStatusSnapshot)
+                            messages[index] = .init(id: existing.id, isUser: existing.isUser, text: partial, timestamp: existing.timestamp, taskStatusSnapshot: existing.taskStatusSnapshot, responseTitle: existing.responseTitle)
                         }
                     }
 
@@ -5741,19 +6124,19 @@ extension ContentView {
                     if let streamed, !streamed.isEmpty {
                         if let index = messages.firstIndex(where: { $0.id == placeholderId }) {
                             let existing = messages[index]
-                            messages[index] = .init(id: existing.id, isUser: existing.isUser, text: streamed, timestamp: existing.timestamp, taskStatusSnapshot: existing.taskStatusSnapshot)
+                            messages[index] = .init(id: existing.id, isUser: existing.isUser, text: streamed, timestamp: existing.timestamp, taskStatusSnapshot: existing.taskStatusSnapshot, responseTitle: existing.responseTitle)
                         }
                     } else {
-                        let reply = draft.answer ?? "I'm here to help."
+                        let reply = fallbackReply
                         if let index = messages.firstIndex(where: { $0.id == placeholderId }) {
                             let existing = messages[index]
-                            messages[index] = .init(id: existing.id, isUser: existing.isUser, text: reply, timestamp: existing.timestamp, taskStatusSnapshot: existing.taskStatusSnapshot)
+                            messages[index] = .init(id: existing.id, isUser: existing.isUser, text: reply, timestamp: existing.timestamp, taskStatusSnapshot: existing.taskStatusSnapshot, responseTitle: existing.responseTitle)
                         }
                     }
                 } else {
-                    let reply = draft.answer ?? "I'm here to help."
+                    let reply = fallbackReply
                     withAnimation {
-                        messages.append(.init(isUser: false, text: reply, taskStatusSnapshot: statusSnapshot))
+                        messages.append(.init(isUser: false, text: reply, taskStatusSnapshot: statusSnapshot, responseTitle: responseTitle))
                     }
                 }
                 return
@@ -7195,6 +7578,25 @@ extension ContentView {
         print("Loaded \(remainingUnsynced.count) unsynced app tasks + \(systemItems.count) system items")
     }
 
+    private func saveSavedAgentItems() {
+        guard let data = try? JSONEncoder().encode(savedAgentItems) else { return }
+        UserDefaults.standard.set(data, forKey: savedAgentItemsStoreKey)
+    }
+
+    private func loadSavedAgentItems() {
+        guard let data = UserDefaults.standard.data(forKey: savedAgentItemsStoreKey) else {
+            savedAgentItems = []
+            return
+        }
+
+        do {
+            savedAgentItems = try JSONDecoder().decode([SavedAgentItem].self, from: data)
+        } catch {
+            savedAgentItems = []
+            print("Failed to load saved agent items: \(error)")
+        }
+    }
+
     private func priorityColor(_ value: Int) -> Color {
         switch value {
         case 1: return .red
@@ -7384,7 +7786,10 @@ struct EmailComposerView: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> MFMailComposeViewController {
         if MFMailComposeViewController.canSendMail() {
             let controller = MFMailComposeViewController()
-            controller.setToRecipients([recipient])
+            let trimmedRecipient = recipient.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedRecipient.isEmpty {
+                controller.setToRecipients([trimmedRecipient])
+            }
             controller.setSubject(subject)
             controller.setMessageBody(body, isHTML: false)
             controller.mailComposeDelegate = context.coordinator
