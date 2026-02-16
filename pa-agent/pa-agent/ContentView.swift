@@ -17,6 +17,9 @@ import CryptoKit
 #if canImport(UIKit)
 import UIKit
 #endif
+#if canImport(AppKit)
+import AppKit
+#endif
 #if canImport(Charts)
 import Charts
 #endif
@@ -2416,6 +2419,7 @@ struct ContentView: View {
     @State private var pendingOverdueTask: TaskItem?
     @State private var promptedOverdueTaskIDs: Set<UUID> = []
     @State private var isAgentThinking = false
+    @State private var copiedAgentMessageID: UUID?
     @State private var showScheduleConflictAlert = false
     @State private var pendingConflictTask: TaskItem?
     @State private var pendingConflictMatches: [TaskItem] = []
@@ -3155,9 +3159,27 @@ struct ContentView: View {
                         taskStatusChart(snapshot)
                     }
 
-                    Text(message.timestamp.formatted(date: .abbreviated, time: .shortened))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    if message.isUser {
+                        Text(message.timestamp.formatted(date: .abbreviated, time: .shortened))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        HStack(spacing: 8) {
+                            Text(message.timestamp.formatted(date: .abbreviated, time: .shortened))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            Spacer(minLength: 0)
+                            Button {
+                                copyAgentResponse(message)
+                            } label: {
+                                Image(systemName: copiedAgentMessageID == message.id ? "checkmark" : "doc.on.doc")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Copy response")
+                        }
+                    }
                 }
                 .padding()
                 .background(message.isUser ? Color.accentColor.opacity(0.15) : Color.white)
@@ -4092,6 +4114,25 @@ extension ContentView {
         dismissKeyboard()
 
         Task { await handleIntent(for: trimmed) }
+    }
+
+    private func copyAgentResponse(_ message: ChatMessage) {
+        let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+
+        #if canImport(UIKit)
+        UIPasteboard.general.string = text
+        #elseif canImport(AppKit)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        #endif
+
+        copiedAgentMessageID = message.id
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            if copiedAgentMessageID == message.id {
+                copiedAgentMessageID = nil
+            }
+        }
     }
 
     private func startNewChatSession() {
