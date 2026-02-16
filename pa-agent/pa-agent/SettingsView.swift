@@ -4,6 +4,7 @@ import AVFoundation
 import StoreKit
 import Speech
 import EventKit
+import CoreLocation
 import UniformTypeIdentifiers
 #if canImport(Photos)
 import Photos
@@ -56,6 +57,7 @@ struct SettingsView: View {
     @State private var remindersPermissionText: String = "Unknown"
     @State private var photosPermissionText: String = "Unknown"
     @State private var cameraPermissionText: String = "Unknown"
+    @State private var locationPermissionText: String = "Unknown"
     @State private var taskCalendarChoices: [EKCalendar] = []
     @State private var isEditing: Bool = false
     @State private var previewSynthesizer = AVSpeechSynthesizer()
@@ -501,6 +503,17 @@ struct SettingsView: View {
                             }
                         }
 
+                        permissionRow(
+                            title: "Location",
+                            description: "Required to use your current location for weather.",
+                            status: locationPermissionText
+                        ) {
+                            Task {
+                                _ = await requestLocationPermission()
+                                refreshPermissionStatuses()
+                            }
+                        }
+
                         Button("Open iOS App Settings") {
                             #if canImport(UIKit)
                             guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
@@ -800,6 +813,7 @@ struct SettingsView: View {
         remindersPermissionText = reminderStatusLabel(EKEventStore.authorizationStatus(for: .reminder))
         photosPermissionText = photoLibraryStatusLabel(currentPhotoLibraryStatus())
         cameraPermissionText = cameraStatusLabel(AVCaptureDevice.authorizationStatus(for: .video))
+        locationPermissionText = locationStatusLabel(CLLocationManager().authorizationStatus)
     }
 
     private func currentPhotoLibraryStatus() -> PHAuthorizationStatus {
@@ -917,6 +931,10 @@ struct SettingsView: View {
         }
     }
 
+    private func requestLocationPermission() async -> Bool {
+        await UserLocationProvider.shared.requestWhenInUseAuthorization()
+    }
+
     private func notificationStatusLabel(_ status: UNAuthorizationStatus) -> String {
         switch status {
         case .authorized: return "Allowed"
@@ -985,6 +1003,17 @@ struct SettingsView: View {
     private func cameraStatusLabel(_ status: AVAuthorizationStatus) -> String {
         switch status {
         case .authorized: return "Allowed"
+        case .denied: return "Denied"
+        case .restricted: return "Restricted"
+        case .notDetermined: return "Not Set"
+        @unknown default: return "Unknown"
+        }
+    }
+
+    private func locationStatusLabel(_ status: CLAuthorizationStatus) -> String {
+        switch status {
+        case .authorizedAlways: return "Always"
+        case .authorizedWhenInUse: return "When In Use"
         case .denied: return "Denied"
         case .restricted: return "Restricted"
         case .notDetermined: return "Not Set"

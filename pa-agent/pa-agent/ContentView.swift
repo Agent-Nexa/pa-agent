@@ -16,6 +16,10 @@ import Contacts
 import CryptoKit
 import UniformTypeIdentifiers
 import ImageIO
+import CoreLocation
+#if canImport(WeatherKit)
+import WeatherKit
+#endif
 #if canImport(PhotosUI)
 import PhotosUI
 #endif
@@ -2418,6 +2422,341 @@ final class SpeechManager: NSObject, ObservableObject, SFSpeechRecognizerDelegat
     }
 }
 
+enum LocationLookupError: Error {
+    case denied
+    case unavailable
+    case inProgress
+}
+
+@MainActor
+final class UserLocationProvider: NSObject, CLLocationManagerDelegate {
+    static let shared = UserLocationProvider()
+
+    private let manager = CLLocationManager()
+    private var locationContinuation: CheckedContinuation<CLLocation, Error>?
+    private var authorizationContinuation: CheckedContinuation<Bool, Never>?
+
+    private override init() {
+        super.init()
+        manager.delegate = self
+        manager.desiredAccuracy = kCLLocationAccuracyKilometer
+    }
+
+    func currentLocation() async throws -> CLLocation {
+        if locationContinuation != nil {
+            throw LocationLookupError.inProgress
+        }
+
+        let status = manager.authorizationStatus
+        if status == .denied || status == .restricted {
+            throw LocationLookupError.denied
+        }
+
+        if status == .notDetermined {
+            manager.requestWhenInUseAuthorization()
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            self.locationContinuation = continuation
+            let currentStatus = manager.authorizationStatus
+            if currentStatus == .authorizedWhenInUse || currentStatus == .authorizedAlways {
+                manager.requestLocation()
+            }
+        }
+    }
+
+    func requestWhenInUseAuthorization() async -> Bool {
+        let status = manager.authorizationStatus
+        switch status {
+        case .authorizedAlways, .authorizedWhenInUse:
+            return true
+        case .denied, .restricted:
+            return false
+        case .notDetermined:
+            return await withCheckedContinuation { continuation in
+                self.authorizationContinuation = continuation
+                manager.requestWhenInUseAuthorization()
+            }
+        @unknown default:
+            return false
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didChangeAuthorization status: CLAuthorizationStatus) {
+        if let continuation = authorizationContinuation {
+            switch status {
+            case .authorizedWhenInUse, .authorizedAlways:
+                authorizationContinuation = nil
+                continuation.resume(returning: true)
+            case .denied, .restricted:
+                authorizationContinuation = nil
+                continuation.resume(returning: false)
+            case .notDetermined:
+                break
+            @unknown default:
+                authorizationContinuation = nil
+                continuation.resume(returning: false)
+            }
+        }
+
+        guard let continuation = locationContinuation else { return }
+
+        switch status {
+        case .authorizedWhenInUse, .authorizedAlways:
+            manager.requestLocation()
+        case .denied, .restricted:
+            locationContinuation = nil
+            continuation.resume(throwing: LocationLookupError.denied)
+        case .notDetermined:
+            break
+        @unknown default:
+            locationContinuation = nil
+            continuation.resume(throwing: LocationLookupError.unavailable)
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let continuation = locationContinuation else { return }
+        locationContinuation = nil
+
+        if let best = locations.last {
+            continuation.resume(returning: best)
+        } else {
+            continuation.resume(throwing: LocationLookupError.unavailable)
+        }
+    }
+
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        guard let continuation = locationContinuation else { return }
+        locationContinuation = nil
+        continuation.resume(throwing: LocationLookupError.unavailable)
+    }
+}
+
+@MainActor
+final class WeatherQueryService {
+    static let shared = WeatherQueryService()
+
+    private let geocoder = CLGeocoder()
+
+    func response(for userQuery: String) async -> String {
+        let trimmed = userQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let dayOffset = requestedForecastDayOffset(from: trimmed)
+        if let explicitLocation = extractLocation(from: trimmed) {
+            guard let location = await geocode(address: explicitLocation) else {
+                return "I couldn’t find that location. Please try a clearer place name."
+            }
+            return await weatherSummary(for: location, displayName: explicitLocation, dayOffset: dayOffset)
+        }
+
+        do {
+            let location = try await UserLocationProvider.shared.currentLocation()
+            let displayName = await reverseGeocodedName(for: location) ?? "your current location"
+            return await weatherSummary(for: location, displayName: displayName, dayOffset: dayOffset)
+        } catch LocationLookupError.denied {
+            return "Please enable Location access in Settings so I can use your current location for weather."
+        } catch {
+            return "I couldn’t get your current location right now. You can ask like: weather in Singapore."
+        }
+    }
+
+    private func geocode(address: String) async -> CLLocation? {
+        await withCheckedContinuation { continuation in
+            geocoder.geocodeAddressString(address) { placemarks, _ in
+                continuation.resume(returning: placemarks?.first?.location)
+            }
+        }
+    }
+
+    private func reverseGeocodedName(for location: CLLocation) async -> String? {
+        await withCheckedContinuation { continuation in
+            geocoder.reverseGeocodeLocation(location) { placemarks, _ in
+                let name = placemarks?.first.flatMap { place in
+                    if let locality = place.locality, let country = place.country {
+                        return "\(locality), \(country)"
+                    }
+                    if let name = place.name {
+                        return name
+                    }
+                    return place.locality ?? place.country
+                }
+                continuation.resume(returning: name)
+            }
+        }
+    }
+
+    private func weatherSummary(for location: CLLocation, displayName: String, dayOffset: Int) async -> String {
+        #if canImport(WeatherKit)
+        do {
+            let weather = try await WeatherService.shared.weather(for: location)
+            let forecastDays = weather.dailyForecast.forecast
+
+            if dayOffset > 0, let selectedDay = forecastDays[safe: dayOffset] {
+                let highC = Int(selectedDay.highTemperature.converted(to: .celsius).value.rounded())
+                let lowC = Int(selectedDay.lowTemperature.converted(to: .celsius).value.rounded())
+                let condition = String(describing: selectedDay.condition)
+                    .replacingOccurrences(of: "_", with: " ")
+                    .lowercased()
+                return "\(forecastDayLabel(for: dayOffset).capitalized) in \(displayName): \(condition). Range \(lowC)°C to \(highC)°C."
+            }
+
+            let current = weather.currentWeather
+            let celsius = Int(current.temperature.converted(to: .celsius).value.rounded())
+            let fahrenheit = Int(current.temperature.converted(to: .fahrenheit).value.rounded())
+            let condition = String(describing: current.condition)
+                .replacingOccurrences(of: "_", with: " ")
+                .lowercased()
+
+            if let today = forecastDays.first {
+                let highC = Int(today.highTemperature.converted(to: .celsius).value.rounded())
+                let lowC = Int(today.lowTemperature.converted(to: .celsius).value.rounded())
+                return "Weather for \(displayName): \(condition), \(celsius)°C (\(fahrenheit)°F). Today’s range is \(lowC)°C to \(highC)°C."
+            }
+
+            return "Weather for \(displayName): \(condition), \(celsius)°C (\(fahrenheit)°F)."
+        } catch {
+            if let fallback = await fetchFallbackWeather(for: location, displayName: displayName, dayOffset: dayOffset) {
+                return fallback
+            }
+            return "I couldn’t fetch weather from WeatherKit right now (capability/sandbox issue) and fallback weather is unavailable. Please try again."
+        }
+        #else
+        if let fallback = await fetchFallbackWeather(for: location, displayName: displayName, dayOffset: dayOffset) {
+            return fallback
+        }
+        return "Weather forecast is not available on this platform build."
+        #endif
+    }
+
+    private func fetchFallbackWeather(for location: CLLocation, displayName: String, dayOffset: Int) async -> String? {
+        let lat = location.coordinate.latitude
+        let lon = location.coordinate.longitude
+        let endpoint = "https://api.open-meteo.com/v1/forecast?latitude=\(lat)&longitude=\(lon)&current=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min,weather_code&timezone=auto"
+
+        guard let url = URL(string: endpoint) else { return nil }
+
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                return nil
+            }
+
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let current = json["current"] as? [String: Any],
+                  let temperatureC = current["temperature_2m"] as? Double,
+                  let weatherCode = current["weather_code"] as? Int else {
+                return nil
+            }
+
+            let temperatureF = Int((temperatureC * 9 / 5 + 32).rounded())
+            let roundedC = Int(temperatureC.rounded())
+            let condition = weatherCodeDescription(weatherCode)
+
+            if let daily = json["daily"] as? [String: Any],
+               let highs = daily["temperature_2m_max"] as? [Double],
+               let lows = daily["temperature_2m_min"] as? [Double],
+               let dailyCodes = daily["weather_code"] as? [Int],
+               let high = highs[safe: dayOffset],
+               let low = lows[safe: dayOffset] {
+                let dayLabel = forecastDayLabel(for: dayOffset)
+                if dayOffset > 0 {
+                    let dailyCondition = weatherCodeDescription(dailyCodes[safe: dayOffset] ?? weatherCode)
+                    return "\(dayLabel.capitalized) in \(displayName): \(dailyCondition). Range \(Int(low.rounded()))°C to \(Int(high.rounded()))°C."
+                }
+
+                return "Weather for \(displayName): \(condition), \(roundedC)°C (\(temperatureF)°F). Today’s range is \(Int(low.rounded()))°C to \(Int(high.rounded()))°C."
+            }
+
+            return "Weather for \(displayName): \(condition), \(roundedC)°C (\(temperatureF)°F)."
+        } catch {
+            return nil
+        }
+    }
+
+    private func requestedForecastDayOffset(from query: String) -> Int {
+        let lower = query.lowercased()
+        if lower.contains("day after tomorrow") {
+            return 2
+        }
+        if lower.contains("tomorrow") {
+            return 1
+        }
+        return 0
+    }
+
+    private func forecastDayLabel(for dayOffset: Int) -> String {
+        switch dayOffset {
+        case 0: return "today"
+        case 1: return "tomorrow"
+        case 2: return "the day after tomorrow"
+        default:
+            if let date = Calendar.current.date(byAdding: .day, value: dayOffset, to: Date()) {
+                return date.formatted(date: .abbreviated, time: .omitted)
+            }
+            return "that day"
+        }
+    }
+
+    private func weatherCodeDescription(_ code: Int) -> String {
+        switch code {
+        case 0: return "clear sky"
+        case 1: return "mainly clear"
+        case 2: return "partly cloudy"
+        case 3: return "overcast"
+        case 45, 48: return "foggy"
+        case 51, 53, 55: return "drizzle"
+        case 56, 57: return "freezing drizzle"
+        case 61, 63, 65: return "rain"
+        case 66, 67: return "freezing rain"
+        case 71, 73, 75, 77: return "snow"
+        case 80, 81, 82: return "rain showers"
+        case 85, 86: return "snow showers"
+        case 95: return "thunderstorm"
+        case 96, 99: return "thunderstorm with hail"
+        default: return "current conditions"
+        }
+    }
+
+    private func extractLocation(from query: String) -> String? {
+        let lower = query.lowercased()
+        let genericOnly: Set<String> = [
+            "weather", "forecast", "weather today", "forecast today", "weather now", "weather currently", "today", "now"
+        ]
+        if genericOnly.contains(lower.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            return nil
+        }
+
+        let patterns = [
+            "\\b(?:in|at|for)\\s+([a-zA-Z][a-zA-Z\\s,.'-]{1,60})",
+            "\\bweather\\s+(?:in\\s+)?([a-zA-Z][a-zA-Z\\s,.'-]{1,60})",
+            "\\bforecast\\s+(?:for\\s+|in\\s+)?([a-zA-Z][a-zA-Z\\s,.'-]{1,60})"
+        ]
+
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            let range = NSRange(query.startIndex..<query.endIndex, in: query)
+            guard let match = regex.firstMatch(in: query, options: [], range: range), match.numberOfRanges > 1,
+                  let captureRange = Range(match.range(at: 1), in: query) else { continue }
+
+            var candidate = String(query[captureRange]).trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+            candidate = candidate.replacingOccurrences(of: "\\b(today|tomorrow|now|currently|right now|this week|tonight)\\b", with: "", options: [.regularExpression, .caseInsensitive])
+            candidate = candidate.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+
+            if !candidate.isEmpty {
+                return candidate
+            }
+        }
+        return nil
+    }
+}
+
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        guard indices.contains(index) else { return nil }
+        return self[index]
+    }
+}
+
 // MARK: - View
 
 struct ContentView: View {
@@ -2475,6 +2814,7 @@ struct ContentView: View {
     private let eventStore = EKEventStore()
     private let intentAnalyzer = IntentAnalyzer()
     private let intentService = IntentService()
+    private let weatherService = WeatherQueryService.shared
 
     @State private var taskTimer: Timer.TimerPublisher = Timer.publish(every: 60, on: .main, in: .common)
     @State private var timerCancellable: Cancellable?
@@ -2504,7 +2844,7 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showPermissionSetupSheet) {
-            PermissionSetupSheet(allowSkip: permissionSetupShown) { notifications, speech, calendar, reminders, photos, camera in
+            PermissionSetupSheet(allowSkip: permissionSetupShown) { notifications, speech, calendar, reminders, photos, camera, location in
                 Task {
                     await requestSelectedPermissions(
                         notifications: notifications,
@@ -2512,7 +2852,8 @@ struct ContentView: View {
                         calendar: calendar,
                         reminders: reminders,
                         photos: photos,
-                        camera: camera
+                        camera: camera,
+                        location: location
                     )
                     permissionSetupShown = true
                     showPermissionSetupSheet = false
@@ -3914,7 +4255,7 @@ struct PermissionWelcomeView: View {
                         Text("Set Up Nexa")
                             .font(.largeTitle.bold())
 
-                        Text("This is the first step to set up Nexa. Please grant the required permissions so Nexa can be fully functional for tasks, reminders, speech, notifications, photos, and camera.")
+                        Text("This is the first step to set up Nexa. Please grant the required permissions so Nexa can be fully functional for tasks, reminders, speech, notifications, photos, camera, and location-based weather.")
                             .font(.body)
                             .foregroundStyle(.secondary)
                     }
@@ -3936,7 +4277,7 @@ struct PermissionWelcomeView: View {
 
 struct PermissionSetupSheet: View {
     var allowSkip: Bool = true
-    let onContinue: (_ notifications: Bool, _ speech: Bool, _ calendar: Bool, _ reminders: Bool, _ photos: Bool, _ camera: Bool) -> Void
+    let onContinue: (_ notifications: Bool, _ speech: Bool, _ calendar: Bool, _ reminders: Bool, _ photos: Bool, _ camera: Bool, _ location: Bool) -> Void
     let onSkip: () -> Void
 
     @State private var askNotifications = true
@@ -3945,6 +4286,7 @@ struct PermissionSetupSheet: View {
     @State private var askReminders = true
     @State private var askPhotos = true
     @State private var askCamera = true
+    @State private var askLocation = true
 
     var body: some View {
         NavigationStack {
@@ -3962,6 +4304,7 @@ struct PermissionSetupSheet: View {
                     Toggle("Reminders", isOn: $askReminders)
                     Toggle("Photos", isOn: $askPhotos)
                     Toggle("Camera", isOn: $askCamera)
+                    Toggle("Location", isOn: $askLocation)
                 }
             }
             .navigationTitle("Permission Setup")
@@ -3973,7 +4316,7 @@ struct PermissionSetupSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Continue") {
-                        onContinue(askNotifications, askSpeech, askCalendar, askReminders, askPhotos, askCamera)
+                        onContinue(askNotifications, askSpeech, askCalendar, askReminders, askPhotos, askCamera, askLocation)
                     }
                 }
             }
@@ -5104,6 +5447,14 @@ extension ContentView {
             await checkEmailCompleteness()
             return
         }
+
+        if !isAIFeatureEnabled && isWeatherInquiry(text) {
+            let weatherReply = await weatherService.response(for: text)
+            withAnimation {
+                messages.append(.init(isUser: false, text: weatherReply))
+            }
+            return
+        }
         
         if case .confirmingEmail = interactionState {
             let lower = text.lowercased()
@@ -5154,6 +5505,13 @@ extension ContentView {
         }
 
         if var draft = inferred {
+            if draft.action == "answer", isWeatherInquiry(text) {
+                let weatherReply = await weatherService.response(for: text)
+                withAnimation {
+                    messages.append(.init(isUser: false, text: weatherReply))
+                }
+                return
+            }
             
             // Safety: Force 'call' action if the model returned 'task' but it looks like a call
             // Common with GPT models that are biased towards 'task' from previous prompts
@@ -6624,7 +6982,7 @@ extension ContentView {
         }
     }
 
-    private func requestSelectedPermissions(notifications: Bool, speech: Bool, calendar: Bool, reminders: Bool, photos: Bool, camera: Bool) async {
+    private func requestSelectedPermissions(notifications: Bool, speech: Bool, calendar: Bool, reminders: Bool, photos: Bool, camera: Bool, location: Bool) async {
         if notifications {
             _ = await requestNotificationPermission()
         }
@@ -6643,6 +7001,9 @@ extension ContentView {
         }
         if camera {
             _ = await requestCameraPermission()
+        }
+        if location {
+            _ = await UserLocationProvider.shared.requestWhenInUseAuthorization()
         }
     }
 
@@ -6918,6 +7279,12 @@ extension ContentView {
     private func dismissKeyboard() {
         isInputFocused = false
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
+
+    private func isWeatherInquiry(_ text: String) -> Bool {
+        let lower = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let weatherTerms = ["weather", "forecast", "temperature", "rain", "snow", "humidity", "wind"]
+        return weatherTerms.contains { lower.contains($0) }
     }
 
     private func toggleKeyboard() {

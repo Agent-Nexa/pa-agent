@@ -175,6 +175,11 @@
 				TargetAttributes = {
 					AEF59D152F3D994800FC4B5D = {
 						CreatedOnToolsVersion = 26.3;
+						SystemCapabilities = {
+							com.apple.WeatherKit = {
+								enabled = 1;
+							};
+						};
 					};
 					AEF59D222F3D994900FC4B5D = {
 						CreatedOnToolsVersion = 26.3;
@@ -407,6 +412,7 @@
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "Allow access so tasks can be added to your Calendar.";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Allow camera access so you can take photos to attach in chat.";
 				INFOPLIST_KEY_NSContactsUsageDescription = "This app needs access to find friends in your contact list";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Allow location access so I can provide weather for your current location.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "We use the microphone to capture your spoken tasks.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Allow photo access so you can attach images in chat.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Allow speech recognition so you can speak tasks to the assistant.";
@@ -448,6 +454,7 @@
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "Allow access so tasks can be added to your Calendar.";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Allow camera access so you can take photos to attach in chat.";
 				INFOPLIST_KEY_NSContactsUsageDescription = "This app needs access to find friends in your contact list";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Allow location access so I can provide weather for your current location.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "We use the microphone to capture your spoken tasks.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Allow photo access so you can attach images in chat.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Allow speech recognition so you can speak tasks to the assistant.";
