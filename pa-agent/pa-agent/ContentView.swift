@@ -1730,6 +1730,19 @@ final class ChatHistoryStore {
         persistRecords([])
     }
 
+    func clearAllHistory() {
+        saveTask?.cancel()
+        persistRecords([])
+        persistSessionArchives([])
+        NotificationCenter.default.post(name: .chatHistoryDidImport, object: nil)
+    }
+
+    func chatHistoryStorageSizeBytes() -> Int {
+        let currentSessionBytes = UserDefaults.standard.data(forKey: storageKey)?.count ?? 0
+        let archivedSessionsBytes = UserDefaults.standard.data(forKey: sessionsStorageKey)?.count ?? 0
+        return currentSessionBytes + archivedSessionsBytes
+    }
+
     func testEmbeddingConnection(apiKey: String?, model: String?, useAzure: Bool? = nil, azureEndpoint: String? = nil) async -> String {
         let config = resolvedEmbeddingConfig(
             overrideApiKey: apiKey,
@@ -2854,6 +2867,7 @@ struct ContentView: View {
     @State private var showKeySheet = false
     @State private var showSettingsSheet = false
     @State private var showHelpSheet = false
+    @State private var showAboutSheet = false
     @State private var showAIUsageSheet = false
     @State private var showTasksList = false
     @State private var showMessageComposer = false
@@ -2984,6 +2998,11 @@ struct ContentView: View {
             .sheet(isPresented: $showHelpSheet) {
                 NavigationStack {
                     HelpView()
+                }
+            }
+            .sheet(isPresented: $showAboutSheet) {
+                NavigationStack {
+                    AboutView()
                 }
             }
             .sheet(isPresented: $showAIUsageSheet) {
@@ -3469,6 +3488,10 @@ struct ContentView: View {
                 }
                 Button(action: { showHelpSheet = true }) {
                     Label("Help", systemImage: "questionmark.circle")
+                }
+                Divider()
+                Button(action: { showAboutSheet = true }) {
+                    Label("About Us", systemImage: "info.circle")
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")

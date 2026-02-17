@@ -48,7 +48,6 @@ struct SettingsView: View {
     @State private var connectionStatus: String = "not tested"
     @State private var embeddingConnectionStatus: String = "not tested"
     @State private var savedMessage: String = ""
-    @State private var referralStatusText: String = ""
     @State private var chatHistoryStatusText: String = ""
     @State private var permissionStatusText: String = ""
     @State private var notificationsPermissionText: String = "Unknown"
@@ -63,6 +62,8 @@ struct SettingsView: View {
     @State private var previewSynthesizer = AVSpeechSynthesizer()
     @State private var isExportingChatHistory = false
     @State private var isImportingChatHistory = false
+    @State private var showClearChatHistoryConfirmation = false
+    @State private var chatHistoryStorageSizeText: String = "-"
     @State private var chatBackupDocument = ChatHistoryBackupDocument(data: Data())
     @StateObject private var subscriptionManager = SubscriptionManager.shared
     @ObservedObject var historyManager: ActivityHistoryManager
@@ -190,7 +191,7 @@ struct SettingsView: View {
                         }
                     }
 
-                    Section("Identity") {
+                    Section("User Identity") {
                         HStack(spacing: 8) {
                             Image(systemName: isEditing ? "lock.open.fill" : "lock.fill")
                                 .foregroundStyle(isEditing ? .green : .secondary)
@@ -199,14 +200,31 @@ struct SettingsView: View {
                                 .foregroundStyle(.secondary)
                         }
                         TextField("Your Name", text: $localUserName)
-                        TextField("Agent Name", text: $localAgentName)
-                        HStack {
-                            TextField("Agent Icon (SF Symbol)", text: $localAgentIcon)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                            Image(systemName: localAgentIcon)
-                                .foregroundStyle(agentColor)
+                        Picker("User Icon", selection: $localUserIcon) {
+                            ForEach(iconChoices(including: localUserIcon, defaults: userIconOptions), id: \.self) { symbol in
+                                Label(symbol, systemImage: symbol).tag(symbol)
+                            }
                         }
+                        .pickerStyle(.menu)
+                    }
+                    .disabled(!isEditing)
+
+                    Section("Agent Identity") {
+                        HStack(spacing: 8) {
+                            Image(systemName: isEditing ? "lock.open.fill" : "lock.fill")
+                                .foregroundStyle(isEditing ? .green : .secondary)
+                            Text(isEditing ? "Fields are unlocked" : "Fields are locked")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        TextField("Agent Name", text: $localAgentName)
+                        Picker("Agent Icon", selection: $localAgentIcon) {
+                            ForEach(iconChoices(including: localAgentIcon, defaults: agentIconOptions), id: \.self) { symbol in
+                                Label(symbol, systemImage: symbol).tag(symbol)
+                            }
+                        }
+                        .pickerStyle(.menu)
+
                         Picker("Agent Icon Color", selection: $localAgentIconColor) {
                             Text("Purple").tag("purple")
                             Text("Blue").tag("blue")
@@ -215,13 +233,36 @@ struct SettingsView: View {
                             Text("Red").tag("red")
                             Text("Pink").tag("pink")
                         }
-                        HStack {
-                            TextField("User Icon (SF Symbol)", text: $localUserIcon)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                            Image(systemName: localUserIcon)
-                                .foregroundStyle(.blue)
+                    }
+                    .disabled(!isEditing)
+
+                    Section("Agent Voice") {
+                        HStack(spacing: 8) {
+                            Image(systemName: isEditing ? "lock.open.fill" : "lock.fill")
+                                .foregroundStyle(isEditing ? .green : .secondary)
+                            Text(isEditing ? "Fields are unlocked" : "Fields are locked")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
+                        Toggle("Allow Agent Voice", isOn: $localAgentVoiceEnabled)
+
+                        Text(selectedVoiceLine)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        Picker("Voice", selection: $localAgentVoiceIdentifier) {
+                            Text("System Default").tag("")
+                            ForEach(voiceOptions) { option in
+                                Text(voiceDisplayName(option))
+                                    .tag(option.identifier)
+                            }
+                        }
+                        .disabled(!localAgentVoiceEnabled)
+
+                        Button("Preview Voice") {
+                            previewVoice()
+                        }
+                        .disabled(!localAgentVoiceEnabled)
                     }
                     .disabled(!isEditing)
 
@@ -276,36 +317,6 @@ struct SettingsView: View {
                         }
                         .disabled(!isEditing)
                     }
-
-                    Section("Voice") {
-                        HStack(spacing: 8) {
-                            Image(systemName: isEditing ? "lock.open.fill" : "lock.fill")
-                                .foregroundStyle(isEditing ? .green : .secondary)
-                            Text(isEditing ? "Fields are unlocked" : "Fields are locked")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Toggle("Allow Agent Voice", isOn: $localAgentVoiceEnabled)
-
-                        Text(selectedVoiceLine)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-
-                        Picker("Voice", selection: $localAgentVoiceIdentifier) {
-                            Text("System Default").tag("")
-                            ForEach(voiceOptions) { option in
-                                Text(voiceDisplayName(option))
-                                    .tag(option.identifier)
-                            }
-                        }
-                        .disabled(!localAgentVoiceEnabled)
-
-                        Button("Preview Voice") {
-                            previewVoice()
-                        }
-                        .disabled(!localAgentVoiceEnabled)
-                    }
-                    .disabled(!isEditing)
 
                 case .diagnosticsTools:
                     Section("Diagnostics") {
@@ -362,29 +373,6 @@ struct SettingsView: View {
                     }
 
                     Section("Tools") {
-                        Menu {
-                            ShareLink(item: referralMessage) {
-                                Label("Share Invite", systemImage: "square.and.arrow.up")
-                            }
-
-                            Button {
-                                copyReferralText()
-                            } label: {
-                                Label("Copy Invite Text", systemImage: "doc.on.doc")
-                            }
-                        } label: {
-                            Label("Refer a Friend", systemImage: "person.2.badge.plus")
-                        }
-
-                        if !referralStatusText.isEmpty {
-                            Text(referralStatusText)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-
-                        NavigationLink("About") {
-                            AboutView()
-                        }
                         NavigationLink("View Activity History") {
                             ActivityHistoryView(historyManager: historyManager)
                         }
@@ -403,33 +391,20 @@ struct SettingsView: View {
                             Label("Import Chat History", systemImage: "square.and.arrow.down")
                         }
 
+                        Text("Storage Used: \(chatHistoryStorageSizeText)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        Button(role: .destructive) {
+                            showClearChatHistoryConfirmation = true
+                        } label: {
+                            Label("Clear Chat History", systemImage: "trash")
+                        }
+
                         if !chatHistoryStatusText.isEmpty {
                             Text(chatHistoryStatusText)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                        }
-                    }
-
-                    Section("Notifications Tools") {
-                        Button("Request Permissions") {
-                            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { granted, _ in
-                                print("Permission granted: \(granted)")
-                            }
-                        }
-                        Button("Test Notification (5s)") {
-                            let content = UNMutableNotificationContent()
-                            content.title = "Test Notification"
-                            content.body = "This is a test notification from PA-Agent."
-                            content.sound = .default
-
-                            let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 5, repeats: false)
-                            let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: trigger)
-
-                            UNUserNotificationCenter.current().add(request) { error in
-                                if let error = error {
-                                    print("Error scheduling test notification: \(error)")
-                                }
-                            }
                         }
                     }
 
@@ -607,6 +582,7 @@ struct SettingsView: View {
                 localAgentVoiceIdentifier = agentVoiceIdentifier
                 refreshPermissionStatuses()
                 refreshTaskCalendarChoices()
+                refreshChatHistoryStorageSize()
 
                 if isProductionBuild {
                     Task {
@@ -651,12 +627,23 @@ struct SettingsView: View {
                         let data = try Data(contentsOf: url)
                         let importedCount = try ChatHistoryStore.shared.importBackupData(data)
                         chatHistoryStatusText = "Imported \(importedCount) messages."
+                        refreshChatHistoryStorageSize()
                     } catch {
                         chatHistoryStatusText = "Import failed: \(error.localizedDescription)"
                     }
                 case .failure(let error):
                     chatHistoryStatusText = "Import failed: \(error.localizedDescription)"
                 }
+            }
+            .confirmationDialog("Clear all chat history?", isPresented: $showClearChatHistoryConfirmation) {
+                Button("Clear Chat History", role: .destructive) {
+                    ChatHistoryStore.shared.clearAllHistory()
+                    chatHistoryStatusText = "Chat history cleared."
+                    refreshChatHistoryStorageSize()
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This will delete current and archived chat history backups stored in the app.")
             }
         }
     }
@@ -765,23 +752,56 @@ struct SettingsView: View {
         #endif
     }
 
-    private var referralMessage: String {
-        "I’m using Nexa to manage tasks and reminders with AI assistance. Give it a try!\n\nDownload: https://apps.apple.com/us/search?term=Nexa"
-    }
-
-    private func copyReferralText() {
-        #if canImport(UIKit)
-        UIPasteboard.general.string = referralMessage
-        referralStatusText = "Invite text copied"
-        #else
-        referralStatusText = "Copy is not available on this platform"
-        #endif
-    }
-
     private var appVersionLabel: String {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "-"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "-"
         return "v\(version).\(build)"
+    }
+
+    private func refreshChatHistoryStorageSize() {
+        let sizeInBytes = ChatHistoryStore.shared.chatHistoryStorageSizeBytes()
+        chatHistoryStorageSizeText = ByteCountFormatter.string(fromByteCount: Int64(sizeInBytes), countStyle: .file)
+    }
+
+    private var agentIconOptions: [String] {
+        [
+            "brain.head.profile",
+            "cpu",
+            "sparkles",
+            "bolt.circle.fill",
+            "aqi.medium",
+            "waveform.path.ecg",
+            "person.crop.circle.badge.questionmark",
+            "message.badge.filled.fill"
+        ]
+    }
+
+    private var userIconOptions: [String] {
+        [
+            "person.circle.fill",
+            "person.fill",
+            "person.crop.circle",
+            "person.crop.square",
+            "person.2.fill",
+            "figure.walk.circle",
+            "face.smiling",
+            "person.text.rectangle"
+        ]
+    }
+
+    private func iconChoices(including current: String, defaults: [String]) -> [String] {
+        var output: [String] = []
+        var seen: Set<String> = []
+
+        for symbol in ([current] + defaults) {
+            let trimmed = symbol.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if seen.insert(trimmed).inserted {
+                output.append(trimmed)
+            }
+        }
+
+        return output
     }
 
     private var chatHistoryBackupFileName: String {

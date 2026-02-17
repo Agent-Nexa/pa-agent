@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ActivityHistoryView: View {
     @ObservedObject var historyManager: ActivityHistoryManager
+    @State private var showClearConfirmation = false
     
     var body: some View {
         List {
@@ -32,6 +33,12 @@ struct ActivityHistoryView: View {
                     .onDelete { indexSet in
                         historyManager.delete(at: indexSet)
                     }
+
+                    Button(role: .destructive) {
+                        showClearConfirmation = true
+                    } label: {
+                        Label("Clear Activity History", systemImage: "trash")
+                    }
                 }
             }
         }
@@ -39,9 +46,18 @@ struct ActivityHistoryView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button("Clear All") {
-                    historyManager.clearHistory()
+                    showClearConfirmation = true
                 }
+                .disabled(historyManager.history.isEmpty)
             }
+        }
+        .confirmationDialog("Clear all activity history?", isPresented: $showClearConfirmation) {
+            Button("Clear History", role: .destructive) {
+                historyManager.clearHistory()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This action cannot be undone.")
         }
     }
     
