@@ -407,6 +407,7 @@ final class IntentService {
         2. IMMEDIATE ACTIONS:
            - If the user starts with "message", "text", "email", "call" WITHOUT a specific future time, treat it as IMMEDIATE.
            - If the user wants to Send SMS, Email, or Call RIGHT NOW (e.g., "send message", "call mom", "email boss"): Return 'sendMessage', 'sendEmail', or 'makePhoneCall'.
+              - If the user asks to organize/arrange/set up/schedule a meeting with someone, prefer action='sendEmail' (draft a meeting request email) unless they explicitly ask for only a reminder.
            - Default to IMMEDIATE action for communication commands unless a future time is explicitly mentioned (e.g. "tomorrow", "later", "at 5pm").
            - If the user wants ANY OTHER IMMEDIATE action (e.g., "play music", "open safari", "buy stocks", "set timer"): You DO NOT have these capabilities. Return action='answer' with answer="I don't have this capability yet."
         
@@ -421,6 +422,7 @@ final class IntentService {
               - For action='answer', set 'title' to a short meaningful label (3-8 words) that summarizes the response topic.
               - If the user asks for summaries/status (e.g. "summarize today's tasks", "what did I do today", "what notifications do I have"), use APP CONTEXT to answer concretely.
               - Never say you cannot access the data if APP CONTEXT is provided.
+                  - Do NOT simulate in-app control flow in plain text (no “reply yes to open mail app” instructions). Use 'sendEmail' instead whenever email drafting + confirmation is needed.
         
         JSON OUTPUT FORMAT:
         {
@@ -5551,6 +5553,105 @@ extension ContentView {
         }
     }
 
+    private func extractEmailDraftFromAssistantText(_ assistantText: String) -> EmailDraft? {
+        let lower = assistantText.lowercased()
+        guard lower.contains("open mail app"), lower.contains("yes") else { return nil }
+
+        let recipient = firstRegexMatch(in: assistantText, pattern: "(?im)^(?:to|recipient)\\s*:\\s*(.+)$", group: 1)
+            ?? firstRegexMatch(in: assistantText, pattern: "(?im)^email\\s*to\\s*:\\s*(.+)$", group: 1)
+            ?? pendingEmail.recipient
+        let subject = firstRegexMatch(in: assistantText, pattern: "(?im)^subject\\s*:\\s*(.+)$", group: 1)
+            ?? pendingEmail.subject
+
+        var body = assistantText
+        if let subjectLine = firstRegexMatch(in: assistantText, pattern: "(?im)^subject\\s*:\\s*(.+)$", group: 0),
+           let subjectRange = assistantText.range(of: subjectLine) {
+            body = String(assistantText[subjectRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        body = cleanDraftBodyText(body)
+        if body.isEmpty { body = pendingEmail.body }
+
+        let cleanedRecipient = recipient.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanedSubject = subject.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanedBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !cleanedBody.isEmpty else { return nil }
+        return EmailDraft(recipient: cleanedRecipient, recipientName: pendingEmail.recipientName, subject: cleanedSubject, body: cleanedBody)
+    }
+
+    private func cleanDraftBodyText(_ text: String) -> String {
+        let lines = text
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter {
+                let lower = $0.lowercased()
+                guard !lower.isEmpty else { return false }
+                if lower.contains("reply") && lower.contains("yes") { return false }
+                if lower.contains("open mail app") { return false }
+                if lower.contains("cancel") { return false }
+                if lower == "──────────" || lower == "---" { return false }
+                if lower.hasPrefix("subject:") || lower.hasPrefix("to:") || lower.hasPrefix("recipient:") { return false }
+                return true
+            }
+        return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func firstRegexMatch(in text: String, pattern: String, group: Int) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []),
+              let match = regex.firstMatch(in: text, options: [], range: NSRange(text.startIndex..<text.endIndex, in: text)),
+              match.numberOfRanges > group,
+              let range = Range(match.range(at: group), in: text)
+        else {
+            return nil
+        }
+        return String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func openPendingEmailInMailApp() {
+        let recipient = pendingEmail.recipient.trimmingCharacters(in: .whitespacesAndNewlines)
+        let subject = pendingEmail.subject.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = pendingEmail.body.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !body.isEmpty else {
+            messages.append(.init(isUser: false, text: "I need email content before opening Mail."))
+            return
+        }
+
+        var components = URLComponents()
+        components.scheme = "mailto"
+        components.path = recipient
+        components.queryItems = [
+            URLQueryItem(name: "subject", value: subject),
+            URLQueryItem(name: "body", value: body)
+        ]
+
+        guard let url = components.url else {
+            messages.append(.init(isUser: false, text: "Couldn’t create the Mail draft URL."))
+            return
+        }
+
+        #if canImport(UIKit)
+        UIApplication.shared.open(url, options: [:]) { success in
+            if success {
+                messages.append(.init(isUser: false, text: "Opened Mail app with your draft."))
+                historyManager.addLog(actionType: "Email", description: "Opened Mail draft for \(recipient.isEmpty ? "(no recipient)" : recipient)")
+            } else {
+                messages.append(.init(isUser: false, text: "Couldn’t open Mail app."))
+            }
+        }
+        #elseif canImport(AppKit)
+        let success = NSWorkspace.shared.open(url)
+        if success {
+            messages.append(.init(isUser: false, text: "Opened Mail app with your draft."))
+            historyManager.addLog(actionType: "Email", description: "Opened Mail draft for \(recipient.isEmpty ? "(no recipient)" : recipient)")
+        } else {
+            messages.append(.init(isUser: false, text: "Couldn’t open Mail app."))
+        }
+        #else
+        messages.append(.init(isUser: false, text: "Mail app opening is not supported on this platform."))
+        #endif
+    }
+
     private func handleIntent(for text: String, attachedImageDataURL: String? = nil) async {
         // Global cancel check
         let lower = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -5569,6 +5670,17 @@ extension ContentView {
                 }
             }
             return
+        }
+
+        if interactionState == .idle && isAffirmativeReply(lower) {
+            let hasPendingDraft = !pendingEmail.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            if hasPendingDraft {
+                interactionState = .confirmingEmail(pendingEmail)
+            } else if let latestAssistant = messages.last(where: { !$0.isUser })?.text,
+                      let recovered = extractEmailDraftFromAssistantText(latestAssistant) {
+                pendingEmail = recovered
+                interactionState = .confirmingEmail(recovered)
+            }
         }
 
         if case .confirmingTaskConflict(let draftForTask, let actionPayload, let conflicts, let suggestions) = interactionState {
@@ -5838,21 +5950,9 @@ extension ContentView {
         
         if case .confirmingEmail = interactionState {
             let lower = text.lowercased()
-            if lower.contains("yes") || lower.contains("send") || lower.contains("ok") || lower.contains("confirm") || lower.contains("looks good") {
+            if isAffirmativeReply(lower) || lower.contains("send") || lower.contains("looks good") {
                 interactionState = .idle
-                if MFMailComposeViewController.canSendMail() {
-                    await MainActor.run { showEmailComposer = true }
-                } else {
-                    // Fallback for Simulator or no-mail-account environments
-                    // We simulate "background" sending here since we can't use the Composer
-                    withAnimation {
-                        #if targetEnvironment(simulator)
-                        messages.append(.init(isUser: false, text: "Simulated sending email to \(pendingEmail.recipient) (Simulator cannot send real emails)."))
-                        #else
-                        messages.append(.init(isUser: false, text: "I cannot send this email because no Mail account is set up on this device."))
-                        #endif
-                    }
-                }
+                await MainActor.run { openPendingEmailInMailApp() }
             } else {
                 interactionState = .idle
                 withAnimation {
@@ -6082,6 +6182,7 @@ extension ContentView {
                 let statusSnapshot = shouldShowTaskStatusChart(for: text) ? currentTaskStatusSnapshot() : nil
                 let fallbackReply = draft.answer ?? "I'm here to help."
                 let responseTitle = resolveResponseTitle(userText: text, modelTitle: draft.title, replyText: fallbackReply)
+                var latestAgentReplyText: String? = nil
                 if isAIFeatureEnabled, lastIntentSource == "openai" {
                     let placeholderId = UUID()
                     var didReceiveStreamEvent = false
@@ -6122,12 +6223,14 @@ extension ContentView {
                     }
 
                     if let streamed, !streamed.isEmpty {
+                        latestAgentReplyText = streamed
                         if let index = messages.firstIndex(where: { $0.id == placeholderId }) {
                             let existing = messages[index]
                             messages[index] = .init(id: existing.id, isUser: existing.isUser, text: streamed, timestamp: existing.timestamp, taskStatusSnapshot: existing.taskStatusSnapshot, responseTitle: existing.responseTitle)
                         }
                     } else {
                         let reply = fallbackReply
+                        latestAgentReplyText = reply
                         if let index = messages.firstIndex(where: { $0.id == placeholderId }) {
                             let existing = messages[index]
                             messages[index] = .init(id: existing.id, isUser: existing.isUser, text: reply, timestamp: existing.timestamp, taskStatusSnapshot: existing.taskStatusSnapshot, responseTitle: existing.responseTitle)
@@ -6135,9 +6238,16 @@ extension ContentView {
                     }
                 } else {
                     let reply = fallbackReply
+                    latestAgentReplyText = reply
                     withAnimation {
                         messages.append(.init(isUser: false, text: reply, taskStatusSnapshot: statusSnapshot, responseTitle: responseTitle))
                     }
+                }
+
+                if let latestAgentReplyText,
+                   let recoveredDraft = extractEmailDraftFromAssistantText(latestAgentReplyText) {
+                    pendingEmail = recoveredDraft
+                    interactionState = .confirmingEmail(recoveredDraft)
                 }
                 return
             }
