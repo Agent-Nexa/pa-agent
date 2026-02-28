@@ -316,6 +316,27 @@ struct TaskItem: Identifiable, Hashable, Codable {
     }
 }
 
+struct CalendarEventStartDateStore {
+    static let key = "CALENDAR_EVENTS_START_DATE"
+
+    static var defaultDate: Date {
+        Calendar.current.startOfDay(for: Date())
+    }
+
+    static var defaultTimestamp: Double {
+        defaultDate.timeIntervalSince1970
+    }
+
+    static func normalizedDate(from timestamp: Double) -> Date {
+        guard timestamp.isFinite else {
+            return defaultDate
+        }
+
+        let clampedTimestamp = min(max(timestamp, 0), 4_102_444_800)
+        return Calendar.current.startOfDay(for: Date(timeIntervalSince1970: clampedTimestamp))
+    }
+}
+
 final class IntentService {
     private let fallback = IntentAnalyzer()
     private(set) var usedOpenAI: Bool = false
@@ -2891,6 +2912,7 @@ struct ContentView: View {
     @AppStorage("AGENT_VOICE_ENABLED") private var agentVoiceEnabled: Bool = true
     @AppStorage("AGENT_VOICE_IDENTIFIER") private var agentVoiceIdentifier: String = ""
     @AppStorage("PREFERRED_TASK_CALENDAR_ID") private var preferredTaskCalendarId: String = ""
+    @AppStorage(CalendarEventStartDateStore.key) private var calendarEventStartTimestamp: Double = CalendarEventStartDateStore.defaultTimestamp
     @StateObject private var historyManager = ActivityHistoryManager()
     @StateObject private var notificationManager = NotificationManager.shared
     @StateObject private var speechManager = SpeechManager()
@@ -2937,8 +2959,15 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showPermissionSetupSheet) {
-            PermissionSetupSheet(allowSkip: permissionSetupShown) { notifications, speech, calendar, reminders, photos, camera, location in
+            PermissionSetupSheet(
+                allowSkip: permissionSetupShown,
+                initialCalendarStartDate: CalendarEventStartDateStore.normalizedDate(from: calendarEventStartTimestamp)
+            ) { notifications, speech, calendar, reminders, photos, camera, location, calendarStartDate in
                 Task {
+                    calendarEventStartTimestamp = CalendarEventStartDateStore
+                        .normalizedDate(from: calendarStartDate.timeIntervalSince1970)
+                        .timeIntervalSince1970
+
                     await requestSelectedPermissions(
                         notifications: notifications,
                         speech: speech,
@@ -2948,9 +2977,12 @@ struct ContentView: View {
                         camera: camera,
                         location: location
                     )
-                    permissionSetupShown = true
-                    showPermissionSetupSheet = false
                     await refreshSystemTasks()
+                    
+                    await MainActor.run {
+                        permissionSetupShown = true
+                        showPermissionSetupSheet = false
+                    }
                 }
             } onSkip: {
                 showPermissionSetupSheet = false
@@ -3224,6 +3256,9 @@ struct ContentView: View {
             }
             .onChange(of: tasks) { _, _ in saveTasks() }
             .onChange(of: savedAgentItems) { _, _ in saveSavedAgentItems() }
+            .onChange(of: calendarEventStartTimestamp) { _, _ in
+                Task { await refreshSystemTasks() }
+            }
             .onTapGesture {
                 dismissKeyboard()
             }
@@ -4625,7 +4660,8 @@ struct PermissionWelcomeView: View {
 
 struct PermissionSetupSheet: View {
     var allowSkip: Bool = true
-    let onContinue: (_ notifications: Bool, _ speech: Bool, _ calendar: Bool, _ reminders: Bool, _ photos: Bool, _ camera: Bool, _ location: Bool) -> Void
+    var initialCalendarStartDate: Date = CalendarEventStartDateStore.defaultDate
+    let onContinue: (_ notifications: Bool, _ speech: Bool, _ calendar: Bool, _ reminders: Bool, _ photos: Bool, _ camera: Bool, _ location: Bool, _ calendarStartDate: Date) -> Void
     let onSkip: () -> Void
 
     @State private var askNotifications = true
@@ -4635,12 +4671,21 @@ struct PermissionSetupSheet: View {
     @State private var askPhotos = true
     @State private var askCamera = true
     @State private var askLocation = true
+    @State private var calendarStartDate = CalendarEventStartDateStore.defaultDate
+    @State private var isProcessing = false
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
                     Text("Choose what to enable. iOS will still show one system prompt per permission type, but this setup lets users control everything from one place.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("Calendar Event Start Date") {
+                    DatePicker("Start Date", selection: $calendarStartDate, displayedComponents: .date)
+                    Text("This date controls which calendar events are loaded. Events before this date are ignored.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -4656,17 +4701,33 @@ struct PermissionSetupSheet: View {
                 }
             }
             .navigationTitle("Permission Setup")
+            .disabled(isProcessing)
             .toolbar {
                 if allowSkip {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("Skip") { onSkip() }
+                            .disabled(isProcessing)
                     }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Continue") {
-                        onContinue(askNotifications, askSpeech, askCalendar, askReminders, askPhotos, askCamera, askLocation)
+                    Button(isProcessing ? "Setting up..." : "Continue") {
+                        isProcessing = true
+                        onContinue(
+                            askNotifications,
+                            askSpeech,
+                            askCalendar,
+                            askReminders,
+                            askPhotos,
+                            askCamera,
+                            askLocation,
+                            calendarStartDate
+                        )
                     }
+                    .disabled(isProcessing)
                 }
+            }
+            .onAppear {
+                calendarStartDate = Calendar.current.startOfDay(for: initialCalendarStartDate)
             }
         }
     }
@@ -7330,6 +7391,7 @@ extension ContentView {
 
         let calendar = Calendar.current
         var fetchedItems: [TaskItem] = []
+        let calendarEventStartDate = CalendarEventStartDateStore.normalizedDate(from: calendarEventStartTimestamp)
         
         // Window: -1 year to +1 year
         let now = Date()
@@ -7347,6 +7409,8 @@ extension ContentView {
         let predicate = eventStore.predicateForEvents(withStart: start, end: end, calendars: userCalendars)
         let events = eventStore.events(matching: predicate)
         for event in events {
+            guard event.startDate >= calendarEventStartDate else { continue }
+
             if let mappedTaskId = parseTaskIdentifierFlag(from: event.notes) {
                 let mappedStatus = parseTaskStatusFlag(from: event.notes, occurrenceStart: event.startDate) ?? .open
                 let normalizedTitle = event.title?

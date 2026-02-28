@@ -30,6 +30,7 @@ struct SettingsView: View {
     @AppStorage("AGENT_VOICE_IDENTIFIER") private var agentVoiceIdentifier: String = ""
     @AppStorage("PERMISSION_SETUP_SHOWN") private var permissionSetupShown: Bool = false
     @AppStorage("PREFERRED_TASK_CALENDAR_ID") private var preferredTaskCalendarId: String = ""
+    @AppStorage(CalendarEventStartDateStore.key) private var calendarEventStartTimestamp: Double = CalendarEventStartDateStore.defaultTimestamp
     
     @State private var localKey: String = ""
     @State private var localModel: String = "gpt-5.2"
@@ -522,6 +523,23 @@ struct SettingsView: View {
                             }
                             .pickerStyle(.menu)
                         }
+
+                        DatePicker(
+                            "Calendar Event Start Date",
+                            selection: Binding(
+                                get: { CalendarEventStartDateStore.normalizedDate(from: calendarEventStartTimestamp) },
+                                set: { newValue in
+                                    calendarEventStartTimestamp = CalendarEventStartDateStore
+                                        .normalizedDate(from: newValue.timeIntervalSince1970)
+                                        .timeIntervalSince1970
+                                }
+                            ),
+                            displayedComponents: .date
+                        )
+
+                        Text("This date is used to look at calendar events from that date onward. Any event before this date is ignored.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
