@@ -439,7 +439,8 @@ final class IntentService {
            - If the user wants ANY OTHER IMMEDIATE action (e.g., "play music", "open safari", "buy stocks", "set timer"): You DO NOT have these capabilities. Return action='answer' with answer="I don't have this capability yet."
         
         3. FUTURE ACTIONS / REMINDERS:
-           - If the user explicitly mentions a future time (e.g. "remind me to call later", "send text tomorrow"): Return action='task' with Action Payload. (UNLESS it's an inquiry about your schedule, calendar, conflicts, or busyness, then return action='answer' instead).
+           - ONLY return action='task' if the user uses imperative verbs to command you to create something (e.g. "remind me to call later", "send text tomorrow", "add a task", "schedule a meeting").
+           - ABSOLUTE OVERRIDE: If the user simply asks a QUESTION about their schedule (e.g. "how busy am I next week", "what is on my calendar tomorrow", "do I have any conflicts next week"), DO NOT return action='task' under any circumstances. THIS SHOULD ALWAYS BE action='answer'.
            - If the user explicitly asks to "remind" them or "add task" (e.g. "remind me to message X"): Return action='task', performer='user'.
            - IMPORTANT: For "remind me to call", set action='task' and performer='user' (unless they explicitly say "you call X tomorrow").
            - When calculating future dates (tomorrow, next week), use the current time (\(nowString) \(weekdayStr)) as the anchor.
@@ -448,7 +449,7 @@ final class IntentService {
            - If the user greets you or asks a question: Return action='answer' with the response in 'answer'.
               - For action='answer', set 'title' to a short meaningful label (3-8 words) that summarizes the response topic.
               - If the user asks for summaries/status (e.g. "summarize today's tasks", "how busy am I next week", "what did I do today", "what notifications do I have"), use APP CONTEXT to answer concretely.
-              - If the user asks about their schedule, calendar, conflicts, or busyness, DO NOT create a task. Return action='answer' and summarize the related tasks/events from APP CONTEXT. Mention conflicts and confirm if they would like to update, but focus on summarizing and answering the question directly.
+              - If the user asks about their schedule, calendar, conflicts, busyness or "how busy am I": you MUST return action='answer'. Do not create tasks or events from their inquiry. Look at UPCOMING tasks in APP CONTEXT to determine how busy they are, summarize those tasks, mention any conflicts naturally, and respond conversationally.
               - Never say you cannot access the data if APP CONTEXT is provided.
                   - Do NOT simulate in-app control flow in plain text (no “reply yes to open mail app” instructions). Use 'sendEmail' instead whenever email drafting + confirmation is needed.
         
@@ -7858,7 +7859,7 @@ extension ContentView {
         let upcomingTasks = tasks
             .filter { !$0.isDone && $0.dueDate >= calendar.startOfDay(for: now) }
             .sorted { $0.dueDate < $1.dueDate }
-            .prefix(15)
+            .prefix(30)
             .map { "- \(clipped($0.title, max: 55)) (\($0.startDate.formatted(date: .abbreviated, time: .shortened)) to \($0.dueDate.formatted(date: .abbreviated, time: .shortened)), p\($0.priority))" }
             .joined(separator: "\n")
 
