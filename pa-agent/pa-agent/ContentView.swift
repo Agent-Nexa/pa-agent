@@ -61,6 +61,11 @@ struct IntentResult: Codable {
     // Delegation fields
     var performer: String? = "user" // "user" or "agent"
     var isScheduled: Bool? = false // inferred from presence of dates vs "now"
+    
+    // Tracking fields
+    var trackingCategoryId: String? = nil
+    var trackingValue: Double? = nil
+    var trackingNote: String? = nil
 }
 
 struct IntentAnalyzer {
@@ -418,6 +423,7 @@ final class IntentService {
         3. Send Email (Action: 'sendEmail'): Prepare an email.
         4. Make Phone Call (Action: 'makePhoneCall'): Prepare a phone call.
         5. Answer/Chat (Action: 'answer'): Answer questions, chat, or explain limitations.
+        6. Record Tracking Data (Action: 'track'): Record a value like spending or fitness for a tracking category.
 
         LOGIC RULES:
         1. GENERATIVE CONTENT:
@@ -445,9 +451,15 @@ final class IntentService {
               - Never say you cannot access the data if APP CONTEXT is provided.
                   - Do NOT simulate in-app control flow in plain text (no “reply yes to open mail app” instructions). Use 'sendEmail' instead whenever email drafting + confirmation is needed.
         
+        5. TRACKING:
+           - If the user provides a value that seems like tracking a metric (e.g. "I spent 50$ on lunch", "just ran 5km", "my weight is 70kg"), return action='track'.
+           - Extract the value as a number into 'trackingValue'.
+           - Put the context (e.g. "lunch", "morning run") into 'trackingNote'.
+           - Critically analyse the user's intent. Select the most semantically appropriate category from the TRACKING_CATEGORIES list in APP CONTEXT (for example, "petrol" or "lunch" clearly belongs to a "Spending" category). Provide its exact ID in 'trackingCategoryId'. If nothing logically matches, leave it null.
+        
         JSON OUTPUT FORMAT:
         {
-          "action": "task" | "sendMessage" | "sendEmail" | "makePhoneCall" | "answer",
+          "action": "task" | "sendMessage" | "sendEmail" | "makePhoneCall" | "answer" | "track",
           "title": "...",
           "startDate": "YYYY-MM-DD HH:mm",
           "dueDate": "YYYY-MM-DD HH:mm",
@@ -459,7 +471,10 @@ final class IntentService {
           "callScript": "...",
           "answer": "...",
           "performer": "user" | "agent",
-          "isScheduled": true | false
+          "isScheduled": true | false,
+          "trackingCategoryId": "...",
+          "trackingValue": 123.45,
+          "trackingNote": "..."
         }
         
         Respond ONLY with valid JSON.
@@ -1387,6 +1402,22 @@ final class IntentService {
         let startDateStr = dict["startDate"] as? String
         let isScheduled = (startDateStr != nil)
 
+        // Tracking
+        let trackingCategoryId = dict["trackingCategoryId"] as? String
+        var trackingValue: Double? = nil
+        if let val = dict["trackingValue"] as? Double {
+            trackingValue = val
+        } else if let val = dict["trackingValue"] as? Int {
+            trackingValue = Double(val)
+        } else if let valStr = dict["trackingValue"] as? String {
+            let replaced = valStr.replacingOccurrences(of: "$", with: "")
+                                 .replacingOccurrences(of: "£", with: "")
+                                 .replacingOccurrences(of: "€", with: "")
+                                 .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let val = Double(replaced) { trackingValue = val }
+        }
+        let trackingNote = dict["trackingNote"] as? String
+
         func parseDate(_ value: Any?) -> Date? {
             guard let s = value as? String else { return nil }
             if let iso = ISO8601DateFormatter().date(from: s) { return iso }
@@ -1431,7 +1462,10 @@ final class IntentService {
             callScript: callScript,
             answer: answer,
             performer: performer,
-            isScheduled: isScheduled
+            isScheduled: isScheduled,
+            trackingCategoryId: trackingCategoryId,
+            trackingValue: trackingValue,
+            trackingNote: trackingNote
         )
     }
 
@@ -2106,6 +2140,7 @@ enum InteractionState: Equatable {
     case collectingScheduledActionContent(draft: TaskDraft, actionType: String, recipient: String, promptLabel: String)
     case confirmingTaskConflict(draft: TaskDraft, actionPayload: TaskItem.AgentAction?, conflicts: [TaskItem], suggestions: [Date])
     case collectingConflictDateTime(draft: TaskDraft, actionPayload: TaskItem.AgentAction?)
+    case confirmingTrackingRequest(categoryId: UUID, categoryName: String, value: Double, note: String?, rawText: String?, recordDate: Date)
 }
 
 struct SimpleContact: Identifiable, Hashable {
@@ -2890,6 +2925,7 @@ struct ContentView: View {
     @State private var showHelpSheet = false
     @State private var showAboutSheet = false
     @State private var showAIUsageSheet = false
+    @State private var showTrackingSheet = false
     @State private var showTasksList = false
     @State private var showMessageComposer = false
     @State private var showEmailComposer = false
@@ -2914,6 +2950,7 @@ struct ContentView: View {
     @AppStorage("PREFERRED_TASK_CALENDAR_ID") private var preferredTaskCalendarId: String = ""
     @AppStorage(CalendarEventStartDateStore.key) private var calendarEventStartTimestamp: Double = CalendarEventStartDateStore.defaultTimestamp
     @StateObject private var historyManager = ActivityHistoryManager()
+    @StateObject private var trackingManager = TrackingManager()
     @StateObject private var notificationManager = NotificationManager.shared
     @StateObject private var speechManager = SpeechManager()
     @StateObject private var subscriptionManager = SubscriptionManager.shared
@@ -3039,6 +3076,9 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showAIUsageSheet) {
                 AIUsageView()
+            }
+            .sheet(isPresented: $showTrackingSheet) {
+                TrackingCategoriesView(trackingManager: trackingManager)
             }
             .sheet(isPresented: $showTasksList) {
                 TasksListSheet(
@@ -3514,6 +3554,9 @@ struct ContentView: View {
             Menu {
                 Button(action: { showNotificationList = true }) {
                     Label("Notifications", systemImage: "bell")
+                }
+                Button(action: { showTrackingSheet = true }) {
+                    Label("Tracking", systemImage: "list.clipboard")
                 }
                 Button(action: { showAIUsageSheet = true }) {
                     Label("AI usage", systemImage: "chart.bar")
@@ -6076,6 +6119,18 @@ extension ContentView {
             await checkEmailCompleteness()
             return
         }
+        
+        if case .confirmingTrackingRequest(let categoryId, let categoryName, let value, let note, let rawText, let recordDate) = interactionState {
+            if isAffirmativeReply(lower) {
+                trackingManager.addRecord(categoryId: categoryId, value: value, note: note ?? text, rawText: rawText, date: recordDate)
+                interactionState = .idle
+                messages.append(.init(isUser: false, text: "Got it! Recorded \(value) for \(categoryName)."))
+            } else {
+                interactionState = .idle
+                messages.append(.init(isUser: false, text: "Okay, I won't record it."))
+            }
+            return
+        }
 
         if !isAIFeatureEnabled && isWeatherInquiry(text) {
             let weatherReply = await weatherService.response(for: text)
@@ -6315,6 +6370,40 @@ extension ContentView {
                 return
             }
             
+            if draft.action == "track" {
+                let value = draft.trackingValue ?? 0.0
+                let rawNote = draft.trackingNote ?? ""
+                let recordDate = draft.startDate ?? Date()
+                
+                // See if AI matched to a specific category
+                var matchedCategory: TrackingCategory? = nil
+                if let catIdStr = draft.trackingCategoryId {
+                    if let catId = UUID(uuidString: catIdStr) {
+                        matchedCategory = trackingManager.categories.first { $0.id == catId }
+                    } else {
+                        // AI provided a name instead of UUID in categoryId field
+                        matchedCategory = trackingManager.categories.first { $0.name.localizedCaseInsensitiveContains(catIdStr) }
+                    }
+                }
+                
+                if let cat = matchedCategory {
+                    interactionState = .confirmingTrackingRequest(categoryId: cat.id, categoryName: cat.name, value: value, note: rawNote, rawText: text, recordDate: recordDate)
+                    withAnimation {
+                        messages.append(.init(isUser: false, text: "Do you want to record \(value) for \(cat.name)? (Yes/No)"))
+                    }
+                } else if trackingManager.categories.isEmpty {
+                    withAnimation {
+                        messages.append(.init(isUser: false, text: "You don't have any tracking categories set up yet. Go to 'Tracking' in the menu to add one."))
+                    }
+                } else {
+                    let catNames = trackingManager.categories.map { $0.name }.joined(separator: ", ")
+                    withAnimation {
+                        messages.append(.init(isUser: false, text: "I see you want to track a value (\(value)), but I couldn't clearly match it to a category. Available categories are: \(catNames). Please specify."))
+                    }
+                }
+                return
+            }
+
             if draft.action == "greeting" || draft.action == "answer" {
                 let statusSnapshot = shouldShowTaskStatusChart(for: text) ? currentTaskStatusSnapshot() : nil
                 let fallbackReply = draft.answer ?? "I'm here to help."
@@ -7784,6 +7873,10 @@ extension ContentView {
             .suffix(4)
             .map { "\($0.isUser ? "U" : "A"): \(clipped($0.text, max: 100))" }
             .joined(separator: "\n")
+            
+        let trackingCats = trackingManager.categories
+            .map { "- \($0.name) [Unit: \($0.unit ?? "none"), ID: \($0.id.uuidString)]" }
+            .joined(separator: "\n")
 
         return """
         TODAY_OPEN:
@@ -7806,6 +7899,9 @@ extension ContentView {
 
         CHAT_RECENT:
         \(recentChat.isEmpty ? "- none" : recentChat)
+
+        TRACKING_CATEGORIES:
+        \(trackingCats.isEmpty ? "- none" : trackingCats)
         """
     }
 
