@@ -33,9 +33,14 @@ final class pa_agentUITests: XCTestCase {
 
     @MainActor
     func testLaunchPerformance() throws {
-        // This measures how long it takes to launch your application.
-        measure(metrics: [XCTApplicationLaunchMetric()]) {
-            XCUIApplication().launch()
+        // This measures launch time with a stable metric across iterations.
+        let app = XCUIApplication()
+        measure(metrics: [XCTClockMetric()]) {
+            if app.state != .notRunning {
+                app.terminate()
+            }
+            app.launch()
+            app.terminate()
         }
     }
 }

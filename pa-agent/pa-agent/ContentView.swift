@@ -4833,10 +4833,61 @@ struct AIUsageView: View {
 extension ContentView {
     // MARK: Input bar
 
+    private var shouldShowCancelConversationPrompt: Bool {
+        switch interactionState {
+        case .collectingMessageRecipient,
+             .collectingCallRecipient,
+             .collectingEmailRecipient,
+             .clarifyingContact,
+             .verifyingEmailContact,
+             .collectingEmailAddressForContact,
+             .offeringToSaveEmail,
+             .resolvingMissingTaskContact,
+             .collectingNewContactDetail,
+             .collectingScheduledTaskContact:
+            return true
+        default:
+            return false
+        }
+    }
+
     private var inputBar: some View {
         VStack(spacing: 8) {
             let trimmedDraft = draft.trimmingCharacters(in: .whitespacesAndNewlines)
             Divider()
+
+            if shouldShowCancelConversationPrompt {
+                HStack(alignment: .center, spacing: 10) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(.orange)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Cancel current conversation")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                        Text("Stops the current contact/chat flow and resets it.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer(minLength: 8)
+
+                    Button("Cancel") {
+                        cancelConversation()
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(Color.white)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.08))
+                )
+                .padding(.horizontal)
+            }
 
             if let attachment = pendingAttachment {
                 HStack(spacing: 10) {
@@ -5675,23 +5726,25 @@ extension ContentView {
         #endif
     }
 
+    private func cancelConversation() {
+        interactionState = .idle
+        pendingDraft = .init(title: "")
+        pendingMessage = .init()
+        pendingEmail = .init()
+        pendingCallRecipient = ""
+        showTaskDetailSheet = false
+        showMessageComposer = false
+        showEmailComposer = false
+        withAnimation {
+            messages.append(.init(isUser: false, text: "Cancelled."))
+        }
+    }
+
     private func handleIntent(for text: String, attachedImageDataURL: String? = nil) async {
         // Global cancel check
         let lower = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if ["cancel", "stop", "never mind", "abort"].contains(lower) {
-            await MainActor.run {
-                interactionState = .idle
-                pendingDraft = .init(title: "")
-                pendingMessage = .init()
-                pendingEmail = .init()
-                pendingCallRecipient = ""
-                showTaskDetailSheet = false
-                showMessageComposer = false
-                showEmailComposer = false
-                withAnimation {
-                    messages.append(.init(isUser: false, text: "Cancelled."))
-                }
-            }
+            await MainActor.run { cancelConversation() }
             return
         }
 
