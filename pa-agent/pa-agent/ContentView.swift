@@ -444,7 +444,7 @@ final class IntentService {
            - IMPORTANT: For "remind me to call", set action='task' and performer='user' (unless they explicitly say "you call X tomorrow").
            - When calculating future dates (tomorrow, next week), use the current time (\(nowString) \(weekdayStr)) as the anchor.
         
-        3. INQUIRIES / GREETINGS:
+        4. INQUIRIES / GREETINGS:
            - If the user greets you or asks a question: Return action='answer' with the response in 'answer'.
               - For action='answer', set 'title' to a short meaningful label (3-8 words) that summarizes the response topic.
               - If the user asks for summaries/status (e.g. "summarize today's tasks", "what did I do today", "what notifications do I have"), use APP CONTEXT to answer concretely.
@@ -456,6 +456,10 @@ final class IntentService {
            - Extract the value as a number into 'trackingValue'.
            - Put the context (e.g. "lunch", "morning run") into 'trackingNote'.
            - Critically analyse the user's intent. Select the most semantically appropriate category from the TRACKING_CATEGORIES list in APP CONTEXT (for example, "petrol" or "lunch" clearly belongs to a "Spending" category). Provide its exact ID in 'trackingCategoryId'. If nothing logically matches, leave it null.
+           
+        6. CONTEXTUAL FOLLOW-UPS (Crucial for "yes/no" answers):
+           - When the user replies with a simple "yes", "sure", or "do it", read the `RECENT_CHAT` in APP CONTEXT.
+           - If the Agent recently asked "Would you like me to track/record this expense?" and the user said "yes", you MUST return action='track' and extract the value and category mentioned in the `RECENT_CHAT`. Do NOT return action='task'.
         
         JSON OUTPUT FORMAT:
         {
