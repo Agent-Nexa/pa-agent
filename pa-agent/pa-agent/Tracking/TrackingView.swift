@@ -18,14 +18,36 @@ struct TrackingCategoriesView: View {
             List {
                 ForEach(trackingManager.categories) { category in
                     NavigationLink(destination: TrackingRecordListView(manager: trackingManager, category: category)) {
-                        VStack(alignment: .leading) {
-                            Text(category.name)
-                                .font(.headline)
-                            if let unit = category.unit, !unit.isEmpty {
-                                Text("Unit: \(unit)")
-                                    .font(.subheadline)
-                                    .foregroundColor(.secondary)
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text(category.name)
+                                    .font(.headline)
+                                if let unit = category.unit, !unit.isEmpty {
+                                    Text("Unit: \(unit)")
+                                        .font(.subheadline)
+                                        .foregroundColor(.secondary)
+                                }
                             }
+                            
+                            Spacer()
+                            
+                            NavigationLink(destination: DashboardView(manager: trackingManager, category: category)) {
+                                EmptyView()
+                            }
+                            .frame(width: 0)
+                            .opacity(0)
+                            
+                            Button(action: {}) {
+                                Image(systemName: "chart.bar")
+                                    .foregroundColor(.blue)
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                            .overlay(
+                                NavigationLink(destination: DashboardView(manager: trackingManager, category: category)) {
+                                    EmptyView()
+                                }
+                                .opacity(0)
+                            )
                         }
                     }
                 }
@@ -33,7 +55,7 @@ struct TrackingCategoriesView: View {
             }
             .navigationTitle("Tracking Categories")
             .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItem(placement: .primaryAction) {
                     Button(action: { showingAddCategory = true }) {
                         Image(systemName: "plus")
                     }
@@ -103,7 +125,7 @@ struct TrackingRecordListView: View {
         }
         .navigationTitle(category.name)
         .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
+            ToolbarItem(placement: .primaryAction) {
                 Button(action: { showingAddRecord = true }) {
                     Image(systemName: "plus")
                 }
@@ -111,7 +133,6 @@ struct TrackingRecordListView: View {
         }
         .alert("Add Record", isPresented: $showingAddRecord) {
             TextField("Value", text: $newValueStr)
-                .keyboardType(.decimalPad)
             TextField("Note (optional)", text: $newNote)
             Button("Add") {
                 if let value = Double(newValueStr) {
