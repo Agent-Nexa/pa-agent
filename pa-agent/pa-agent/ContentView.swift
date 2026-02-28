@@ -7069,11 +7069,29 @@ extension ContentView {
             guard status == .authorized else { return }
         }
 
+        let calendarEventStartDate = CalendarEventStartDateStore.normalizedDate(from: calendarEventStartTimestamp)
+        let isBeforeStartDate = task.startDate < calendarEventStartDate
+
         let event: EKEvent
         if let externalId = task.externalId,
            let existing = eventStore.event(withIdentifier: externalId) {
+            if isBeforeStartDate {
+                do {
+                    try eventStore.remove(existing, span: .thisEvent)
+                    await MainActor.run {
+                        if let idx = tasks.firstIndex(where: { $0.id == task.id }) {
+                            tasks[idx].externalId = nil
+                        }
+                    }
+                    await refreshSystemTasks()
+                } catch {
+                    await MainActor.run { showCalendarAlert = true }
+                }
+                return
+            }
             event = existing
         } else {
+            if isBeforeStartDate { return }
             event = EKEvent(eventStore: eventStore)
         }
 
@@ -7409,7 +7427,13 @@ extension ContentView {
         let predicate = eventStore.predicateForEvents(withStart: start, end: end, calendars: userCalendars)
         let events = eventStore.events(matching: predicate)
         for event in events {
-            guard event.startDate >= calendarEventStartDate else { continue }
+            if event.startDate < calendarEventStartDate {
+                // Remove sync'd app tasks from the local device calendar if they are before the start date
+                if parseTaskIdentifierFlag(from: event.notes) != nil {
+                    try? eventStore.remove(event, span: .thisEvent)
+                }
+                continue
+            }
 
             if let mappedTaskId = parseTaskIdentifierFlag(from: event.notes) {
                 let mappedStatus = parseTaskStatusFlag(from: event.notes, occurrenceStart: event.startDate) ?? .open
