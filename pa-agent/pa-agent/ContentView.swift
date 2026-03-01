@@ -356,7 +356,7 @@ final class IntentService {
     private let tokenUsageManager = TokenUsageManager.shared
 
     func infer(from text: String, imageDataURL: String? = nil, apiKey: String?, model: String?, useAzure: Bool, azureEndpoint: String?, userName: String?, agentName: String = "Nexa", appContext: String? = nil) async -> IntentResult? {
-        guard let rawKey = apiKey, !rawKey.isEmpty else {
+        guard let rawKey = apiKey, (!rawKey.isEmpty || useAzure) else {
             usedOpenAI = false
             lastReason = "missing API key"
             return fallback.infer(from: text, agentName: agentName)
@@ -556,7 +556,7 @@ final class IntentService {
         onStreamEvent: (@MainActor () -> Void)? = nil,
         onDelta: @escaping @MainActor (String) -> Void
     ) async -> String? {
-        guard let rawKey = apiKey, !rawKey.isEmpty else { return nil }
+        guard let rawKey = apiKey, (!rawKey.isEmpty || useAzure) else { return nil }
         let apiKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let chosenModel = model?.isEmpty == false ? model! : "gpt-4o"
@@ -726,7 +726,7 @@ final class IntentService {
         azureEndpoint: String?,
         agentName: String = "Nexa"
     ) async -> String? {
-        guard let rawKey = apiKey, !rawKey.isEmpty else { return nil }
+        guard let rawKey = apiKey, (!rawKey.isEmpty || useAzure) else { return nil }
         let apiKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let chosenModel = model?.isEmpty == false ? model! : "gpt-4o"
@@ -821,7 +821,7 @@ final class IntentService {
         azureEndpoint: String?,
         agentName: String = "Nexa"
     ) async -> Date? {
-        guard let rawKey = apiKey, !rawKey.isEmpty else { return nil }
+        guard let rawKey = apiKey, (!rawKey.isEmpty || useAzure) else { return nil }
         let apiKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let chosenModel = model?.isEmpty == false ? model! : "gpt-4o"
@@ -908,7 +908,7 @@ final class IntentService {
     }
 
     func polishEmail(text: String, recipient: String, senderName: String, apiKey: String?, model: String?, useAzure: Bool, azureEndpoint: String?, agentName: String = "Nexa") async -> (subject: String, body: String)? {
-        guard let rawKey = apiKey, !rawKey.isEmpty else { return nil }
+        guard let rawKey = apiKey, (!rawKey.isEmpty || useAzure) else { return nil }
         let apiKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
         
         let chosenModel = model?.isEmpty == false ? model! : "gpt-4o"
@@ -989,7 +989,7 @@ final class IntentService {
     }
 
     func polishMessage(text: String, history: String, recipient: String, senderName: String, apiKey: String?, model: String?, useAzure: Bool, azureEndpoint: String?, agentName: String = "Nexa") async -> String? {
-        guard let rawKey = apiKey, !rawKey.isEmpty else { return nil }
+        guard let rawKey = apiKey, (!rawKey.isEmpty || useAzure) else { return nil }
         let apiKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
         
         let chosenModel = model?.isEmpty == false ? model! : "gpt-4o"
@@ -1093,7 +1093,7 @@ final class IntentService {
     }
 
     func checkEmailSufficiency(currentBody: String, recipient: String, senderName: String, apiKey: String?, model: String?, useAzure: Bool, azureEndpoint: String?, agentName: String = "Nexa") async -> (sufficient: Bool, question: String?) {
-         guard let rawKey = apiKey, !rawKey.isEmpty else { return (true, nil) }
+         guard let rawKey = apiKey, (!rawKey.isEmpty || useAzure) else { return (true, nil) }
          let apiKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
          let chosenModel = model?.isEmpty == false ? model! : "gpt-4o"
          
@@ -1181,7 +1181,7 @@ final class IntentService {
     }
 
     func testConnection(apiKey: String?, model: String?, useAzure: Bool, azureEndpoint: String?) async -> String {
-        guard let rawKey = apiKey, !rawKey.isEmpty else { return "missing API key" }
+        guard let rawKey = apiKey, (!rawKey.isEmpty || useAzure) else { return "missing API key" }
         let apiKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
         
         let chosenModel = model?.isEmpty == false ? model! : "gpt-4o"
@@ -1811,7 +1811,7 @@ final class ChatHistoryStore {
             overrideUseAzure: useAzure,
             overrideAzureEndpoint: azureEndpoint
         )
-        guard !config.apiKey.isEmpty else { return "missing API key" }
+        guard (!config.apiKey.isEmpty || config.useAzure) else { return "missing API key" }
 
         guard let request = makeEmbeddingRequest(
             text: "embedding connection test",
