@@ -395,7 +395,9 @@ final class IntentService {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
         if useAzure {
-            request.setValue(apiKey, forHTTPHeaderField: "api-key")
+            if !apiKey.isEmpty {
+                request.setValue(apiKey, forHTTPHeaderField: "api-key")
+            }
             // Azure 2024-12-01-preview + gpt-5.2/o1 models do NOT support max_tokens.
         } else {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
@@ -579,7 +581,9 @@ final class IntentService {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if useAzure {
-            request.setValue(apiKey, forHTTPHeaderField: "api-key")
+            if !apiKey.isEmpty {
+                request.setValue(apiKey, forHTTPHeaderField: "api-key")
+            }
         } else {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
@@ -751,7 +755,9 @@ final class IntentService {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
         if useAzure {
-            request.setValue(apiKey, forHTTPHeaderField: "api-key")
+            if !apiKey.isEmpty {
+                request.setValue(apiKey, forHTTPHeaderField: "api-key")
+            }
         } else {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
@@ -847,7 +853,9 @@ final class IntentService {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
         if useAzure {
-            request.setValue(apiKey, forHTTPHeaderField: "api-key")
+            if !apiKey.isEmpty {
+                request.setValue(apiKey, forHTTPHeaderField: "api-key")
+            }
         } else {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
@@ -935,7 +943,9 @@ final class IntentService {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
         if useAzure {
-            request.setValue(apiKey, forHTTPHeaderField: "api-key")
+            if !apiKey.isEmpty {
+                request.setValue(apiKey, forHTTPHeaderField: "api-key")
+            }
         } else {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
@@ -1017,7 +1027,9 @@ final class IntentService {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
         if useAzure {
-            request.setValue(apiKey, forHTTPHeaderField: "api-key")
+            if !apiKey.isEmpty {
+                request.setValue(apiKey, forHTTPHeaderField: "api-key")
+            }
         } else {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
@@ -1120,7 +1132,9 @@ final class IntentService {
          request.httpMethod = "POST"
          request.setValue("application/json", forHTTPHeaderField: "Content-Type")
          if useAzure {
-             request.setValue(apiKey, forHTTPHeaderField: "api-key")
+             if !apiKey.isEmpty {
+                request.setValue(apiKey, forHTTPHeaderField: "api-key")
+            }
          } else {
               request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
          }
@@ -1223,7 +1237,9 @@ final class IntentService {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
         if useAzure {
-            request.setValue(apiKey, forHTTPHeaderField: "api-key")
+            if !apiKey.isEmpty {
+                request.setValue(apiKey, forHTTPHeaderField: "api-key")
+            }
             // Azure 2024-12-01-preview + gpt-5.2/o1 models do NOT support max_tokens.
         } else {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
@@ -2077,7 +2093,9 @@ final class ChatHistoryStore {
             azureRequest.httpMethod = "POST"
             azureRequest.timeoutInterval = 30
             azureRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            azureRequest.setValue(apiKey, forHTTPHeaderField: "api-key")
+            if !apiKey.isEmpty {
+                azureRequest.setValue(apiKey, forHTTPHeaderField: "api-key")
+            }
             let body: [String: Any] = [
                 "model": model,
                 "input": text
