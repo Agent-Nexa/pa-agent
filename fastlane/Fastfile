@@ -58,7 +58,7 @@ platform :ios do
     update_code_signing_settings(
       path: "pa-agent.xcodeproj",
       use_automatic_signing: false,
-      build_configuration: "Release"
+      build_configurations: ["Release"]
     )
 
     # Builds the iOS application using the scheme and project located in current dir
