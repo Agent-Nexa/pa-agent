@@ -94,7 +94,7 @@
          </EnvironmentVariable>
          <EnvironmentVariable
             key = "OPENAI_AZURE_ENDPOINT"
-            value = "https://admin-mev0a1yu-eastus2.openai.azure.com/"
+            value = "https://pa-agent-api-management-service-01.azure-api.net/openai/models/chat/completions?api-version=2024-05-01-preview"
             isEnabled = "YES">
          </EnvironmentVariable>
          <EnvironmentVariable
@@ -104,7 +104,7 @@
          </EnvironmentVariable>
          <EnvironmentVariable
             key = "OPENAI_AZURE_EMBEDDING_ENDPOINT"
-            value = "https://admin-mev0a1yu-eastus2.cognitiveservices.azure.com"
+            value = "https://pa-agent-api-management-service-01.azure-api.net/openai/models/embeddings?api-version=2024-05-01-preview"
             isEnabled = "YES">
          </EnvironmentVariable>
          <EnvironmentVariable

@@ -581,7 +581,7 @@ struct SettingsView: View {
             }
             .onAppear {
                 // Auto-fix bad cached endpoints
-                if azureEndpoint.contains("/openai/responses") || azureEndpoint == "https://admin-mev0a1yu-eastus2.openai.azure.com/" || azureEndpoint.contains("admin-mev0a1yu-eastus2.openai.azure.com") {
+                if azureEndpoint.contains("/openai/responses") || azureEndpoint.contains("pa-agent-api-management-service-01.azure-api.net") {
                     azureEndpoint = "https://pa-agent-api-management-service-01.azure-api.net/openai/models/chat/completions?api-version=2024-05-01-preview"
                 }
                 

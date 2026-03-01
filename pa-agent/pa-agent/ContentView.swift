@@ -2002,10 +2002,14 @@ final class ChatHistoryStore {
         let directApiKey = overrideApiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
         let envApiKey = env["OPENAI_API_KEY"]?.trimmingCharacters(in: .whitespacesAndNewlines)
         let storedApiKey = UserDefaults.standard.string(forKey: "OPENAI_API_KEY")?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let apiKey = (directApiKey?.isEmpty == false ? directApiKey : nil)
-            ?? (envApiKey?.isEmpty == false ? envApiKey : nil)
-            ?? (storedApiKey?.isEmpty == false ? storedApiKey : nil)
-            ?? ""
+        let apiKey: String
+        if let direct = directApiKey {
+            apiKey = direct
+        } else {
+            apiKey = (envApiKey?.isEmpty == false ? envApiKey : nil)
+                ?? (storedApiKey?.isEmpty == false ? storedApiKey : nil)
+                ?? ""
+        }
 
         let directModel = overrideModel?.trimmingCharacters(in: .whitespacesAndNewlines)
         let envEmbeddingModel = env["OPENAI_EMBEDDING_MODEL"]?.trimmingCharacters(in: .whitespacesAndNewlines)
