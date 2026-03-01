@@ -33,6 +33,13 @@ jobs:
           # We'll leave it empty unless you specify match strategy.
           echo "Ready to build"
 
+      - name: Select Latest Xcode
+        run: |
+          LATEST_XCODE=$(ls -d /Applications/Xcode* | sort -V | tail -n 1)
+          echo "Selecting Xcode: $LATEST_XCODE"
+          sudo xcode-select -s "$LATEST_XCODE/Contents/Developer"
+          xcodebuild -version
+
       - name: Build and Push to TestFlight
         env:
           # Your App Store Connect API Key components required for authentication
