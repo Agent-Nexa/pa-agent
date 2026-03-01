@@ -33,6 +33,17 @@ platform :ios do
     # In a full setup, uncomment `match` or `cert/sigh` depending on your cert setup
     # match(type: "appstore", readonly: true) 
 
+    # Use cert and sigh to automatically manage and download provisioning profiles
+    # because the GitHub runner does not have your local Xcode provisioning profiles.
+    get_certificates(
+      api_key: api_key
+    )
+    get_provisioning_profile(
+      api_key: api_key,
+      app_identifier: "z.Nexa", # Ensures the profile matches your exact app ID
+      provisioning_name: "match AppStore z.Nexa" # Optional, helps sigh find/create the right profile
+    )
+
     # Builds the iOS application using the scheme and project located in current dir
     build_app(
       project: "pa-agent.xcodeproj", 
