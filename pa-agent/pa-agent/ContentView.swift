@@ -5246,12 +5246,28 @@ extension ContentView {
                         .foregroundStyle(speechManager.isRecording ? .red : .accentColor)
                 }
 
-                TextField("Say or type what you need…", text: $draft, axis: .vertical)
+                TextField("Say or type what you need…", text: Binding(
+                    get: { draft },
+                    set: { newValue in
+                        if newValue.count - draft.count == 1,
+                           newValue.filter({ $0 == "\n" }).count > draft.filter({ $0 == "\n" }).count {
+                            // Map the newline to state so SwiftUI gets the update
+                            draft = newValue
+                            // Send message
+                            sendMessage()
+                            // If draft just had whitespace/newlines and nothing was sent, clear it
+                            if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                draft = ""
+                            }
+                        } else {
+                            draft = newValue
+                        }
+                    }
+                ), axis: .vertical)
                     .focused($isInputFocused)
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(1...3)
                     .submitLabel(.send)
-                    .onSubmit(sendMessage)
 
                 Button(action: sendMessage) {
                     Image(systemName: "arrow.up.circle.fill")
