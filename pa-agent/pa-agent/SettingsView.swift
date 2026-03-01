@@ -20,7 +20,7 @@ struct SettingsView: View {
     @AppStorage("OPENAI_MODEL") private var storedModel: String = "gpt-5.2"
     @AppStorage("OPENAI_USE_AZURE") private var useAzure: Bool = true
     @AppStorage("OPENAI_AZURE_ENDPOINT") private var azureEndpoint: String = "https://pa-agent-api-management-service-01.azure-api.net/openai/models/chat/completions?api-version=2024-05-01-preview"
-    @AppStorage("OPENAI_AZURE_EMBEDDING_ENDPOINT") private var azureEmbeddingEndpoint: String = "https://admin-mev0a1yu-eastus2.cognitiveservices.azure.com"
+    @AppStorage("OPENAI_AZURE_EMBEDDING_ENDPOINT") private var azureEmbeddingEndpoint: String = "https://pa-agent-api-management-service-01.azure-api.net/openai/models/embeddings?api-version=2024-05-01-preview"
     @AppStorage("AGENT_NAME") private var storedAgentName: String = "Nexa"
     @AppStorage("USER_NAME") private var storedUserName: String = ""
     @AppStorage("AGENT_ICON") private var agentIcon: String = "brain.head.profile"
