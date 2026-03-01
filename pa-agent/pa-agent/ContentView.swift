@@ -6183,7 +6183,7 @@ extension ContentView {
         }
 
         // DEBUG LOGGING
-        if !isProductionBuild || Bundle.main.isTestFlight {
+        if Bundle.main.isTestFlight {
             await MainActor.run {
                 messages.append(.init(isUser: false, text: "DEBUG => Source: \(lastIntentSource), Reason: \(lastIntentReason)"))
             }
