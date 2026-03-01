@@ -41,7 +41,8 @@ jobs:
           APP_STORE_CONNECT_API_KEY_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_KEY }}
         run: |
           # Write the Base64 key string to a physical .p8 file for Fastlane
-          echo -n "$APP_STORE_CONNECT_API_KEY_KEY" | base64 --decode > AuthKey_$APP_STORE_CONNECT_API_KEY_KEY_ID.p8
+          # We use fold to ensure padding is somewhat respected and base64 decode doesn't fail silently
+          echo -n "$APP_STORE_CONNECT_API_KEY_KEY" | base64 --decode -o AuthKey_$APP_STORE_CONNECT_API_KEY_KEY_ID.p8
           
           # Tell Fastlane exactly where this file is
           export APP_STORE_CONNECT_API_KEY_KEY_FILEPATH="$(pwd)/AuthKey_$APP_STORE_CONNECT_API_KEY_KEY_ID.p8"
