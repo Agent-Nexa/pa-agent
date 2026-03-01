@@ -19,7 +19,7 @@ struct SettingsView: View {
     @AppStorage("OPENAI_EMBEDDING_MODEL") private var storedEmbeddingModel: String = "text-embedding-3-small"
     @AppStorage("OPENAI_MODEL") private var storedModel: String = "gpt-5.2"
     @AppStorage("OPENAI_USE_AZURE") private var useAzure: Bool = true
-    @AppStorage("OPENAI_AZURE_ENDPOINT") private var azureEndpoint: String = "https://admin-mev0a1yu-eastus2.openai.azure.com/openai/deployments/gpt-5.2/chat/completions?api-version=2024-12-01-preview"
+    @AppStorage("OPENAI_AZURE_ENDPOINT") private var azureEndpoint: String = "https://pa-agent-api-management-service-01.azure-api.net/openai/models/chat/completions?api-version=2024-05-01-preview"
     @AppStorage("OPENAI_AZURE_EMBEDDING_ENDPOINT") private var azureEmbeddingEndpoint: String = "https://admin-mev0a1yu-eastus2.cognitiveservices.azure.com"
     @AppStorage("AGENT_NAME") private var storedAgentName: String = "Nexa"
     @AppStorage("USER_NAME") private var storedUserName: String = ""
@@ -581,8 +581,8 @@ struct SettingsView: View {
             }
             .onAppear {
                 // Auto-fix bad cached endpoints
-                if azureEndpoint.contains("/openai/responses") || azureEndpoint == "https://admin-mev0a1yu-eastus2.openai.azure.com/" {
-                    azureEndpoint = "https://admin-mev0a1yu-eastus2.openai.azure.com/openai/deployments/gpt-5.2/chat/completions?api-version=2024-12-01-preview"
+                if azureEndpoint.contains("/openai/responses") || azureEndpoint == "https://admin-mev0a1yu-eastus2.openai.azure.com/" || azureEndpoint.contains("admin-mev0a1yu-eastus2.openai.azure.com") {
+                    azureEndpoint = "https://pa-agent-api-management-service-01.azure-api.net/openai/models/chat/completions?api-version=2024-05-01-preview"
                 }
                 
                 // Load API Key from Environment Variable (if available) to ensure up-to-date scheme settings

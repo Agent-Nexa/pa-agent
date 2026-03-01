@@ -2047,7 +2047,7 @@ final class ChatHistoryStore {
             }
 
             let lowerHost = host.lowercased()
-            guard lowerHost.contains("openai.azure.com") || lowerHost.contains("cognitiveservices.azure.com") else {
+            guard lowerHost.contains("openai.azure.com") || lowerHost.contains("cognitiveservices.azure.com") || lowerHost.contains("azure-api.net") else {
                 return nil
             }
 
@@ -2945,7 +2945,7 @@ struct ContentView: View {
     @AppStorage("OPENAI_API_KEY") private var storedApiKey: String = ""
     @AppStorage("OPENAI_MODEL") private var storedModel: String = "gpt-5.2"
     @AppStorage("OPENAI_USE_AZURE") private var useAzure: Bool = true
-    @AppStorage("OPENAI_AZURE_ENDPOINT") private var azureEndpoint: String = "https://admin-mev0a1yu-eastus2.openai.azure.com/openai/deployments/gpt-5.2/chat/completions?api-version=2024-12-01-preview"
+    @AppStorage("OPENAI_AZURE_ENDPOINT") private var azureEndpoint: String = "https://pa-agent-api-management-service-01.azure-api.net/openai/models/chat/completions?api-version=2024-05-01-preview"
     @AppStorage("AGENT_NAME") private var agentName: String = "Nexa"
     @AppStorage("USER_NAME") private var userName: String = ""
     @AppStorage("AGENT_ICON") private var agentIcon: String = "brain.head.profile"
