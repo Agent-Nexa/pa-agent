@@ -35,7 +35,7 @@ platform :ios do
 
     # Builds the iOS application using the scheme and project located in current dir
     build_app(
-      workspace: "pa-agent.xcworkspace", 
+      project: "pa-agent.xcodeproj", 
       scheme: "pa-agent",
       clean: true,
       export_method: "app-store" # Required for TestFlight distribution
