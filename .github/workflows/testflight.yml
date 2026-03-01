@@ -40,5 +40,7 @@ jobs:
           APP_STORE_CONNECT_API_KEY_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ISSUER_ID }}
           # The key itself, passed as base64
           APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+          APP_STORE_P12_BASE64: ${{ secrets.APP_STORE_P12_BASE64 }}
+          APP_STORE_P12_PASSWORD: ${{ secrets.APP_STORE_P12_PASSWORD }}
         run: |
           fastlane beta

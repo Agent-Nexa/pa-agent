@@ -33,11 +33,27 @@ platform :ios do
     # In a full setup, uncomment `match` or `cert/sigh` depending on your cert setup
     # match(type: "appstore", readonly: true) 
 
+    # Ensure CI handles keychains safely without prompting for passwords
+    setup_ci if ENV["CI"]
+
     # Use cert and sigh to automatically manage and download provisioning profiles
     # because the GitHub runner does not have your local Xcode provisioning profiles.
-    get_certificates(
-      api_key: api_key
-    )
+    p12_base64 = ENV["APP_STORE_P12_BASE64"]
+    if p12_base64 && !p12_base64.empty?
+      require 'base64'
+      File.write("app_store_cert.p12", Base64.decode64(p12_base64))
+      import_certificate(
+        certificate_path: "app_store_cert.p12",
+        certificate_password: ENV["APP_STORE_P12_PASSWORD"] || "",
+        keychain_name: ENV["MATCH_KEYCHAIN_NAME"] || "login.keychain-db",
+        keychain_password: ENV["MATCH_KEYCHAIN_PASSWORD"] || ""
+      )
+    else
+      # Fallback to cert generation if the P12 secret isn't provided (e.g., local dev)
+      get_certificates(
+        api_key: api_key
+      )
+    end
     get_provisioning_profile(
       api_key: api_key,
       app_identifier: "z.Nexa", # Ensures the profile matches your exact app ID
