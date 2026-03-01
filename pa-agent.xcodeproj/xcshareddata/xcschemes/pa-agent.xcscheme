@@ -84,7 +84,7 @@
       <EnvironmentVariables>
          <EnvironmentVariable
             key = "OPENAI_API_KEY"
-            value = "62WeR8wPJ6tgaSOpcxHHu91iDsKBbXY2xITgBYRU7hgZW6valuSxJQQJ99BHACHYHv6XJ3w3AAAAACOGv7AT"
+            value = ""
             isEnabled = "YES">
          </EnvironmentVariable>
          <EnvironmentVariable
@@ -94,7 +94,7 @@
          </EnvironmentVariable>
          <EnvironmentVariable
             key = "OPENAI_AZURE_ENDPOINT"
-            value = "https://pa-agent-api-management-service-01.azure-api.net/openai/models/chat/completions?api-version=2024-05-01-preview"
+            value = "https://admin-mev0a1yu-eastus2.openai.azure.com/"
             isEnabled = "YES">
          </EnvironmentVariable>
          <EnvironmentVariable

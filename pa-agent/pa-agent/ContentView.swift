@@ -2052,7 +2052,16 @@ final class ChatHistoryStore {
             }
 
             let apiVersion = components.queryItems?.first(where: { $0.name.lowercased() == "api-version" })?.value ?? "2024-12-01-preview"
-            components.path = "/openai/deployments/\(model)/embeddings"
+
+            if var pathString = components.string, let range = pathString.range(of: "/deployments/[^/]+/", options: .regularExpression) {
+                pathString.replaceSubrange(range, with: "/deployments/\(model)/")
+                if let updatedComponents = URLComponents(string: pathString) {
+                    components.path = updatedComponents.path
+                }
+            } else if !components.path.contains("/embeddings") {
+                components.path = "/openai/deployments/\(model)/embeddings"
+            }
+
             components.queryItems = [URLQueryItem(name: "api-version", value: apiVersion)]
 
             guard let azureURL = components.url else { return nil }
