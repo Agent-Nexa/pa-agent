@@ -2082,6 +2082,8 @@ final class ChatHistoryStore {
                 if let updatedComponents = URLComponents(string: pathString) {
                     components.path = updatedComponents.path
                 }
+            } else if components.path.hasSuffix("/chat/completions") {
+                components.path = components.path.replacingOccurrences(of: "/chat/completions", with: "/embeddings")
             } else if !components.path.contains("/embeddings") {
                 components.path = "/openai/deployments/\(model)/embeddings"
             }
