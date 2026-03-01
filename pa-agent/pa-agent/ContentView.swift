@@ -3297,6 +3297,7 @@ struct ContentView: View {
                 Text(scheduleConflictMessage)
             })
             .onAppear {
+                migrateSettings()
                 loadPersistedCalendarOccurrenceStatuses()
                 if userName.isEmpty {
                     Task {
@@ -7967,6 +7968,16 @@ extension ContentView {
         }
         if let data = try? JSONEncoder().encode(appTasks) {
             UserDefaults.standard.set(data, forKey: "saved_tasks")
+        }
+    }
+
+
+    private func migrateSettings() {
+        if UserDefaults.standard.string(forKey: "OPENAI_AZURE_EMBEDDING_ENDPOINT") == "https://admin-mev0a1yu-eastus2.cognitiveservices.azure.com" {
+            UserDefaults.standard.set("https://pa-agent-api-management-service-01.azure-api.net/openai/models/embeddings?api-version=2024-05-01-preview", forKey: "OPENAI_AZURE_EMBEDDING_ENDPOINT")
+        }
+        if UserDefaults.standard.string(forKey: "OPENAI_AZURE_ENDPOINT") == "https://admin-mev0a1yu-eastus2.openai.azure.com/" {
+            UserDefaults.standard.set("https://pa-agent-api-management-service-01.azure-api.net/openai/models/chat/completions?api-version=2024-05-01-preview", forKey: "OPENAI_AZURE_ENDPOINT")
         }
     }
 
