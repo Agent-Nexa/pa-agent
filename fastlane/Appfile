@@ -1,7 +1,7 @@
 # Customise this file, documentation can be found here:
 # https://docs.fastlane.tools/advanced/#appfile
 
-app_identifier("com.pa-agent.app") # Change if this isn't the bundle identifier
+app_identifier("z.Nexa") # Change if this isn't the bundle identifier
 
 # You can uncomment the lines below and add your Apple ID if you prefer 
 # not to rely entirely on the API Key setup, but it's strongly recommended 
