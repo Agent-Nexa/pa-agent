@@ -8050,6 +8050,8 @@ extension ContentView {
         #if DEBUG
         return true
         #else
+        // TestFlight hack: Override subscription checks
+        if Bundle.main.isTestFlight { return true }
         return subscriptionManager.hasActiveSubscription
         #endif
     }

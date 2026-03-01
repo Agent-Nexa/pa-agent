@@ -156,7 +156,9 @@ final class TokenUsageManager: ObservableObject {
     }
 
     func monthlyTokenLimit(hasActiveSubscription: Bool) -> Int {
-        hasActiveSubscription ? 200_000 : 20_000
+        // testflight override: high limit for testing
+        if Bundle.main.isTestFlight { return 99_999_999 }
+        return hasActiveSubscription ? 200_000 : 20_000
     }
 
     func remainingTokensThisMonth(hasActiveSubscription: Bool) -> Int {

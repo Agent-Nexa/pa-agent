@@ -23,6 +23,11 @@ final class SubscriptionManager: ObservableObject {
         Task {
             await loadProducts()
             await refreshSubscriptionStatus()
+            
+            // Bypass for TestFlight
+            if Bundle.main.isTestFlight {
+                hasActiveSubscription = true
+            }
         }
         #endif
     }
@@ -135,6 +140,11 @@ final class SubscriptionManager: ObservableObject {
             active = true
             break
         }
+        
+        // testflight override
+        if Bundle.main.isTestFlight {
+            active = true
+        }
 
         hasActiveSubscription = active
         UserDefaults.standard.set(active, forKey: subscriptionKey)
@@ -150,5 +160,18 @@ final class SubscriptionManager: ObservableObject {
                 await self.refreshSubscriptionStatus()
             }
         }
+    }
+}
+
+extension Bundle {
+    var isTestFlight: Bool {
+        #if targetEnvironment(simulator)
+        return true
+        #else
+        guard let path = appStoreReceiptURL?.lastPathComponent else {
+            return true // Local Xcode build
+        }
+        return path == "sandboxReceipt"
+        #endif
     }
 }

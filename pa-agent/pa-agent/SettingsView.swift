@@ -139,7 +139,11 @@ struct SettingsView: View {
                     }
 
                     Section("Subscription") {
-                        if isProductionBuild {
+                        if Bundle.main.isTestFlight {
+                            Text("TestFlight mode: AI is always enabled with unlimited tokens and subscription status is ignored.")
+                                .font(.caption)
+                                .foregroundStyle(.blue)
+                        } else if isProductionBuild {
                             Text("To subscribe, iPhone must be signed in to App Store. If prompted for account, sign in first, then tap Subscribe again.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -750,22 +754,34 @@ struct SettingsView: View {
         #if DEBUG
         return false
         #else
-        return true
+        // TestFlight hack: disable production mode unless you specifically want it enabled
+        // return true 
+        return !Bundle.main.isTestFlight
         #endif
     }
 
     private var environmentLabel: String {
-        isProductionBuild ? "Production" : "Debug"
+        #if DEBUG
+        return "Debug"
+        #else
+        return Bundle.main.isTestFlight ? "TestFlight" : "Production"
+        #endif
     }
 
     private var environmentColor: Color {
-        isProductionBuild ? .orange : .green
+        #if DEBUG
+        return .green
+        #else
+        return Bundle.main.isTestFlight ? .blue : .orange
+        #endif
     }
 
     private var isAIFeatureEnabled: Bool {
         #if DEBUG
         return true
         #else
+        // TestFlight hack: Bypass active subscription check
+        if Bundle.main.isTestFlight { return true }
         return subscriptionManager.hasActiveSubscription
         #endif
     }
