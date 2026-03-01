@@ -15,7 +15,6 @@ import UIKit
 
 struct SettingsView: View {
     @Environment(\.openURL) private var openURL
-    @AppStorage("OPENAI_API_KEY") private var storedApiKey: String = ""
     @AppStorage("OPENAI_EMBEDDING_MODEL") private var storedEmbeddingModel: String = "text-embedding-3-small"
     @AppStorage("OPENAI_MODEL") private var storedModel: String = "gpt-5.2"
     @AppStorage("OPENAI_USE_AZURE") private var useAzure: Bool = true
@@ -32,7 +31,6 @@ struct SettingsView: View {
     @AppStorage("PREFERRED_TASK_CALENDAR_ID") private var preferredTaskCalendarId: String = ""
     @AppStorage(CalendarEventStartDateStore.key) private var calendarEventStartTimestamp: Double = CalendarEventStartDateStore.defaultTimestamp
     
-    @State private var localKey: String = ""
     @State private var localModel: String = "gpt-5.2"
     @State private var localUseAzure: Bool = false
     @State private var localEndpoint: String = ""
@@ -280,9 +278,6 @@ struct SettingsView: View {
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
-                            SecureField("sk-...", text: $localKey)
-                                .textInputAutocapitalization(.none)
-                                .disableAutocorrection(true)
                             Picker("Model", selection: $localModel) {
                                 Text("gpt-5.2").tag("gpt-5.2")
                                 Text("gpt-4o").tag("gpt-4o")
@@ -302,23 +297,6 @@ struct SettingsView: View {
                                     .foregroundStyle(.secondary)
                             }
                             Toggle("Use Azure", isOn: $localUseAzure)
-                            if localUseAzure {
-                                TextField("Endpoint URL", text: $localEndpoint)
-                                    .textInputAutocapitalization(.none)
-                                    .disableAutocorrection(true)
-                                    .font(.caption)
-                                Text("Format: https://{resource}.openai.azure.com/openai/deployments/{deployment}/chat/completions?api-version=...")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-
-                                TextField("Embedding Endpoint URL", text: $localEmbeddingEndpoint)
-                                    .textInputAutocapitalization(.none)
-                                    .disableAutocorrection(true)
-                                    .font(.caption)
-                                Text("Format: https://{resource}.cognitiveservices.azure.com")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
                         }
                         .disabled(!isEditing)
                     }
@@ -347,7 +325,7 @@ struct SettingsView: View {
                                 // Use localModel (what is currently selected) instead of storedModel (what was last saved)
                                 // so the user can test before saving.
                                 connectionStatus = await intentService.testConnection(
-                                    apiKey: localKey.trimmingCharacters(in: .whitespacesAndNewlines),
+                                    apiKey: "",
                                     model: localModel,
                                     useAzure: localUseAzure,
                                     azureEndpoint: localEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -364,10 +342,9 @@ struct SettingsView: View {
                                 }
 
                                 embeddingConnectionStatus = "testing..."
-                                let keyForTest = localKey.trimmingCharacters(in: .whitespacesAndNewlines)
                                 let modelForTest = storedEmbeddingModel.trimmingCharacters(in: .whitespacesAndNewlines)
                                 embeddingConnectionStatus = await ChatHistoryStore.shared.testEmbeddingConnection(
-                                    apiKey: keyForTest,
+                                    apiKey: "",
                                     model: modelForTest.isEmpty ? nil : modelForTest,
                                     useAzure: localUseAzure,
                                     azureEndpoint: localEmbeddingEndpoint
@@ -584,13 +561,7 @@ struct SettingsView: View {
                 if azureEndpoint.contains("/openai/responses") || azureEndpoint.contains("pa-agent-api-management-service-01.azure-api.net") {
                     azureEndpoint = "https://pa-agent-api-management-service-01.azure-api.net/openai/models/chat/completions?api-version=2024-05-01-preview"
                 }
-                
-                // Load API Key from Environment Variable (if available) to ensure up-to-date scheme settings
-                if let envKey = ProcessInfo.processInfo.environment["OPENAI_API_KEY"], !envKey.isEmpty {
-                    storedApiKey = envKey
-                }
 
-                localKey = storedApiKey
                 localModel = storedModel
                 localUseAzure = useAzure
                 localEndpoint = azureEndpoint
@@ -712,7 +683,6 @@ struct SettingsView: View {
     }
 
     private var hasUnsavedChanges: Bool {
-        let keyChanged = !isProductionBuild && (localKey.trimmingCharacters(in: .whitespacesAndNewlines) != storedApiKey)
         let modelChanged = !isProductionBuild && (localModel != storedModel)
         let azureChanged = !isProductionBuild && (
             localUseAzure != useAzure ||
@@ -728,12 +698,11 @@ struct SettingsView: View {
         let voiceChanged = localAgentVoiceEnabled != agentVoiceEnabled
         let selectedVoiceChanged = localAgentVoiceIdentifier != agentVoiceIdentifier
 
-        return keyChanged || modelChanged || azureChanged || identityChanged || voiceChanged || selectedVoiceChanged
+        return modelChanged || azureChanged || identityChanged || voiceChanged || selectedVoiceChanged
     }
 
     private func saveAllSettings() {
         if !isProductionBuild {
-            storedApiKey = localKey.trimmingCharacters(in: .whitespacesAndNewlines)
             storedModel = localModel
             useAzure = localUseAzure
             azureEndpoint = localEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)

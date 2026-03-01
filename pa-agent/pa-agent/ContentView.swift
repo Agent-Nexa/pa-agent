@@ -2482,6 +2482,7 @@ class ContactHelpers {
 final class SpeechManager: NSObject, ObservableObject, SFSpeechRecognizerDelegate, AVSpeechSynthesizerDelegate {
     @Published var transcript: String = ""
     @Published var isRecording = false
+    @Published var isSpeaking = false
     @Published var authorizationStatus: SFSpeechRecognizerAuthorizationStatus = .notDetermined
 
     private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
@@ -2533,8 +2534,28 @@ final class SpeechManager: NSObject, ObservableObject, SFSpeechRecognizerDelegat
         synthesizer.speak(utterance)
     }
 
+    func stopSpeaking() {
+        if synthesizer.isSpeaking {
+            synthesizer.stopSpeaking(at: .immediate)
+            isSpeaking = false
+        }
+    }
+
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
+        Task { @MainActor in
+            self.isSpeaking = true
+        }
+    }
+
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        Task { @MainActor in
+            self.isSpeaking = false
+        }
+    }
+
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
         Task { @MainActor in
+            self.isSpeaking = false
             // Resume listening if we were recording before
             if self.wasRecordingBeforeSpeaking {
                 self.startRecording()
@@ -5007,6 +5028,35 @@ extension ContentView {
         VStack(spacing: 8) {
             let trimmedDraft = draft.trimmingCharacters(in: .whitespacesAndNewlines)
             Divider()
+
+            if speechManager.isSpeaking {
+                HStack(alignment: .center, spacing: 10) {
+                    Image(systemName: "speaker.wave.3.fill")
+                        .font(.title3)
+                        .foregroundStyle(Color.accentColor)
+
+                    Text("Reading message...")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.primary)
+
+                    Spacer(minLength: 8)
+
+                    Button("Stop Reading") {
+                        speechManager.stopSpeaking()
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.red)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(Color.white)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.08))
+                )
+                .padding(.horizontal)
+            }
 
             if shouldShowCancelConversationPrompt {
                 HStack(alignment: .center, spacing: 10) {
