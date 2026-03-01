@@ -38,16 +38,7 @@ jobs:
           # Your App Store Connect API Key components required for authentication
           APP_STORE_CONNECT_API_KEY_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_KEY_ID }}
           APP_STORE_CONNECT_API_KEY_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ISSUER_ID }}
+          # The key itself, passed as base64
           APP_STORE_CONNECT_API_KEY_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_KEY }}
         run: |
-          # Write the Base64 key string to a physical .p8 file for Fastlane
-          # We use base64 -d to decode (it handles padding better on macos runner)
-          echo "$APP_STORE_CONNECT_API_KEY_KEY" | base64 -d > AuthKey_${APP_STORE_CONNECT_API_KEY_KEY_ID}.p8
-          
-          # Print the first line to confirm the file looks like a private key (without revealing the whole thing)
-          head -n 1 AuthKey_${APP_STORE_CONNECT_API_KEY_KEY_ID}.p8
-          
-          # Tell Fastlane exactly where this file is
-          export APP_STORE_CONNECT_API_KEY_KEY_FILEPATH="$(pwd)/AuthKey_${APP_STORE_CONNECT_API_KEY_KEY_ID}.p8"
-          
           fastlane beta
