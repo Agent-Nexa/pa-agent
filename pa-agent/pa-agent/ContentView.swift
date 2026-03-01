@@ -66,6 +66,17 @@ struct IntentResult: Codable {
     var trackingCategoryId: String? = nil
     var trackingValue: Double? = nil
     var trackingNote: String? = nil
+    var trackingDate: Date? = nil
+    
+    // Multi-tracking
+    var trackings: [TrackingIntent]? = nil
+}
+
+struct TrackingIntent: Codable {
+    var trackingCategoryId: String?
+    var trackingValue: Double?
+    var trackingNote: String?
+    var trackingDate: Date?
 }
 
 struct IntentAnalyzer {
@@ -458,14 +469,15 @@ final class IntentService {
         
         5. TRACKING:
            - If the user provides a value that seems like tracking a metric (e.g. "I spent 50$ on lunch", "just ran 5km", "my weight is 70kg"), return action='track'.
-           - Extract the value as a number into 'trackingValue'.
-           - Put the context (e.g. "lunch", "morning run") into 'trackingNote'.
-           - Critically analyse the user's intent. Select the most semantically appropriate category from the TRACKING_CATEGORIES list in APP CONTEXT (for example, "petrol" or "lunch" clearly belongs to a "Spending" category). Provide its exact ID in 'trackingCategoryId'. If nothing logically matches, leave it null.
-           
+           - IF there are multiple tracking items in the same message (e.g. "spent 50 on lunch and weight is 70kg"), extract ALL of them into the 'trackings' array.
+           - For EACH tracking item, extract the value as a number into 'trackingValue', put the context into 'trackingNote', and select the most semantically appropriate category from the TRACKING_CATEGORIES list, providing its exact ID in 'trackingCategoryId' (or null if no match).
+           - IF the user mentions a specific date or time for the tracking (e.g. "yesterday", "last night"), you MUST provide it in 'trackingDate' using YYYY-MM-DD HH:mm format.
+           - Alternatively, if there is only one tracking item, you may extract it into the top-level 'trackingValue', 'trackingNote', 'trackingCategoryId', and 'trackingDate'.
+
         6. CONTEXTUAL FOLLOW-UPS (Crucial for "yes/no" answers):
            - When the user replies with a simple "yes", "sure", or "do it", read the `RECENT_CHAT` in APP CONTEXT.
            - If the Agent recently asked "Would you like me to track/record this expense?" and the user said "yes", you MUST return action='track' and extract the value and category mentioned in the `RECENT_CHAT`. Do NOT return action='task'.
-        
+
         JSON OUTPUT FORMAT:
         {
           "action": "task" | "sendMessage" | "sendEmail" | "makePhoneCall" | "answer" | "track",
@@ -483,9 +495,11 @@ final class IntentService {
           "isScheduled": true | false,
           "trackingCategoryId": "...",
           "trackingValue": 123.45,
-          "trackingNote": "..."
-        }
-        
+          "trackingNote": "...",
+          "trackingDate": "YYYY-MM-DD HH:mm",
+          "trackings": [
+             { "trackingCategoryId": "...", "trackingValue": 123.45, "trackingNote": "...", "trackingDate": "YYYY-MM-DD HH:mm" }
+          ]
         Respond ONLY with valid JSON.
         """
 
@@ -1433,21 +1447,6 @@ final class IntentService {
         let isScheduled = (startDateStr != nil)
 
         // Tracking
-        let trackingCategoryId = dict["trackingCategoryId"] as? String
-        var trackingValue: Double? = nil
-        if let val = dict["trackingValue"] as? Double {
-            trackingValue = val
-        } else if let val = dict["trackingValue"] as? Int {
-            trackingValue = Double(val)
-        } else if let valStr = dict["trackingValue"] as? String {
-            let replaced = valStr.replacingOccurrences(of: "$", with: "")
-                                 .replacingOccurrences(of: "£", with: "")
-                                 .replacingOccurrences(of: "€", with: "")
-                                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if let val = Double(replaced) { trackingValue = val }
-        }
-        let trackingNote = dict["trackingNote"] as? String
-
         func parseDate(_ value: Any?) -> Date? {
             guard let s = value as? String else { return nil }
             if let iso = ISO8601DateFormatter().date(from: s) { return iso }
@@ -1464,6 +1463,54 @@ final class IntentService {
             df.dateFormat = "yyyy-MM-dd"
             if let d = df.date(from: s) { return d }
             return nil
+        }
+        
+        let trackingCategoryId = dict["trackingCategoryId"] as? String
+        var trackingValue: Double? = nil
+        if let val = dict["trackingValue"] as? Double {
+            trackingValue = val
+        } else if let val = dict["trackingValue"] as? Int {
+            trackingValue = Double(val)
+        } else if let valStr = dict["trackingValue"] as? String {
+            let replaced = valStr.replacingOccurrences(of: "$", with: "")
+                                 .replacingOccurrences(of: "£", with: "")
+                                 .replacingOccurrences(of: "€", with: "")
+                                 .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let val = Double(replaced) { trackingValue = val }
+        }
+        let trackingNote = dict["trackingNote"] as? String
+        let trackingDate = parseDate(dict["trackingDate"])
+        
+        var parsedTrackings: [TrackingIntent]? = nil
+        if let trackingsArr = dict["trackings"] as? [[String: Any]] {
+            parsedTrackings = trackingsArr.compactMap { tDict -> TrackingIntent? in
+                var tVal: Double? = nil
+                if let val = tDict["trackingValue"] as? Double {
+                    tVal = val
+                } else if let val = tDict["trackingValue"] as? Int {
+                    tVal = Double(val)
+                } else if let valStr = tDict["trackingValue"] as? String {
+                    let replaced = valStr.replacingOccurrences(of: "$", with: "")
+                                         .replacingOccurrences(of: "£", with: "")
+                                         .replacingOccurrences(of: "€", with: "")
+                                         .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if let val = Double(replaced) { tVal = val }
+                }
+                
+                // Only consider it valid if it at least has a value
+                if tVal != nil {
+                    return TrackingIntent(
+                        trackingCategoryId: tDict["trackingCategoryId"] as? String,
+                        trackingValue: tVal,
+                        trackingNote: tDict["trackingNote"] as? String,
+                        trackingDate: parseDate(tDict["trackingDate"])
+                    )
+                }
+                return nil
+            }
+            if parsedTrackings?.isEmpty == true {
+                parsedTrackings = nil
+            }
         }
 
         let start = parseDate(dict["startDate"]) ?? Calendar.current.startOfDay(for: Date()).addingTimeInterval(9*3600)
@@ -1495,7 +1542,9 @@ final class IntentService {
             isScheduled: isScheduled,
             trackingCategoryId: trackingCategoryId,
             trackingValue: trackingValue,
-            trackingNote: trackingNote
+            trackingNote: trackingNote,
+            trackingDate: trackingDate,
+            trackings: parsedTrackings
         )
     }
 
@@ -2188,6 +2237,15 @@ enum InteractionState: Equatable {
     case confirmingTaskConflict(draft: TaskDraft, actionPayload: TaskItem.AgentAction?, conflicts: [TaskItem], suggestions: [Date])
     case collectingConflictDateTime(draft: TaskDraft, actionPayload: TaskItem.AgentAction?)
     case confirmingTrackingRequest(categoryId: UUID, categoryName: String, value: Double, note: String?, rawText: String?, recordDate: Date)
+    case confirmingMultipleTrackingRequests(trackings: [TrackingConfirmationItem], rawText: String?, recordDate: Date)
+}
+
+struct TrackingConfirmationItem: Equatable {
+    var categoryId: UUID
+    var categoryName: String
+    var value: Double
+    var note: String?
+    var recordDate: Date? = nil
 }
 
 struct SimpleContact: Identifiable, Hashable {
@@ -6230,6 +6288,21 @@ extension ContentView {
             return
         }
 
+        if case .confirmingMultipleTrackingRequests(let trackings, let rawText, let recordDate) = interactionState {
+            if isAffirmativeReply(lower) {
+                for item in trackings {
+                    trackingManager.addRecord(categoryId: item.categoryId, value: item.value, note: item.note ?? text, rawText: rawText, date: item.recordDate ?? recordDate)
+                }
+                interactionState = .idle
+                let summary = trackings.map { "\($0.value) for \($0.categoryName)" }.joined(separator: " and ")
+                messages.append(.init(isUser: false, text: "Got it! Recorded \(summary)."))
+            } else {
+                interactionState = .idle
+                messages.append(.init(isUser: false, text: "Okay, I've cancelled those tracking records."))
+            }
+            return
+        }
+
         if !isAIFeatureEnabled && isWeatherInquiry(text) {
             let weatherReply = await weatherService.response(for: text)
             withAnimation {
@@ -6476,34 +6549,79 @@ extension ContentView {
             }
             
             if draft.action == "track" {
-                let value = draft.trackingValue ?? 0.0
-                let rawNote = draft.trackingNote ?? ""
-                let recordDate = draft.startDate ?? Date()
+                // If a top-level trackingDate was provided, that gets priority over the standard 9am startDate fallback
+                let defaultRecordDate = draft.trackingDate ?? (isAIFeatureEnabled ? Date() : (draft.startDate ?? Date()))
                 
-                // See if AI matched to a specific category
-                var matchedCategory: TrackingCategory? = nil
-                if let catIdStr = draft.trackingCategoryId {
-                    if let catId = UUID(uuidString: catIdStr) {
-                        matchedCategory = trackingManager.categories.first { $0.id == catId }
-                    } else {
-                        // AI provided a name instead of UUID in categoryId field
-                        matchedCategory = trackingManager.categories.first { $0.name.localizedCaseInsensitiveContains(catIdStr) }
+                var trackingsToCheck: [TrackingIntent] = draft.trackings ?? []
+                
+                // Fallback to single top-level fields if array is empty
+                if trackingsToCheck.isEmpty {
+                    if draft.trackingCategoryId != nil || draft.trackingValue != nil {
+                        trackingsToCheck.append(TrackingIntent(
+                            trackingCategoryId: draft.trackingCategoryId,
+                            trackingValue: draft.trackingValue,
+                            trackingNote: draft.trackingNote,
+                            trackingDate: draft.trackingDate
+                        ))
                     }
                 }
                 
-                if let cat = matchedCategory {
-                    interactionState = .confirmingTrackingRequest(categoryId: cat.id, categoryName: cat.name, value: value, note: rawNote, rawText: text, recordDate: recordDate)
-                    withAnimation {
-                        messages.append(.init(isUser: false, text: "Do you want to record \(value) for \(cat.name)? (Yes/No)"))
-                    }
-                } else if trackingManager.categories.isEmpty {
+                if trackingManager.categories.isEmpty {
                     withAnimation {
                         messages.append(.init(isUser: false, text: "You don't have any tracking categories set up yet. Go to 'Tracking' in the menu to add one."))
                     }
+                    return
+                }
+                
+                var validItems: [TrackingConfirmationItem] = []
+                var unassignedValues: [Double] = []
+                
+                for item in trackingsToCheck {
+                    let value = item.trackingValue ?? 0.0
+                    let rawNote = item.trackingNote ?? ""
+                    let itemDate = item.trackingDate ?? defaultRecordDate
+                    
+                    var matchedCategory: TrackingCategory? = nil
+                    if let catIdStr = item.trackingCategoryId {
+                        if let catId = UUID(uuidString: catIdStr) {
+                            matchedCategory = trackingManager.categories.first { $0.id == catId }
+                        } else {
+                            matchedCategory = trackingManager.categories.first { $0.name.localizedCaseInsensitiveContains(catIdStr) }
+                        }
+                    }
+                    
+                    if let cat = matchedCategory {
+                        validItems.append(TrackingConfirmationItem(categoryId: cat.id, categoryName: cat.name, value: value, note: rawNote, recordDate: itemDate))
+                    } else {
+                        unassignedValues.append(value)
+                    }
+                }
+                
+                if validItems.count > 1 {
+                    interactionState = .confirmingMultipleTrackingRequests(trackings: validItems, rawText: text, recordDate: defaultRecordDate)
+                    let summary = validItems.map { "\($0.value) for \($0.categoryName)" }.joined(separator: " and ")
+                    var prompt = "Do you want to record \(summary)?"
+                    if !unassignedValues.isEmpty {
+                        prompt += " (Some values couldn't be matched to categories.)"
+                    }
+                    withAnimation {
+                        messages.append(.init(isUser: false, text: prompt + " (Yes/No)"))
+                    }
+                } else if validItems.count == 1 {
+                    let cat = validItems[0]
+                    interactionState = .confirmingTrackingRequest(categoryId: cat.categoryId, categoryName: cat.categoryName, value: cat.value, note: cat.note, rawText: text, recordDate: cat.recordDate ?? defaultRecordDate)
+                    var prompt = "Do you want to record \(cat.value) for \(cat.categoryName)?"
+                    if !unassignedValues.isEmpty {
+                        prompt += " (Other values couldn't be matched.)"
+                    }
+                    withAnimation {
+                        messages.append(.init(isUser: false, text: prompt + " (Yes/No)"))
+                    }
                 } else {
                     let catNames = trackingManager.categories.map { $0.name }.joined(separator: ", ")
+                    let vals = unassignedValues.map { String($0) }.joined(separator: ", ")
                     withAnimation {
-                        messages.append(.init(isUser: false, text: "I see you want to track a value (\(value)), but I couldn't clearly match it to a category. Available categories are: \(catNames). Please specify."))
+                        messages.append(.init(isUser: false, text: "I see you want to track \(vals), but I couldn't clearly match them to any category. Available categories are: \(catNames). Please specify."))
                     }
                 }
                 return

@@ -71,6 +71,12 @@ struct HelpView: View {
             iconName: "person.2.fill",
             userLine: "user: Summarize my work and personal task progress with a chart.",
             agentLine: "agent: I generated a status chart and highlighted how many Work and Personal tasks are completed, overdue, and upcoming."
+        ),
+        HelpUseCase(
+            title: "Track Custom Data",
+            iconName: "chart.line.uptrend.xyaxis",
+            userLine: "user: Track $15 for lunch and 30 minutes of running.",
+            agentLine: "agent: I logged $15 under 'Spending' and 30 under 'Fitness'. You can view your history in the tracking dashboard."
         )
     ]
 

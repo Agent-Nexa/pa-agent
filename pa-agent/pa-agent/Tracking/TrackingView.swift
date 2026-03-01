@@ -28,26 +28,6 @@ struct TrackingCategoriesView: View {
                                         .foregroundColor(.secondary)
                                 }
                             }
-                            
-                            Spacer()
-                            
-                            NavigationLink(destination: DashboardView(manager: trackingManager, category: category)) {
-                                EmptyView()
-                            }
-                            .frame(width: 0)
-                            .opacity(0)
-                            
-                            Button(action: {}) {
-                                Image(systemName: "chart.bar")
-                                    .foregroundColor(.blue)
-                            }
-                            .buttonStyle(PlainButtonStyle())
-                            .overlay(
-                                NavigationLink(destination: DashboardView(manager: trackingManager, category: category)) {
-                                    EmptyView()
-                                }
-                                .opacity(0)
-                            )
                         }
                     }
                 }
@@ -55,7 +35,10 @@ struct TrackingCategoriesView: View {
             }
             .navigationTitle("Tracking Categories")
             .toolbar {
-                ToolbarItem(placement: .primaryAction) {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    NavigationLink(destination: DashboardView(manager: trackingManager)) {
+                        Image(systemName: "chart.bar")
+                    }
                     Button(action: { showingAddCategory = true }) {
                         Image(systemName: "plus")
                     }
