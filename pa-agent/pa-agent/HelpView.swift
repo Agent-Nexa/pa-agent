@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 #if canImport(Charts)
 import Charts
 #endif
@@ -204,5 +205,191 @@ private struct HelpDiagramSampleView: View {
 #Preview {
     NavigationStack {
         HelpView()
+    }
+}
+
+// MARK: - Daily Tips Feature
+
+struct DailyTip {
+    let text: String
+    let icon: String // SF Symbol 
+}
+
+class DailyTipManager: ObservableObject {
+    static let shared = DailyTipManager()
+    
+    let defaultTips: [DailyTip] = [
+        DailyTip(text: "Tip: You can create tracking categories in Tracking menu and ask the agent to track your spending. E.g. \"I spent $17 on lunch today\".", icon: "chart.pie.fill"),
+        DailyTip(text: "Tip: Simply scan an invoice or receipt, and the agent will record the expenses for you automatically.", icon: "doc.viewfinder"),
+        DailyTip(text: "Did you know? You can ask the agent to remind you about important tasks just by using your voice.", icon: "mic.fill"),
+        DailyTip(text: "Save important notes by asking the agent to remember them. Access them later from the Saved Items.", icon: "bookmark.fill"),
+        DailyTip(text: "Send quick emails or text messages by telling the agent who to contact and what to say.", icon: "paperplane.fill")
+    ]
+    
+    @Published var currentTip: DailyTip?
+    
+    @AppStorage("lastTipDate") private var lastTipDateStr: String = ""
+    @AppStorage("lastTipIndex") private var lastTipIndex: Int = -1
+    
+    // For AI generation
+    @AppStorage("OPENAI_API_KEY") private var storedApiKey: String = ""
+    @AppStorage("OPENAI_MODEL") private var storedModel: String = "gpt-5.2"
+    @AppStorage("OPENAI_USE_AZURE") private var useAzure: Bool = true
+    @AppStorage("OPENAI_AZURE_ENDPOINT") private var azureEndpoint: String = ""
+    @AppStorage("AGENT_NAME") private var agentName: String = "Nexa"
+    
+    init() {
+        updateTipIfNeeded()
+    }
+    
+    func updateTipIfNeeded() {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        let today = formatter.string(from: Date())
+        
+        if lastTipDateStr != today {
+            lastTipDateStr = today
+            lastTipIndex = (lastTipIndex + 1) % defaultTips.count
+            
+            // Generate a fresh tip in the background if AI is configured
+            Task {
+                await generateAITip()
+            }
+        }
+        
+        if lastTipIndex < 0 || lastTipIndex >= defaultTips.count {
+            lastTipIndex = 0
+        }
+        
+        currentTip = defaultTips[lastTipIndex]
+    }
+    
+    @MainActor
+    private func generateAITip() async {
+        let rawKey = storedApiKey
+        guard !rawKey.isEmpty || useAzure else { return }
+        
+        let chosenModel = storedModel.isEmpty ? "gpt-4o" : storedModel
+        
+        let endpointURL: URL
+        if useAzure {
+            guard var azureString = azureEndpoint.isEmpty == false ? azureEndpoint : nil else { return }
+            azureString = azureString.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let range = azureString.range(of: "/deployments/[^/]+/", options: .regularExpression) {
+                azureString.replaceSubrange(range, with: "/deployments/\(chosenModel)/")
+            }
+            guard let scriptUrl = URL(string: azureString) else { return }
+            endpointURL = scriptUrl
+        } else {
+            endpointURL = URL(string: "https://api.openai.com/v1/chat/completions")!
+        }
+        
+        var request = URLRequest(url: endpointURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        if useAzure {
+            if !storedApiKey.isEmpty {
+                request.setValue(storedApiKey, forHTTPHeaderField: "api-key")
+            }
+        } else {
+            request.setValue("Bearer \(storedApiKey)", forHTTPHeaderField: "Authorization")
+        }
+        
+        let systemPrompt = """
+        You are \(agentName), a helpful AI assistant. Generate a short, scenario-based daily tip (1-2 sentences) about how the user can use your features. 
+        
+        Your ONLY features include: 
+        - Managing tasks & reminders
+        - Tracking daily habits, weight, calories, or spending (e.g. users can say "I spent $17 on lunch today" or "I ate 500 calories", "Track my weight 70kg")
+        - Scanning receipts or invoices to automatically record expenses
+        - Remembering facts or notes for the user
+        - Sending text messages or emails to contacts
+        
+        CRITICAL RULES:
+        - Do NOT hallucinate features. You cannot set automatic threshold triggers (like warning about budget limits) or do complex automated integrations not listed above. Only describe actions the user can explicitly ask you to do right now, one-by-one.
+        - Be creative, engaging, and scenario-based. For example: "Are you trying to manage your weight? \(agentName) can help you track your calorie intake just by telling me!" or "\(agentName) can help you control your spending. Just scan a receipt and I'll log it for you."
+        - Do not use quotes around the tip. Return the tip as a plain string.
+        """
+        
+        let bodyPayload: [String: Any] = [
+            "model": chosenModel,
+            "temperature": 0.8,
+            "messages": [
+                ["role": "system", "content": systemPrompt]
+            ]
+        ]
+        
+        request.httpBody = try? JSONSerialization.data(withJSONObject: bodyPayload)
+        
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else { return }
+            
+            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let choices = json["choices"] as? [[String: Any]],
+               let first = choices.first,
+               let message = first["message"] as? [String: Any],
+               let content = message["content"] as? String {
+                
+                let cleanedTip = content.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "\"", with: "")
+                
+                if !cleanedTip.isEmpty {
+                    // Update the UI with the fresh AI tip and pick a suitable icon
+                    let iconNames = ["sparkles", "lightbulb.fill", "star.fill", "bolt.fill", "wand.and.stars"]
+                    let randomIcon = iconNames.randomElement() ?? "sparkles"
+                    
+                    self.currentTip = DailyTip(text: cleanedTip, icon: randomIcon)
+                }
+            }
+        } catch {
+            print("Failed to generate AI tip: \\(error)")
+        }
+    }
+}
+
+struct DailyTipBanner: View {
+    @StateObject private var tipManager = DailyTipManager.shared
+    @State private var isVisible = true
+    
+    var body: some View {
+        if isVisible, let tip = tipManager.currentTip {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: tip.icon)
+                    .foregroundColor(.yellow)
+                    .font(.title2)
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Daily Tip")
+                        .font(.caption)
+                        .fontWeight(.bold)
+                        .foregroundColor(.secondary)
+                    
+                    Text(tip.text)
+                        .font(.subheadline)
+                        .foregroundColor(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                
+                Spacer()
+                
+                Button(action: {
+                    withAnimation {
+                        isVisible = false
+                    }
+                }) {
+                    Image(systemName: "xmark")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(4)
+                }
+            }
+            .padding(12)
+            .background(Color(.secondarySystemGroupedBackground))
+            .cornerRadius(12)
+            .shadow(color: Color.black.opacity(0.05), radius: 5, x: 0, y: 2)
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+        }
     }
 }

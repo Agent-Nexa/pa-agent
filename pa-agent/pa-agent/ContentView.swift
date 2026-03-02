@@ -3159,6 +3159,7 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 header
                 Divider()
+                DailyTipBanner()
                 chatArea
                 Divider()
                 inputBar
