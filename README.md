@@ -37,6 +37,7 @@ Nexa (formerly PA-Agent) is a SwiftUI personal assistant app that combines local
 
 ### Notifications
 - Local reminder scheduling for tasks.
+- Inactivity "Heartbeat" feature that locally schedules engaging check-in reminders after 3 days of disuse, resetting automatically when the user chats or backgrounds the app.
 - In-app notification history with unread tracking and badge count updates.
 - Notification center UI: mark all read, clear all, delete individual entries.
 

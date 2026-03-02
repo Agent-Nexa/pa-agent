@@ -223,7 +223,8 @@ class DailyTipManager: ObservableObject {
         DailyTip(text: "Tip: Simply scan an invoice or receipt, and the agent will record the expenses for you automatically.", icon: "doc.viewfinder"),
         DailyTip(text: "Did you know? You can ask the agent to remind you about important tasks just by using your voice.", icon: "mic.fill"),
         DailyTip(text: "Save important notes by asking the agent to remember them. Access them later from the Saved Items.", icon: "bookmark.fill"),
-        DailyTip(text: "Send quick emails or text messages by telling the agent who to contact and what to say.", icon: "paperplane.fill")
+        DailyTip(text: "Send quick emails or text messages by telling the agent who to contact and what to say.", icon: "paperplane.fill"),
+        DailyTip(text: "Make it personal! Go to Settings to give the agent a custom name, and tell it your name so it greets you personally.", icon: "person.text.rectangle.fill")
     ]
     
     @Published var currentTip: DailyTip?
@@ -237,6 +238,7 @@ class DailyTipManager: ObservableObject {
     @AppStorage("OPENAI_USE_AZURE") private var useAzure: Bool = true
     @AppStorage("OPENAI_AZURE_ENDPOINT") private var azureEndpoint: String = ""
     @AppStorage("AGENT_NAME") private var agentName: String = "Nexa"
+    @AppStorage("USER_NAME") private var userName: String = ""
     
     init() {
         updateTipIfNeeded()
@@ -296,8 +298,10 @@ class DailyTipManager: ObservableObject {
             request.setValue("Bearer \(storedApiKey)", forHTTPHeaderField: "Authorization")
         }
         
+        let greeting = userName.isEmpty ? "the user" : userName
+        
         let systemPrompt = """
-        You are \(agentName), a helpful AI assistant. Generate a short, scenario-based daily tip (1-2 sentences) about how the user can use your features. 
+        You are \(agentName), a helpful AI assistant talking to \(greeting). Generate a short, scenario-based daily tip (1-2 sentences) about how \(greeting) can use your features. 
         
         Your ONLY features include: 
         - Managing tasks & reminders
@@ -305,6 +309,7 @@ class DailyTipManager: ObservableObject {
         - Scanning receipts or invoices to automatically record expenses
         - Remembering facts or notes for the user
         - Sending text messages or emails to contacts
+        - Profile customization (users can change the agent's name in Settings and set their own name so the agent addresses them personally)
         
         CRITICAL RULES:
         - Do NOT hallucinate features. You cannot set automatic threshold triggers (like warning about budget limits) or do complex automated integrations not listed above. Only describe actions the user can explicitly ask you to do right now, one-by-one.
