@@ -61,6 +61,7 @@ struct IntentResult: Codable {
     // Delegation fields
     var performer: String? = "user" // "user" or "agent"
     var isScheduled: Bool? = false // inferred from presence of dates vs "now"
+    var actionConfirmed: Bool? = false // indicates the user has already confirmed an action prompt
     
     // Tracking fields
     var trackingCategoryId: String? = nil
@@ -474,9 +475,12 @@ final class IntentService {
            - IF the user mentions a specific date or time for the tracking (e.g. "yesterday", "last night"), you MUST provide it in 'trackingDate' using YYYY-MM-DD HH:mm format.
            - Alternatively, if there is only one tracking item, you may extract it into the top-level 'trackingValue', 'trackingNote', 'trackingCategoryId', and 'trackingDate'.
 
-        6. CONTEXTUAL FOLLOW-UPS (Crucial for "yes/no" answers):
-           - When the user replies with a simple "yes", "sure", or "do it", read the `RECENT_CHAT` in APP CONTEXT.
-           - If the Agent recently asked "Would you like me to track/record this expense?" and the user said "yes", you MUST return action='track' and extract the value and category mentioned in the `RECENT_CHAT`. Do NOT return action='task'.
+        6. CONTEXTUAL FOLLOW-UPS AND INTENT CLARIFICATION:
+           - When the user sends an image (e.g., photo of an apple) and there is no obvious action, OR if the context is ambiguous, use your AI reasoning to infer the user's intent. Filter the TRACKING_CATEGORIES to ONLY those uniquely relevant to the photo's real-world context.
+           - Do NOT mention or list irrelevant categories to the user. Only mention the category you believe is a match. For a food item, logically propose categories like Calories or Expenses.
+           - Propose a relevant tracking action instead of saying you don't know what to do. Estimate the value of the item in the photo (e.g., estimating calories for food, guessing typical price). Return action='answer' with your clarifying question asking the user if they want to track it and suggest your estimated value (e.g. "This looks like an apple. Would you like me to track 95 calories for it?"). Do NOT return action='track' just because you see an image. You MUST ask first.
+           - When the user replies with a simple "yes", "sure", "do it", or confirms one of your options (e.g., "calories"), read the `CHAT_RECENT` in APP CONTEXT to understand what they are confirming.
+           - If the Agent recently asked "Would you like me to track/record this expense?" or proposed a tracking category, and the user said "yes" or chose an option, you MUST return action='track' and extract the value and category mentioned in the `CHAT_RECENT`. Do NOT return action='task'. You MUST also set "actionConfirmed": true.
 
         JSON OUTPUT FORMAT:
         {
@@ -493,6 +497,7 @@ final class IntentService {
           "answer": "...",
           "performer": "user" | "agent",
           "isScheduled": true | false,
+          "actionConfirmed": true | false,
           "trackingCategoryId": "...",
           "trackingValue": 123.45,
           "trackingNote": "...",
@@ -506,7 +511,7 @@ final class IntentService {
         let userMessageContent: Any
         if let imageDataURL, !imageDataURL.isEmpty {
             userMessageContent = [
-                ["type": "text", "text": text.isEmpty ? "Please analyze this image and respond based on what you see." : text],
+                ["type": "text", "text": text.isEmpty ? "Please analyze this image, intelligently deduce the true intent, estimate relevant metric values (like calories or cost) from the subject, and if applicable, formulate a question to ask the user if they'd like to track that specific estimated value." : text],
                 ["type": "image_url", "image_url": ["url": imageDataURL]]
             ]
         } else {
@@ -612,13 +617,15 @@ final class IntentService {
         Answer naturally and helpfully in plain text.
         Keep responses concise unless the user asks for detail.
         Use APP CONTEXT when provided and do not claim you cannot access it.
+        If the user sends an image or a message and there is no explicit command but it relates to a topic in TRACKING_CATEGORIES, use AI reasoning to ONLY suggest categories logically relevant to the item's real-world context (e.g., food usually maps to Calories or Expense). Do NOT list out irrelevant categories or say why they don't fit. Just act naturally.
+        CRITICAL: If you identify a relevant tracking category for the image/message, you MUST estimate the value from the picture logically (e.g., estimating calories for food, extracting the total cost from an invoice) and explicitly ask the user for confirmation using that estimated value (e.g., "This looks like an invoice for $241.50. Would you like me to log this expense?"). If NO tracking category matches naturally, just answer the prompt normally without mentioning tracking.
         \(contextBlock)
         """
 
         let userMessageContent: Any
         if let imageDataURL, !imageDataURL.isEmpty {
             userMessageContent = [
-                ["type": "text", "text": text.isEmpty ? "Please analyze this image and answer the user request." : text],
+                ["type": "text", "text": text.isEmpty ? "Please analyze this image, intelligently deduce the true intent, logically estimate the subject's metric value (e.g. calories, price), and explicitly ask the user if they'd like to track that specific estimated value." : text],
                 ["type": "image_url", "image_url": ["url": imageDataURL]]
             ]
         } else {
@@ -1442,6 +1449,7 @@ final class IntentService {
         
         // Delegation
         let performer = dict["performer"] as? String ?? "user"
+        let actionConfirmed = dict["actionConfirmed"] as? Bool ?? false
         // Heuristic: if dates are present and action is not 'task', it might be scheduled
         let startDateStr = dict["startDate"] as? String
         let isScheduled = (startDateStr != nil)
@@ -1540,6 +1548,7 @@ final class IntentService {
             answer: answer,
             performer: performer,
             isScheduled: isScheduled,
+            actionConfirmed: actionConfirmed,
             trackingCategoryId: trackingCategoryId,
             trackingValue: trackingValue,
             trackingNote: trackingNote,
@@ -6621,24 +6630,50 @@ extension ContentView {
                 }
                 
                 if validItems.count > 1 {
-                    interactionState = .confirmingMultipleTrackingRequests(trackings: validItems, rawText: text, recordDate: defaultRecordDate)
                     let summary = validItems.map { "\($0.value) for \($0.categoryName)" }.joined(separator: " and ")
-                    var prompt = "Do you want to record \(summary)?"
-                    if !unassignedValues.isEmpty {
-                        prompt += " (Some values couldn't be matched to categories.)"
-                    }
-                    withAnimation {
-                        messages.append(.init(isUser: false, text: prompt + " (Yes/No)"))
+                    if draft.actionConfirmed == true {
+                        for item in validItems {
+                            trackingManager.addRecord(
+                                categoryId: item.categoryId,
+                                value: item.value,
+                                note: item.note,
+                                date: item.recordDate ?? defaultRecordDate
+                            )
+                        }
+                        withAnimation {
+                            messages.append(.init(isUser: false, text: "Done! Recorded \(summary)."))
+                        }
+                    } else {
+                        interactionState = .confirmingMultipleTrackingRequests(trackings: validItems, rawText: text, recordDate: defaultRecordDate)
+                        var prompt = "Do you want to record \(summary)?"
+                        if !unassignedValues.isEmpty {
+                            prompt += " (Some values couldn't be matched to categories.)"
+                        }
+                        withAnimation {
+                            messages.append(.init(isUser: false, text: prompt + " (Yes/No)"))
+                        }
                     }
                 } else if validItems.count == 1 {
                     let cat = validItems[0]
-                    interactionState = .confirmingTrackingRequest(categoryId: cat.categoryId, categoryName: cat.categoryName, value: cat.value, note: cat.note, rawText: text, recordDate: cat.recordDate ?? defaultRecordDate)
-                    var prompt = "Do you want to record \(cat.value) for \(cat.categoryName)?"
-                    if !unassignedValues.isEmpty {
-                        prompt += " (Other values couldn't be matched.)"
-                    }
-                    withAnimation {
-                        messages.append(.init(isUser: false, text: prompt + " (Yes/No)"))
+                    if draft.actionConfirmed == true {
+                        trackingManager.addRecord(
+                            categoryId: cat.categoryId,
+                            value: cat.value,
+                            note: cat.note,
+                            date: cat.recordDate ?? defaultRecordDate
+                        )
+                        withAnimation {
+                            messages.append(.init(isUser: false, text: "Done! Recorded \(cat.value) for \(cat.categoryName)."))
+                        }
+                    } else {
+                        interactionState = .confirmingTrackingRequest(categoryId: cat.categoryId, categoryName: cat.categoryName, value: cat.value, note: cat.note, rawText: text, recordDate: cat.recordDate ?? defaultRecordDate)
+                        var prompt = "Do you want to record \(cat.value) for \(cat.categoryName)?"
+                        if !unassignedValues.isEmpty {
+                            prompt += " (Other values couldn't be matched.)"
+                        }
+                        withAnimation {
+                            messages.append(.init(isUser: false, text: prompt + " (Yes/No)"))
+                        }
                     }
                 } else {
                     let catNames = trackingManager.categories.map { $0.name }.joined(separator: ", ")
