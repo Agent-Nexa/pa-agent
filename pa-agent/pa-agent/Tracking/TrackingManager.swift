@@ -26,6 +26,14 @@ class TrackingManager: ObservableObject {
         save()
     }
     
+    func updateCategory(id: UUID, name: String, unit: String?) {
+        if let index = categories.firstIndex(where: { $0.id == id }) {
+            categories[index].name = name
+            categories[index].unit = unit
+            save()
+        }
+    }
+    
     func deleteCategory(at offsets: IndexSet) {
         let idsToDelete = offsets.map { categories[$0].id }
         categories.remove(atOffsets: offsets)
@@ -37,6 +45,15 @@ class TrackingManager: ObservableObject {
         let record = TrackingRecord(categoryId: categoryId, value: value, note: note, date: date, rawText: rawText)
         records.append(record)
         save()
+    }
+    
+    func updateRecord(id: UUID, value: Double, note: String?, date: Date) {
+        if let index = records.firstIndex(where: { $0.id == id }) {
+            records[index].value = value
+            records[index].note = note
+            records[index].date = date
+            save()
+        }
     }
     
     func records(for categoryId: UUID) -> [TrackingRecord] {
