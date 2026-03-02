@@ -174,7 +174,7 @@ struct TrackingRecordListView: View {
                         }
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                             Button(role: .destructive) {
-                                if let index = manager.records.firstIndex(where: { $0.id == record.id }) {
+                                if let index = categoryRecords.firstIndex(where: { $0.id == record.id }) {
                                     manager.deleteRecord(at: IndexSet(integer: index), for: category.id)
                                 }
                             } label: {
