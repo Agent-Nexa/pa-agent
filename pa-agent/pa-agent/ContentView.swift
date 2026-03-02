@@ -3182,6 +3182,9 @@ struct ContentView: View {
                      Task { await refreshSystemTasks() }
                 } else if newPhase == .inactive || newPhase == .background {
                     ChatHistoryStore.shared.flushMessages(messages)
+                    if newPhase == .background {
+                        NotificationManager.shared.scheduleInactivityReminder(days: 3)
+                    }
                 }
             }
             .navigationBarHidden(true)
@@ -5343,6 +5346,9 @@ extension ContentView {
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         let attachment = pendingAttachment
         guard !trimmed.isEmpty || attachment != nil else { return }
+
+        // Reset inactivity timer when user sends a message
+        NotificationManager.shared.scheduleInactivityReminder(days: 3)
 
         let messageText = composeUserVisibleMessage(text: trimmed, attachment: attachment)
         let intentInput = composeIntentInput(text: trimmed, attachment: attachment)
@@ -7965,6 +7971,15 @@ extension ContentView {
     private func setupNotifications() {
         UNUserNotificationCenter.current().getNotificationSettings { settings in
             print("Notification status: \(settings.authorizationStatus.rawValue)")
+            if settings.authorizationStatus == .notDetermined {
+                UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { granted, error in 
+                    if granted {
+                        NotificationManager.shared.scheduleInactivityReminder(days: 3)
+                    }
+                }
+            } else if settings.authorizationStatus == .authorized {
+                NotificationManager.shared.scheduleInactivityReminder(days: 3)
+            }
         }
     }
 

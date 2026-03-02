@@ -27,11 +27,17 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 @main
 struct nexaApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    @Environment(\.scenePhase) var scenePhase
     
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .preferredColorScheme(.light)
+        }
+        .onChange(of: scenePhase) { newPhase in
+            if newPhase == .background {
+                NotificationManager.shared.scheduleInactivityReminder(days: 3)
+            }
         }
     }
 }

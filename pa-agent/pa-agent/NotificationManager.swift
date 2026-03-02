@@ -93,3 +93,43 @@ class NotificationManager: NSObject, ObservableObject {
         notifications = Array(notifications.prefix(maxStoredNotifications))
     }
 }
+
+extension NotificationManager {
+    
+    /// Call this when the app launches or when the user sends a message to the agent
+    func scheduleInactivityReminder(days: Double = 3.0) {
+        let center = UNUserNotificationCenter.current()
+        let identifier = "nexa_inactivity_reminder"
+        
+        // Cancel the previously scheduled reminder (resetting the timer)
+        center.removePendingNotificationRequests(withIdentifiers: [identifier])
+        
+        // Determine the dynamically configured agent name
+        let agentName = UserDefaults.standard.string(forKey: "AGENT_NAME") ?? "Nexa"
+        
+        // Create the engaging content
+        let content = UNMutableNotificationContent()
+        content.title = "\(agentName) misses you! 👋"
+        content.body = "Quiet day? Check in with \(agentName) to brainstorm your next big idea or see what's new."
+        content.sound = .default
+        
+        // Set the trigger time
+        let timeInterval: TimeInterval = days * 24 * 60 * 60
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: timeInterval, repeats: false)
+        
+        // Schedule the notification locally
+        let request = UNNotificationRequest(identifier: identifier, content: content, trigger: trigger)
+        
+        center.add(request) { error in
+            if let error = error {
+                print("Failed to schedule reminder: \(error.localizedDescription)")
+            }
+        }
+    }
+    
+    /// Optional: Call this if they explicitly log out, or if you want to turn the reminder off entirely
+    func cancelInactivityReminder() {
+        UNUserNotificationCenter.current()
+            .removePendingNotificationRequests(withIdentifiers: ["nexa_inactivity_reminder"])
+    }
+}
