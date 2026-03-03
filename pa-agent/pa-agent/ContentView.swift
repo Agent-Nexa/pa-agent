@@ -321,7 +321,7 @@ struct TaskItem: Identifiable, Hashable, Codable {
     }
 
     func isOverdue(now: Date = Date(), ignoringOlderThanMonths months: Int = 1) -> Bool {
-        guard status == .open, !isDone, dueDate < now else { return false }
+        guard type != .calendar, status == .open, !isDone, dueDate < now else { return false }
         guard let cutoff = Calendar.current.date(byAdding: .month, value: -months, to: now) else {
             return dueDate < now
         }
@@ -329,7 +329,7 @@ struct TaskItem: Identifiable, Hashable, Codable {
     }
 
     func isStaleOverdue(now: Date = Date(), months: Int = 1) -> Bool {
-        guard status == .open, !isDone else { return false }
+        guard type != .calendar, status == .open, !isDone else { return false }
         guard let cutoff = Calendar.current.date(byAdding: .month, value: -months, to: now) else {
             return false
         }
@@ -434,7 +434,7 @@ final class IntentService {
         You are \(agentName), an intelligent personal assistant. \(userContext) The current time is \(nowString) (\(weekdayStr)).
         \(contextBlock)
         
-        Your brain is powered by advanced AI. When you receive a request, THINK about what the user really wants.
+        Your brain is powered by advanced AI. When you receive a request, THINK about what the user really wants. Answer ONLY what the user asks—do not proactively remind them of tasks, notifications, or append unprompted questions about ANY other items in their context.
         
         SUPPORTED CAPABILITIES:
         1. Manage Tasks (Action: 'task'): Add a task or scheduled reminder to the task list.
@@ -469,6 +469,7 @@ final class IntentService {
               - For action='answer', set 'title' to a short meaningful label (3-8 words) that summarizes the response topic.
               - If the user asks for summaries/status (e.g. "summarize today's tasks", "how busy am I next week", "what did I do today", "what notifications do I have"), use APP CONTEXT to answer concretely.
               - If the user asks about their schedule, calendar, conflicts, busyness or "how busy am I": you MUST return action='answer'. Do not create tasks or events from their inquiry. Look at UPCOMING tasks in APP CONTEXT to determine how busy they are, summarize those tasks, mention any conflicts naturally, and respond conversationally.
+           - CRITICAL: Do NOT spontaneously bring up, ask about, or mention ANY uncompleted/overdue tasks, unread notifications, reminders, or any other items from APP CONTEXT unless the user explicitly asks about them.
               - Never say you cannot access the data if APP CONTEXT is provided.
                   - Do NOT simulate in-app control flow in plain text (no “reply yes to open mail app” instructions). Use 'sendEmail' instead whenever email drafting + confirmation is needed.
         
@@ -622,6 +623,7 @@ final class IntentService {
         You are \(agentName), an intelligent personal assistant. \(userContext)
         Answer naturally and helpfully in plain text.
         Keep responses concise unless the user asks for detail.
+        CRITICAL: Do NOT spontaneously bring up, ask about, or mention ANY uncompleted/overdue tasks, unread notifications, reminders, or any other items from APP CONTEXT unless the user explicitly asks about them. Answer ONLY what the user asked.
         Use APP CONTEXT when provided and do not claim you cannot access it.
         If the user sends an image or a message and there is no explicit command but it relates to a topic in TRACKING_CATEGORIES, use AI reasoning to ONLY suggest categories logically relevant to the item's real-world context (e.g., food usually maps to Calories or Expense). Do NOT list out irrelevant categories or say why they don't fit. Just act naturally.
         CRITICAL: If you identify a relevant tracking category for the image/message, you MUST estimate the value from the picture logically (e.g., estimating calories for food, extracting the total cost from an invoice) and explicitly ask the user for confirmation using that estimated value (e.g., "This looks like an invoice for $241.50. Would you like me to log this expense?"). If NO tracking category matches naturally, just answer the prompt normally without mentioning tracking.
