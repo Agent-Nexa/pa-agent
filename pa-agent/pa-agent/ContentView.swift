@@ -64,7 +64,8 @@ struct IntentResult: Codable {
     var actionConfirmed: Bool? = false // indicates the user has already confirmed an action prompt
     
     // Tracking fields
-    var trackingCategoryId: String? = nil
+    var trackingCategoryId: String?
+    var trackingUnit: String? = nil
     var trackingValue: Double? = nil
     var trackingNote: String? = nil
     var trackingDate: Date? = nil
@@ -75,6 +76,7 @@ struct IntentResult: Codable {
 
 struct TrackingIntent: Codable {
     var trackingCategoryId: String?
+    var trackingUnit: String?
     var trackingValue: Double?
     var trackingNote: String?
     var trackingDate: Date?
@@ -473,7 +475,7 @@ final class IntentService {
         5. TRACKING:
            - If the user provides a value that seems like tracking a metric (e.g. "I spent 50$ on lunch", "just ran 5km", "my weight is 70kg"), return action='track'.
            - IF there are multiple tracking items in the same message (e.g. "spent 50 on lunch and weight is 70kg"), extract ALL of them into the 'trackings' array.
-           - For EACH tracking item, extract the value as a number into 'trackingValue', put the context into 'trackingNote', and select the most semantically appropriate category from the TRACKING_CATEGORIES list, providing its exact ID in 'trackingCategoryId' (or null if no match).
+           - For EACH tracking item, extract the value as a number into 'trackingValue', extract the appropriate unit (like kg, hours, g) into 'trackingUnit' if implied (or null), put the context into 'trackingNote', and select the most semantically appropriate category from the TRACKING_CATEGORIES list, providing its exact ID in 'trackingCategoryId'. If there is no good match, invent a short, plain new category name (like 'sports' or 'reading') and put it in 'trackingCategoryId'.
            - IF the user mentions a specific date or time for the tracking (e.g. "yesterday", "last night"), you MUST provide it in 'trackingDate' using YYYY-MM-DD HH:mm format.
            - Alternatively, if there is only one tracking item, you may extract it into the top-level 'trackingValue', 'trackingNote', 'trackingCategoryId', and 'trackingDate'.
 
@@ -501,11 +503,13 @@ final class IntentService {
           "isScheduled": true | false,
           "actionConfirmed": true | false,
           "trackingCategoryId": "...",
+          "trackingUnit": "...",
           "trackingValue": 123.45,
           "trackingNote": "...",
           "trackingDate": "YYYY-MM-DD HH:mm",
           "trackings": [
-             { "trackingCategoryId": "...", "trackingValue": 123.45, "trackingNote": "...", "trackingDate": "YYYY-MM-DD HH:mm" }
+             { "trackingCategoryId": "...",
+          "trackingUnit": "...", "trackingValue": 123.45, "trackingNote": "...", "trackingDate": "YYYY-MM-DD HH:mm" }
           ]
         Respond ONLY with valid JSON.
         """
@@ -1489,6 +1493,7 @@ final class IntentService {
             if let val = Double(replaced) { trackingValue = val }
         }
         let trackingNote = dict["trackingNote"] as? String
+        let trackingUnit = dict["trackingUnit"] as? String
         let trackingDate = parseDate(dict["trackingDate"])
         
         var parsedTrackings: [TrackingIntent]? = nil
@@ -1511,6 +1516,7 @@ final class IntentService {
                 if tVal != nil {
                     return TrackingIntent(
                         trackingCategoryId: tDict["trackingCategoryId"] as? String,
+                        trackingUnit: tDict["trackingUnit"] as? String,
                         trackingValue: tVal,
                         trackingNote: tDict["trackingNote"] as? String,
                         trackingDate: parseDate(tDict["trackingDate"])
@@ -1552,6 +1558,7 @@ final class IntentService {
             isScheduled: isScheduled,
             actionConfirmed: actionConfirmed,
             trackingCategoryId: trackingCategoryId,
+            trackingUnit: trackingUnit,
             trackingValue: trackingValue,
             trackingNote: trackingNote,
             trackingDate: trackingDate,
@@ -6646,6 +6653,7 @@ extension ContentView {
                     if draft.trackingCategoryId != nil || draft.trackingValue != nil {
                         trackingsToCheck.append(TrackingIntent(
                             trackingCategoryId: draft.trackingCategoryId,
+                            trackingUnit: draft.trackingUnit,
                             trackingValue: draft.trackingValue,
                             trackingNote: draft.trackingNote,
                             trackingDate: draft.trackingDate
@@ -6679,6 +6687,13 @@ extension ContentView {
                     
                     if let cat = matchedCategory {
                         validItems.append(TrackingConfirmationItem(categoryId: cat.id, categoryName: cat.name, value: value, note: rawNote, recordDate: itemDate))
+                    } else if let catIdStr = item.trackingCategoryId {
+                        trackingManager.addCategory(name: catIdStr, unit: item.trackingUnit)
+                        if let newCat = trackingManager.categories.first(where: { $0.name == catIdStr }) {
+                            validItems.append(TrackingConfirmationItem(categoryId: newCat.id, categoryName: newCat.name, value: value, note: rawNote, recordDate: itemDate))
+                        } else {
+                            unassignedValues.append(value)
+                        }
                     } else {
                         unassignedValues.append(value)
                     }
