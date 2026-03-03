@@ -321,7 +321,7 @@ struct TaskItem: Identifiable, Hashable, Codable {
     }
 
     func isOverdue(now: Date = Date(), ignoringOlderThanMonths months: Int = 1) -> Bool {
-        guard type != .calendar, status == .open, !isDone, dueDate < now else { return false }
+        guard status == .open, !isDone, dueDate < now else { return false }
         guard let cutoff = Calendar.current.date(byAdding: .month, value: -months, to: now) else {
             return dueDate < now
         }
@@ -329,7 +329,7 @@ struct TaskItem: Identifiable, Hashable, Codable {
     }
 
     func isStaleOverdue(now: Date = Date(), months: Int = 1) -> Bool {
-        guard type != .calendar, status == .open, !isDone else { return false }
+        guard status == .open, !isDone else { return false }
         guard let cutoff = Calendar.current.date(byAdding: .month, value: -months, to: now) else {
             return false
         }
@@ -3609,41 +3609,76 @@ struct ContentView: View {
             }
         }
     }
+
+    private func indexOfTaskInCurrentList(_ task: TaskItem) -> Int? {
+        if let exact = tasks.firstIndex(where: { $0.id == task.id }) {
+            return exact
+        }
+
+        if let externalId = task.externalId, !externalId.isEmpty {
+            if let byExternalId = tasks.firstIndex(where: {
+                $0.type == task.type
+                    && $0.externalId == externalId
+                    && abs($0.startDate.timeIntervalSince(task.startDate)) <= 120
+            }) {
+                return byExternalId
+            }
+
+            if let byExternalOnly = tasks.firstIndex(where: {
+                $0.type == task.type && $0.externalId == externalId
+            }) {
+                return byExternalOnly
+            }
+        }
+
+        return nil
+    }
     
     private func completeTask(_ task: TaskItem) {
-        if let idx = tasks.firstIndex(where: { $0.id == task.id }) {
+        if let idx = indexOfTaskInCurrentList(task) {
             tasks[idx].markCompleted()
             syncTaskStatusToCalendarIfNeeded(tasks[idx])
+            promptedOverdueTaskIDs.remove(tasks[idx].id)
             promptedOverdueTaskIDs.remove(task.id)
             historyManager.addLog(actionType: "Task", description: "Completed: \(tasks[idx].title)")
             reprioritize()
+        } else {
+            messages.append(.init(isUser: false, text: "I couldn't find that task anymore. Please refresh and try again."))
         }
     }
 
     private func cancelTask(_ task: TaskItem) {
-        if let idx = tasks.firstIndex(where: { $0.id == task.id }) {
+        if let idx = indexOfTaskInCurrentList(task) {
+            let reminderId = reminderNotificationIdentifier(for: tasks[idx])
             tasks[idx].markCanceled()
             syncTaskStatusToCalendarIfNeeded(tasks[idx])
+            promptedOverdueTaskIDs.remove(tasks[idx].id)
             promptedOverdueTaskIDs.remove(task.id)
-            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [task.id.uuidString])
+            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [reminderId, task.id.uuidString])
             historyManager.addLog(actionType: "Task", description: "Canceled: \(tasks[idx].title)")
             messages.append(.init(isUser: false, text: "Canceled task: \(tasks[idx].title)"))
             reprioritize()
+        } else {
+            messages.append(.init(isUser: false, text: "I couldn't find that task anymore. Please refresh and try again."))
         }
     }
 
     private func postponeTask(_ task: TaskItem, by interval: TimeInterval) {
-        if let idx = tasks.firstIndex(where: { $0.id == task.id }) {
+        if let idx = indexOfTaskInCurrentList(task) {
+            let previousReminderId = reminderNotificationIdentifier(for: tasks[idx])
             tasks[idx].markOpen()
             tasks[idx].startDate = Date().addingTimeInterval(interval)
             tasks[idx].dueDate = tasks[idx].dueDate.addingTimeInterval(interval)
             syncTaskStatusToCalendarIfNeeded(tasks[idx])
+            promptedOverdueTaskIDs.remove(tasks[idx].id)
             promptedOverdueTaskIDs.remove(task.id)
-            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [task.id.uuidString])
+            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [previousReminderId, task.id.uuidString])
             scheduleReminder(for: tasks[idx])
             historyManager.addLog(actionType: "Task", description: "Postponed: \(tasks[idx].title) by 1 hour")
             messages.append(.init(isUser: false, text: "Postponed task by 1 hour: \(tasks[idx].title)"))
             reprioritize()
+        } else {
+            messages.append(.init(isUser: false, text: "I couldn't find that task anymore. Please refresh and try again."))
         }
     }
 
@@ -3658,8 +3693,9 @@ struct ContentView: View {
             return
         }
 
-        if let idx = tasks.firstIndex(where: { $0.id == task.id }) {
+        if let idx = indexOfTaskInCurrentList(task) {
             tasks[idx].markOpen()
+            promptedOverdueTaskIDs.remove(tasks[idx].id)
             promptedOverdueTaskIDs.remove(task.id)
             pendingAgentTask = tasks[idx]
             executeAgentTask(tasks[idx])
@@ -7384,7 +7420,7 @@ extension ContentView {
         var liveConflicts: [TaskItem] = []
         if canReadCalendarEventsForConflicts() {
             let calendars = eventStore.calendars(for: .event).filter {
-                $0.type != .subscription && $0.type != .birthday
+                !shouldIgnoreCalendarForTaskSync($0)
             }
 
             let predicate = eventStore.predicateForEvents(withStart: taskStart, end: taskEnd, calendars: calendars)
@@ -7865,17 +7901,20 @@ extension ContentView {
         let start = calendar.date(byAdding: .year, value: -1, to: now)!
         let end = calendar.date(byAdding: .year, value: 1, to: now)!
         
-        // Fetch only relevant calendars (exclude Holidays, Birthdays, etc.)
+        // Fetch only relevant calendars (exclude public holidays and birthdays)
         let allCalendars = eventStore.calendars(for: .event)
         let userCalendars = allCalendars.filter { cal in
-            // Exclude subscription (Holidays) and Birthdays
-            cal.type != .subscription && cal.type != .birthday
+            !shouldIgnoreCalendarForTaskSync(cal)
         }
 
         // 1. Fetch Events
         let predicate = eventStore.predicateForEvents(withStart: start, end: end, calendars: userCalendars)
         let events = eventStore.events(matching: predicate)
         for event in events {
+            if shouldIgnoreEventForTaskSync(event) {
+                continue
+            }
+
             if event.startDate < calendarEventStartDate {
                 // Remove sync'd app tasks from the local device calendar if they are before the start date
                 if parseTaskIdentifierFlag(from: event.notes) != nil {
@@ -7940,12 +7979,44 @@ extension ContentView {
     }
 
     private func mapEventCategory(_ event: EKEvent) -> String {
+        if shouldIgnoreEventForTaskSync(event) {
+            return "Public Holiday"
+        }
+
         switch event.calendar.type {
         case .birthday:
             return "Birthday"
         default:
             return "Event"
         }
+    }
+
+    private func normalizedCalendarKeywordText(_ text: String) -> String {
+        text
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .lowercased()
+    }
+
+    private func isLikelyPublicHolidayCalendar(_ calendar: EKCalendar) -> Bool {
+        let title = normalizedCalendarKeywordText(calendar.title)
+        let sourceTitle = normalizedCalendarKeywordText(calendar.source.title)
+        let holidayKeywords = [
+            "holiday", "holidays", "public holiday", "bank holiday", "national holiday"
+        ]
+
+        if holidayKeywords.contains(where: { title.contains($0) || sourceTitle.contains($0) }) {
+            return true
+        }
+
+        return calendar.type == .subscription && (title.contains("holiday") || sourceTitle.contains("holiday"))
+    }
+
+    private func shouldIgnoreCalendarForTaskSync(_ calendar: EKCalendar) -> Bool {
+        calendar.type == .birthday || isLikelyPublicHolidayCalendar(calendar)
+    }
+
+    private func shouldIgnoreEventForTaskSync(_ event: EKEvent) -> Bool {
+        shouldIgnoreCalendarForTaskSync(event.calendar)
     }
 
     private func debugCalendarStatus(_ message: String) {
@@ -8012,7 +8083,67 @@ extension ContentView {
             let uniqueReminders = Dictionary(grouping: reminderItems, by: { $0.externalId ?? $0.id.uuidString }).compactMap { $0.value.first }
             tasks = nonReminder + uniqueReminders
             reprioritize()
+            resyncCalendarEventReminders(using: tasks)
             print("Loaded \(tasks.filter { $0.type == .app }.count) app tasks + \(tasks.filter { $0.type == .calendar }.count) calendar events + \(uniqueReminders.count) reminders")
+        }
+    }
+
+    private func stableIdentifierHash(_ input: String) -> String {
+        let digest = SHA256.hash(data: Data(input.utf8))
+        return digest.prefix(16).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func reminderNotificationIdentifier(for task: TaskItem) -> String {
+        let identityBase: String
+        if let externalId = task.externalId, !externalId.isEmpty {
+            identityBase = "\(externalId)|\(Int(task.startDate.timeIntervalSince1970.rounded()))"
+        } else {
+            identityBase = task.id.uuidString
+        }
+        return "pa_task_event_\(stableIdentifierHash(identityBase))"
+    }
+
+    private func reminderTriggerDate(for task: TaskItem) -> Date {
+        guard task.isAllDay else { return task.startDate }
+        if let nineAM = Calendar.current.date(bySettingHour: 9, minute: 0, second: 0, of: task.startDate) {
+            return nineAM
+        }
+        return Calendar.current.startOfDay(for: task.startDate).addingTimeInterval(9 * 60 * 60)
+    }
+
+    private func resyncCalendarEventReminders(using items: [TaskItem]) {
+        let now = Date()
+        let maxHorizon: TimeInterval = 30 * 24 * 60 * 60
+
+        let reminderCandidates = items.filter { task in
+            guard task.status == .open, !task.isDone else { return false }
+            guard task.type == .calendar || (task.type == .app && task.externalId?.isEmpty == false) else {
+                return false
+            }
+            let triggerDate = reminderTriggerDate(for: task)
+            let delta = triggerDate.timeIntervalSince(now)
+            return delta > -900 && delta <= maxHorizon
+        }
+
+        let desiredIdentifiers = Set(reminderCandidates.map { reminderNotificationIdentifier(for: $0) })
+        let center = UNUserNotificationCenter.current()
+
+        center.getPendingNotificationRequests { requests in
+            let managedPrefix = "pa_task_event_"
+            let existingManaged = Set(requests.map(\.identifier).filter { $0.hasPrefix(managedPrefix) })
+            let staleIdentifiers = Array(existingManaged.subtracting(desiredIdentifiers))
+
+            if !staleIdentifiers.isEmpty {
+                center.removePendingNotificationRequests(withIdentifiers: staleIdentifiers)
+            }
+
+            for task in reminderCandidates {
+                scheduleReminder(
+                    for: task,
+                    identifier: reminderNotificationIdentifier(for: task),
+                    recordInHistory: false
+                )
+            }
         }
     }
 
@@ -8029,6 +8160,15 @@ extension ContentView {
     }
 
     private func scheduleReminder(for task: TaskItem) {
+        scheduleReminder(for: task, identifier: reminderNotificationIdentifier(for: task), recordInHistory: true)
+    }
+
+    private func scheduleReminder(for task: TaskItem, identifier: String, recordInHistory: Bool) {
+        guard task.status == .open, !task.isDone else {
+            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [identifier])
+            return
+        }
+
         UNUserNotificationCenter.current().getNotificationSettings { settings in
             if settings.authorizationStatus != .authorized {
                 print("⚠️ Notification permission not authorized: \(settings.authorizationStatus.rawValue)")
@@ -8051,7 +8191,7 @@ extension ContentView {
             content.interruptionLevel = .timeSensitive
         }
 
-        let triggerDate = task.startDate
+        let triggerDate = reminderTriggerDate(for: task)
         let timeInterval = triggerDate.timeIntervalSinceNow
         let effectiveInterval = max(timeInterval, 1.0)
 
@@ -8061,13 +8201,14 @@ extension ContentView {
         }
 
         let trigger = UNTimeIntervalNotificationTrigger(timeInterval: effectiveInterval, repeats: false)
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [identifier])
         UNUserNotificationCenter.current().getPendingNotificationRequests { requests in
             DispatchQueue.main.async {
                 let currentPending = requests.count
                 let currentBadge = UIApplication.shared.applicationIconBadgeNumber
                 content.badge = NSNumber(value: currentBadge + currentPending + 1)
 
-                let request = UNNotificationRequest(identifier: task.id.uuidString, content: content, trigger: trigger)
+                let request = UNNotificationRequest(identifier: identifier, content: content, trigger: trigger)
                 UNUserNotificationCenter.current().add(request) { error in
                     if let e = error {
                         print("Error scheduling notification: \(e)")
@@ -8078,8 +8219,10 @@ extension ContentView {
             }
         }
 
-        Task { @MainActor in
-            notificationManager.addNotification(title: content.title, body: content.body)
+        if recordInHistory {
+            Task { @MainActor in
+                notificationManager.addNotification(title: content.title, body: content.body)
+            }
         }
     }
 
