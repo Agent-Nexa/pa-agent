@@ -7315,7 +7315,7 @@ extension ContentView {
             }
 
             let predicate = eventStore.predicateForEvents(withStart: taskStart, end: taskEnd, calendars: calendars)
-            let events = eventStore.events(matching: predicate)
+            let events = eventStore.events(matching: predicate).filter { !$0.isAllDay }
 
             liveConflicts = events
                 .map { event in
@@ -7795,7 +7795,7 @@ extension ContentView {
 
         // 1. Fetch Events
         let predicate = eventStore.predicateForEvents(withStart: start, end: end, calendars: userCalendars)
-        let events = eventStore.events(matching: predicate)
+        let events = eventStore.events(matching: predicate).filter { !$0.isAllDay }
         for event in events {
             if event.startDate < calendarEventStartDate {
                 // Remove sync'd app tasks from the local device calendar if they are before the start date
