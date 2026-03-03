@@ -8239,8 +8239,15 @@ extension ContentView {
             .map { "\($0.isUser ? "U" : "A"): \(clipped($0.text, max: 100))" }
             .joined(separator: "\n")
             
+        let startOfMonth = calendar.date(from: calendar.dateComponents([.year, .month], from: now)) ?? now
         let trackingCats = trackingManager.categories
-            .map { "- \($0.name) [Unit: \($0.unit ?? "none"), ID: \($0.id.uuidString)]" }
+            .map { cat in
+                let categoryRecords = trackingManager.records(for: cat.id)
+                let monthRecords = categoryRecords.filter { $0.date >= startOfMonth }
+                let monthTotal = monthRecords.reduce(0) { $0 + $1.value }
+                let recentRecordsStr = categoryRecords.prefix(3).map { "   * \($0.value) \($0.note ?? "") on \($0.date.formatted(date: .abbreviated, time: .omitted))" }.joined(separator: "\n")
+                return "- \(cat.name) [Unit: \(cat.unit ?? "none"), ID: \(cat.id.uuidString)]\n  This month total: \(monthTotal)\n  Recent records:\n\(recentRecordsStr.isEmpty ? "   none" : recentRecordsStr)"
+            }
             .joined(separator: "\n")
 
         return """
