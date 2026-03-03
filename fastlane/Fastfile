@@ -60,9 +60,6 @@ platform :ios do
 
     # 2. Optional: use match-managed App Store signing assets (recommended for CI)
     use_match = !ENV["MATCH_GIT_URL"].to_s.strip.empty?
-    if ENV["CI"].to_s == "true" && !use_match
-      UI.user_error!("CI requires match signing. Set MATCH_GIT_URL and MATCH_PASSWORD secrets.")
-    end
 
     if use_match
       match(
