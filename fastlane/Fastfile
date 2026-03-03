@@ -59,16 +59,20 @@ platform :ios do
     sh("xcodebuild -list -project '#{project_path}'")
 
     # 2. Optional: use match-managed App Store signing assets (recommended for CI)
-    if ENV["MATCH_GIT_URL"].to_s.strip.empty?
-      UI.important("MATCH_GIT_URL is not set. CI will rely on automatic signing and may try to create new certificates.")
-      UI.important("Your current failure indicates certificate quota was reached. Set up match or revoke old certificates in Apple Developer.")
-    else
+    use_match = !ENV["MATCH_GIT_URL"].to_s.strip.empty?
+    if ENV["CI"].to_s == "true" && !use_match
+      UI.user_error!("CI requires match signing. Set MATCH_GIT_URL and MATCH_PASSWORD secrets.")
+    end
+
+    if use_match
       match(
         api_key: api_key,
         type: "appstore",
         app_identifier: ["z.Nexa"],
         readonly: ENV["CI"].to_s == "true"
       )
+    else
+      UI.important("MATCH_GIT_URL is not set. Falling back to automatic signing for local runs only.")
     end
 
     # 3. Build the iOS application, passing the API Key directly to xcodebuild
@@ -81,10 +85,28 @@ platform :ios do
         export_method: "app-store", # Required for TestFlight distribution
         buildlog_path: "./fastlane/build_logs",
         # Instruct Xcode to manage profiles using the App Store Connect API Key natively
-        xcargs: "-allowProvisioningUpdates -authenticationKeyPath '#{p8_path}' -authenticationKeyID '#{key_id}' -authenticationKeyIssuerID '#{issuer_id}'",
-        export_options: {
-          method: "app-store",
-        }
+        xcargs: (
+          if use_match
+            "CODE_SIGN_STYLE=Manual -allowProvisioningUpdates -authenticationKeyPath '#{p8_path}' -authenticationKeyID '#{key_id}' -authenticationKeyIssuerID '#{issuer_id}'"
+          else
+            "-allowProvisioningUpdates -authenticationKeyPath '#{p8_path}' -authenticationKeyID '#{key_id}' -authenticationKeyIssuerID '#{issuer_id}'"
+          end
+        ),
+        export_options: (
+          if use_match
+            {
+              method: "app-store",
+              signingStyle: "manual",
+              provisioningProfiles: {
+                "z.Nexa" => "match AppStore z.Nexa"
+              }
+            }
+          else
+            {
+              method: "app-store",
+            }
+          end
+        )
       )
     rescue => build_error
       UI.error("build_app failed: #{build_error}")

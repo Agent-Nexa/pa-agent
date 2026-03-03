@@ -23,16 +23,6 @@ jobs:
       - name: Install Fastlane
         run: gem install fastlane
 
-      - name: Decode API Key and Provisioning Profiles
-        env:
-          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
-          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
-          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
-        run: |
-          # This step decodes any certificates or profiles if you are using fastlane match.
-          # We'll leave it empty unless you specify match strategy.
-          echo "Ready to build"
-
       - name: Select Latest Xcode
         run: |
           LATEST_XCODE=$(ls -d /Applications/Xcode* | sort -V | tail -n 1)
@@ -47,5 +37,9 @@ jobs:
           APP_STORE_CONNECT_API_KEY_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ISSUER_ID }}
           # The key itself, passed as base64
           APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+          # match-based signing secrets
+          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
         run: |
           fastlane beta

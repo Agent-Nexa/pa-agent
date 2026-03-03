@@ -1,0 +1,9 @@
+git_url(ENV["MATCH_GIT_URL"])
+storage_mode("git")
+
+type("appstore")
+app_identifier(["z.Nexa"])
+username(ENV["FASTLANE_USER"]) if ENV["FASTLANE_USER"].to_s.strip != ""
+
+# In CI we should only fetch existing signing assets.
+readonly(ENV["CI"].to_s == "true")
