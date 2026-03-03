@@ -86,7 +86,7 @@ platform :ios do
           if use_match
             "CODE_SIGN_STYLE=Manual -allowProvisioningUpdates -authenticationKeyPath '#{p8_path}' -authenticationKeyID '#{key_id}' -authenticationKeyIssuerID '#{issuer_id}'"
           else
-            "-allowProvisioningUpdates -authenticationKeyPath '#{p8_path}' -authenticationKeyID '#{key_id}' -authenticationKeyIssuerID '#{issuer_id}'"
+            "CODE_SIGN_STYLE=Automatic -allowProvisioningUpdates -authenticationKeyPath '#{p8_path}' -authenticationKeyID '#{key_id}' -authenticationKeyIssuerID '#{issuer_id}'"
           end
         ),
         export_options: (
@@ -101,6 +101,7 @@ platform :ios do
           else
             {
               method: "app-store",
+              signingStyle: "automatic"
             }
           end
         )
