@@ -38,8 +38,18 @@ jobs:
           # The key itself, passed as base64
           APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
           # match-based signing secrets
-          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL || vars.MATCH_GIT_URL }}
           MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
           MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
         run: |
+          if [ -z "$MATCH_GIT_URL" ]; then
+            echo "❌ Missing MATCH_GIT_URL (set as secret MATCH_GIT_URL or repo variable MATCH_GIT_URL)."
+            exit 1
+          fi
+
+          if [ -z "$MATCH_PASSWORD" ]; then
+            echo "❌ Missing MATCH_PASSWORD secret."
+            exit 1
+          fi
+
           fastlane beta
