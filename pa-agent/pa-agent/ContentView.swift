@@ -17,6 +17,9 @@ import CryptoKit
 import UniformTypeIdentifiers
 import ImageIO
 import CoreLocation
+#if canImport(Vision)
+import Vision
+#endif
 #if canImport(WeatherKit)
 import WeatherKit
 #endif
@@ -2268,6 +2271,15 @@ struct TrackingConfirmationItem: Equatable {
     var recordDate: Date? = nil
 }
 
+struct DetectedReceipt: Identifiable, Equatable {
+    var id: String { assetIdentifier }
+    let assetIdentifier: String
+    let createdAt: Date
+    let estimatedAmount: Double?
+    let titleHint: String?
+    let thumbnailJPEGData: Data?
+}
+
 struct SimpleContact: Identifiable, Hashable {
     var id = UUID()
     var contactId: String? // Added for updates
@@ -3103,6 +3115,10 @@ struct ContentView: View {
     @State private var showNotificationList = false
     @State private var showSavedItemsSheet = false
     @State private var selectedTaskForDetail: TaskItem?
+    @State private var pendingDetectedReceipts: [DetectedReceipt] = []
+    @State private var showReceiptImportReviewSheet = false
+    @State private var selectedReceiptIDs: Set<String> = []
+    @State private var isCheckingReceipts = false
     @AppStorage("PERMISSION_SETUP_SHOWN") private var permissionSetupShown: Bool = false
     @State private var showPermissionSetupSheet = false
     @FocusState private var isInputFocused: Bool
@@ -3191,15 +3207,18 @@ struct ContentView: View {
                 #if !DEBUG
                 Task { await subscriptionManager.refreshSubscriptionStatus() }
                 #endif
+                Task { await checkForNewPhotoReceipts() }
             }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
                 checkAgentTasks(at: Date())
                 Task { await refreshSystemTasks() }
+                Task { await checkForNewPhotoReceipts() }
             }
             .onChange(of: scenePhase) { newPhase in
                 if newPhase == .active {
                      checkAgentTasks(at: Date())
                      Task { await refreshSystemTasks() }
+                     Task { await checkForNewPhotoReceipts() }
                 } else if newPhase == .inactive || newPhase == .background {
                     ChatHistoryStore.shared.flushMessages(messages)
                     if newPhase == .background {
@@ -3228,7 +3247,15 @@ struct ContentView: View {
                 AIUsageView()
             }
             .sheet(isPresented: $showTrackingSheet) {
-                TrackingCategoriesView(trackingManager: trackingManager)
+                TrackingCategoriesView(
+                    trackingManager: trackingManager,
+                    onRescanReceipts: {
+                        Task { await checkForNewPhotoReceipts(manualTrigger: true) }
+                    },
+                    onResetReceiptHistory: {
+                        resetReceiptSyncHistory()
+                    }
+                )
             }
             .sheet(isPresented: $showTasksList) {
                 TasksListSheet(
@@ -3255,6 +3282,24 @@ struct ContentView: View {
             }
             .sheet(item: $selectedTaskForDetail) { task in
                 TaskDetailsSheet(task: task)
+            }
+            .sheet(isPresented: $showReceiptImportReviewSheet) {
+                ReceiptImportReviewSheet(
+                    receipts: pendingDetectedReceipts,
+                    selectedReceiptIDs: $selectedReceiptIDs,
+                    onAddSelected: {
+                        importSelectedReceiptsToSpending()
+                    },
+                    onAddAll: {
+                        selectedReceiptIDs = Set(pendingDetectedReceipts.map(\.assetIdentifier))
+                        importSelectedReceiptsToSpending()
+                    },
+                    onCancel: {
+                        pendingDetectedReceipts = []
+                        selectedReceiptIDs = []
+                        showReceiptImportReviewSheet = false
+                    }
+                )
             }
             .sheet(isPresented: $showMessageComposer) {
                 MessageComposerView(recipients: [pendingMessage.recipient], body: pendingMessage.body) { result in
@@ -4672,6 +4717,107 @@ struct TaskDetailsSheet: View {
         case .app: return "App"
         case .calendar: return "Calendar"
         case .reminder: return "Reminder"
+        }
+    }
+}
+
+struct ReceiptImportReviewSheet: View {
+    let receipts: [DetectedReceipt]
+    @Binding var selectedReceiptIDs: Set<String>
+    let onAddSelected: () -> Void
+    let onAddAll: () -> Void
+    let onCancel: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                List(receipts) { receipt in
+                    HStack(alignment: .top, spacing: 12) {
+                        #if canImport(UIKit)
+                        if let data = receipt.thumbnailJPEGData, let image = UIImage(data: data) {
+                            Image(uiImage: image)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: 52, height: 52)
+                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        } else {
+                            Image(systemName: "doc.text.image")
+                                .font(.title3)
+                                .frame(width: 52, height: 52)
+                                .foregroundStyle(.secondary)
+                                .background(Color(.secondarySystemBackground))
+                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        }
+                        #else
+                        Image(systemName: "doc.text.image")
+                            .font(.title3)
+                            .frame(width: 52, height: 52)
+                            .foregroundStyle(.secondary)
+                            .background(Color(.secondarySystemBackground))
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        #endif
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(receipt.titleHint ?? "Receipt")
+                                .font(.subheadline.weight(.semibold))
+                                .lineLimit(1)
+                            Text(receipt.createdAt.formatted(date: .abbreviated, time: .shortened))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            if let amount = receipt.estimatedAmount {
+                                Text(amount, format: .currency(code: Locale.current.currency?.identifier ?? "USD"))
+                                    .font(.subheadline)
+                            } else {
+                                Text("Amount not detected")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        Spacer(minLength: 8)
+
+                        Toggle(
+                            "",
+                            isOn: Binding(
+                                get: { selectedReceiptIDs.contains(receipt.assetIdentifier) },
+                                set: { isSelected in
+                                    if isSelected {
+                                        selectedReceiptIDs.insert(receipt.assetIdentifier)
+                                    } else {
+                                        selectedReceiptIDs.remove(receipt.assetIdentifier)
+                                    }
+                                }
+                            )
+                        )
+                        .labelsHidden()
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                HStack(spacing: 12) {
+                    Button("Cancel") {
+                        onCancel()
+                        dismiss()
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button("Add Selected") {
+                        onAddSelected()
+                        dismiss()
+                    }
+                    .buttonStyle(.borderedProminent)
+
+                    Button("Add All") {
+                        onAddAll()
+                        dismiss()
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .padding()
+            }
+            .navigationTitle("Review Receipts")
+            .navigationBarTitleDisplayMode(.inline)
         }
     }
 }
@@ -8251,6 +8397,438 @@ extension ContentView {
                 NotificationManager.shared.scheduleInactivityReminder(days: 3)
             }
         }
+    }
+
+    private func checkForNewPhotoReceipts(manualTrigger: Bool = false) async {
+        #if canImport(Photos)
+        if isCheckingReceipts { return }
+        await MainActor.run {
+            isCheckingReceipts = true
+        }
+        defer {
+            Task { @MainActor in
+                isCheckingReceipts = false
+            }
+        }
+
+        let auth = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard auth == .authorized || auth == .limited else {
+            if manualTrigger {
+                await MainActor.run {
+                    messages.append(.init(isUser: false, text: "Photos permission is required to scan receipts. Please enable it in Settings."))
+                }
+            }
+            return
+        }
+
+        let seenReceiptIDs = loadSeenReceiptIDs()
+        let receiptCollection = findReceiptSmartAlbum()
+        let candidateAssets = fetchReceiptCandidateAssets(from: receiptCollection)
+        guard !candidateAssets.isEmpty else {
+            if manualTrigger {
+                await MainActor.run {
+                    messages.append(.init(isUser: false, text: "No recent receipt candidates found to scan."))
+                }
+            }
+            return
+        }
+
+        var newlyDetected: [DetectedReceipt] = []
+        for asset in candidateAssets {
+            if !seenReceiptIDs.contains(asset.localIdentifier) {
+                newlyDetected.append(
+                    DetectedReceipt(
+                        assetIdentifier: asset.localIdentifier,
+                        createdAt: asset.creationDate ?? Date(),
+                        estimatedAmount: nil,
+                        titleHint: nil,
+                        thumbnailJPEGData: nil
+                    )
+                )
+            }
+        }
+
+        guard !newlyDetected.isEmpty else { return }
+
+        var enrichedReceipts: [DetectedReceipt] = []
+        let usesFallbackRecentPhotos = (receiptCollection == nil)
+        for receipt in newlyDetected {
+            guard let imageData = await loadImageData(assetLocalIdentifier: receipt.assetIdentifier),
+                  let recognized = await recognizedText(from: imageData) else {
+                continue
+            }
+
+            if usesFallbackRecentPhotos, !isLikelyReceiptText(recognized) {
+                continue
+            }
+
+            let titleHint = receiptTitleHint(from: recognized)
+            let thumbnailJPEGData = receiptThumbnailData(from: imageData)
+            let detectedReceiptDate = parseReceiptDate(from: recognized) ?? receipt.createdAt
+
+            if let amount = parseReceiptAmount(from: recognized) {
+                enrichedReceipts.append(
+                    DetectedReceipt(
+                        assetIdentifier: receipt.assetIdentifier,
+                        createdAt: detectedReceiptDate,
+                        estimatedAmount: amount,
+                        titleHint: titleHint,
+                        thumbnailJPEGData: thumbnailJPEGData
+                    )
+                )
+            } else {
+                enrichedReceipts.append(
+                    DetectedReceipt(
+                        assetIdentifier: receipt.assetIdentifier,
+                        createdAt: detectedReceiptDate,
+                        estimatedAmount: nil,
+                        titleHint: titleHint,
+                        thumbnailJPEGData: thumbnailJPEGData
+                    )
+                )
+            }
+        }
+
+        guard !enrichedReceipts.isEmpty else {
+            if manualTrigger {
+                await MainActor.run {
+                    messages.append(.init(isUser: false, text: "No new receipts found."))
+                }
+            }
+            return
+        }
+
+        await MainActor.run {
+            pendingDetectedReceipts = enrichedReceipts
+            selectedReceiptIDs = Set(enrichedReceipts.map(\.assetIdentifier))
+            showReceiptImportReviewSheet = true
+            notificationManager.addNotification(
+                title: "New receipts detected",
+                body: "Found \(enrichedReceipts.count) new receipt\(enrichedReceipts.count == 1 ? "" : "s") in Photos."
+            )
+        }
+        NotificationManager.shared.scheduleReceiptDetectedNotification(count: enrichedReceipts.count)
+        #endif
+    }
+
+    private func resetReceiptSyncHistory() {
+        let key = "seen_photo_receipt_asset_ids_v1"
+        UserDefaults.standard.removeObject(forKey: key)
+        messages.append(.init(isUser: false, text: "Receipt sync history reset. You can now rescan receipts from Tracking."))
+    }
+
+    private func findReceiptSmartAlbum() -> PHAssetCollection? {
+        let smartAlbums = PHAssetCollection.fetchAssetCollections(with: .smartAlbum, subtype: .any, options: nil)
+
+        var bestMatch: PHAssetCollection?
+        smartAlbums.enumerateObjects { collection, _, stop in
+            let name = (collection.localizedTitle ?? "").lowercased()
+            let hints = ["receipt", "receipts", "invoice", "invoices", "收据", "單據", "发票", "發票"]
+            if hints.contains(where: { name.contains($0) }) {
+                bestMatch = collection
+                stop.pointee = true
+            }
+        }
+
+        return bestMatch
+    }
+
+    private func fetchReceiptCandidateAssets(from receiptCollection: PHAssetCollection?) -> [PHAsset] {
+        let options = PHFetchOptions()
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        options.fetchLimit = 30
+
+        let fetched: PHFetchResult<PHAsset>
+        if let receiptCollection {
+            fetched = PHAsset.fetchAssets(in: receiptCollection, options: options)
+        } else {
+            options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
+            fetched = PHAsset.fetchAssets(with: options)
+        }
+
+        var assets: [PHAsset] = []
+        fetched.enumerateObjects { asset, index, stop in
+            assets.append(asset)
+            if index >= 29 {
+                stop.pointee = true
+            }
+        }
+        return assets
+    }
+
+    private func importSelectedReceiptsToSpending() {
+        guard !pendingDetectedReceipts.isEmpty else { return }
+
+        let selectedReceipts = pendingDetectedReceipts.filter { selectedReceiptIDs.contains($0.assetIdentifier) }
+        guard !selectedReceipts.isEmpty else {
+            messages.append(.init(isUser: false, text: "Please select at least one receipt to import."))
+            return
+        }
+
+        let spendingCategory: TrackingCategory
+        if let existing = trackingManager.categories.first(where: { $0.name.localizedCaseInsensitiveCompare("spending") == .orderedSame }) {
+            spendingCategory = existing
+        } else {
+            trackingManager.addCategory(name: "Spending", unit: "$")
+            guard let created = trackingManager.categories.first(where: { $0.name.localizedCaseInsensitiveCompare("spending") == .orderedSame }) else {
+                messages.append(.init(isUser: false, text: "I couldn't create the Spending category automatically. Please create it in Tracking and try again."))
+                return
+            }
+            spendingCategory = created
+        }
+
+        var importedCount = 0
+        var skippedCount = 0
+        let existingReceiptAssetIDs = Set(
+            trackingManager
+                .records(for: spendingCategory.id)
+                .compactMap { record -> String? in
+                    guard let raw = record.rawText?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }
+                    return raw
+                }
+        )
+
+        for receipt in selectedReceipts {
+            if existingReceiptAssetIDs.contains(receipt.assetIdentifier) {
+                skippedCount += 1
+                continue
+            }
+            guard let amount = receipt.estimatedAmount, amount > 0 else {
+                skippedCount += 1
+                continue
+            }
+            trackingManager.addRecord(
+                categoryId: spendingCategory.id,
+                value: amount,
+                note: buildReceiptRecordNote(for: receipt),
+                rawText: receipt.assetIdentifier,
+                date: receipt.createdAt
+            )
+            importedCount += 1
+        }
+
+        markReceiptsAsSeen(selectedReceipts.map(\.assetIdentifier))
+        pendingDetectedReceipts = []
+        selectedReceiptIDs = []
+        showReceiptImportReviewSheet = false
+
+        if importedCount > 0 {
+            let skippedSuffix = skippedCount > 0 ? " (\(skippedCount) needed manual amount entry)." : "."
+            let importedTitles = selectedReceipts
+                .filter { $0.estimatedAmount != nil && !existingReceiptAssetIDs.contains($0.assetIdentifier) }
+                .compactMap { $0.titleHint?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            let preview = importedTitles.prefix(2).joined(separator: ", ")
+            let detail = preview.isEmpty ? "" : " (\(preview)\(importedTitles.count > 2 ? ", …" : ""))"
+            messages.append(.init(isUser: false, text: "Added \(importedCount) receipt\(importedCount == 1 ? "" : "s") to Spending\(detail)\(skippedSuffix)"))
+        } else {
+            messages.append(.init(isUser: false, text: "I found new receipts, but couldn't detect totals. Please add them manually in Tracking."))
+        }
+    }
+
+    private func buildReceiptRecordNote(for receipt: DetectedReceipt) -> String {
+        let title = receipt.titleHint?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let title, !title.isEmpty {
+            return "Receipt: \(title)"
+        }
+        return "Imported from Photos receipt"
+    }
+
+    private func loadSeenReceiptIDs() -> Set<String> {
+        let key = "seen_photo_receipt_asset_ids_v1"
+        let ids = UserDefaults.standard.array(forKey: key) as? [String] ?? []
+        return Set(ids)
+    }
+
+    private func markReceiptsAsSeen(_ ids: [String]) {
+        let key = "seen_photo_receipt_asset_ids_v1"
+        var current = loadSeenReceiptIDs()
+        current.formUnion(ids)
+        UserDefaults.standard.set(Array(current), forKey: key)
+    }
+
+    private func loadImageData(assetLocalIdentifier: String) async -> Data? {
+        #if canImport(Photos)
+        let result = PHAsset.fetchAssets(withLocalIdentifiers: [assetLocalIdentifier], options: nil)
+        guard let asset = result.firstObject else { return nil }
+
+        return await withCheckedContinuation { continuation in
+            let options = PHImageRequestOptions()
+            options.isNetworkAccessAllowed = true
+            options.deliveryMode = .highQualityFormat
+            options.isSynchronous = false
+
+            PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, _, _, _ in
+                continuation.resume(returning: data)
+            }
+        }
+        #else
+        return nil
+        #endif
+    }
+
+    private func recognizedText(from imageData: Data) async -> String? {
+        #if canImport(Vision) && canImport(UIKit)
+        guard let image = UIImage(data: imageData), let cgImage = image.cgImage else { return nil }
+
+        return await withCheckedContinuation { continuation in
+            let request = VNRecognizeTextRequest { request, _ in
+                let lines = (request.results as? [VNRecognizedTextObservation])?
+                    .compactMap { $0.topCandidates(1).first?.string }
+                    .joined(separator: "\n")
+                continuation.resume(returning: lines)
+            }
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
+
+            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            do {
+                try handler.perform([request])
+            } catch {
+                continuation.resume(returning: nil)
+            }
+        }
+        #else
+        return nil
+        #endif
+    }
+
+    private func parseReceiptAmount(from text: String) -> Double? {
+        let normalized = text
+            .replacingOccurrences(of: ",", with: "")
+            .replacingOccurrences(of: "O", with: "0")
+
+        let prioritizedPattern = "(?i)(total|grand total|amount due|balance due)[^0-9]{0,20}([0-9]+(?:\\.[0-9]{2})?)"
+        if let regex = try? NSRegularExpression(pattern: prioritizedPattern) {
+            let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+            let matches = regex.matches(in: normalized, range: range)
+            for match in matches.reversed() {
+                if let amountRange = Range(match.range(at: 2), in: normalized),
+                   let amount = Double(normalized[amountRange]), amount > 0 {
+                    return amount
+                }
+            }
+        }
+
+        let genericPattern = "(?<![0-9])([0-9]+(?:\\.[0-9]{2}))(?![0-9])"
+        guard let regex = try? NSRegularExpression(pattern: genericPattern) else { return nil }
+        let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+        let matches = regex.matches(in: normalized, range: range)
+
+        let amounts = matches.compactMap { match -> Double? in
+            guard let valueRange = Range(match.range(at: 1), in: normalized) else { return nil }
+            return Double(normalized[valueRange])
+        }.filter { $0 > 0 && $0 < 100_000 }
+
+        return amounts.max()
+    }
+
+    private func parseReceiptDate(from text: String) -> Date? {
+        let normalized = text.replacingOccurrences(of: "\n", with: " ")
+
+        let patterns = [
+            "\\b(20\\d{2}[-/.](0?[1-9]|1[0-2])[-/.](0?[1-9]|[12]\\d|3[01]))\\b", // yyyy-mm-dd
+            "\\b((0?[1-9]|[12]\\d|3[01])[-/.](0?[1-9]|1[0-2])[-/.](20\\d{2}))\\b", // dd-mm-yyyy
+            "\\b((0?[1-9]|1[0-2])[-/.](0?[1-9]|[12]\\d|3[01])[-/.](20\\d{2}))\\b", // mm-dd-yyyy
+            "\\b((0?[1-9]|[12]\\d|3[01])\\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\\s+(20\\d{2}))\\b", // 12 Mar 2026
+            "\\b((jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\\s+(0?[1-9]|[12]\\d|3[01]),?\\s+(20\\d{2}))\\b" // Mar 12, 2026
+        ]
+
+        var candidates: [String] = []
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+            regex.matches(in: normalized, range: range).forEach { match in
+                if let valueRange = Range(match.range(at: 1), in: normalized) {
+                    candidates.append(String(normalized[valueRange]))
+                }
+            }
+        }
+
+        guard !candidates.isEmpty else { return nil }
+
+        let formatters: [DateFormatter] = {
+            let formats = [
+                "yyyy-MM-dd", "yyyy/M/d", "yyyy.M.d",
+                "d-M-yyyy", "d/M/yyyy", "d.M.yyyy",
+                "M-d-yyyy", "M/d/yyyy", "M.d.yyyy",
+                "d MMM yyyy", "d MMMM yyyy",
+                "MMM d yyyy", "MMMM d yyyy",
+                "MMM d, yyyy", "MMMM d, yyyy"
+            ]
+
+            return formats.map { format in
+                let formatter = DateFormatter()
+                formatter.locale = Locale(identifier: "en_US_POSIX")
+                formatter.dateFormat = format
+                formatter.timeZone = .current
+                return formatter
+            }
+        }()
+
+        var parsedDates: [Date] = []
+        for candidate in candidates {
+            let cleaned = candidate
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "  ", with: " ")
+
+            for formatter in formatters {
+                if let date = formatter.date(from: cleaned) {
+                    parsedDates.append(date)
+                    break
+                }
+            }
+        }
+
+        guard !parsedDates.isEmpty else { return nil }
+
+        let now = Date()
+        let lowerBound = Calendar.current.date(byAdding: .year, value: -5, to: now) ?? now.addingTimeInterval(-5 * 365 * 24 * 3600)
+        let upperBound = Calendar.current.date(byAdding: .day, value: 2, to: now) ?? now.addingTimeInterval(2 * 24 * 3600)
+
+        let valid = parsedDates.filter { $0 >= lowerBound && $0 <= upperBound }
+        guard !valid.isEmpty else { return nil }
+
+        return valid.max()
+    }
+
+    private func isLikelyReceiptText(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let keywords = [
+            "receipt", "total", "subtotal", "tax", "cash", "card", "visa", "mastercard", "amount due",
+            "invoice", "thank you for your purchase", "收据", "小计", "总计", "總計", "税", "稅", "发票", "發票"
+        ]
+        let hitCount = keywords.filter { lower.contains($0) }.count
+        return hitCount >= 2
+    }
+
+    private func receiptTitleHint(from text: String) -> String? {
+        let lines = text
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        let ignored = ["receipt", "invoice", "tax", "total", "subtotal", "amount due", "thank you"]
+        if let best = lines.first(where: { line in
+            let lower = line.lowercased()
+            return lower.count >= 3 && lower.count <= 40 && !ignored.contains(where: { lower.contains($0) })
+        }) {
+            return best
+        }
+        return lines.first
+    }
+
+    private func receiptThumbnailData(from imageData: Data) -> Data? {
+        #if canImport(UIKit)
+        guard let image = UIImage(data: imageData) else { return nil }
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 120, height: 120))
+        let thumb = renderer.image { _ in
+            image.draw(in: CGRect(x: 0, y: 0, width: 120, height: 120))
+        }
+        return thumb.jpegData(compressionQuality: 0.7)
+        #else
+        return nil
+        #endif
     }
 
     private func requestSelectedPermissions(notifications: Bool, speech: Bool, calendar: Bool, reminders: Bool, photos: Bool, camera: Bool, location: Bool) async {

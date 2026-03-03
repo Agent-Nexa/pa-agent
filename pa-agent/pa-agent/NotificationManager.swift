@@ -132,4 +132,25 @@ extension NotificationManager {
         UNUserNotificationCenter.current()
             .removePendingNotificationRequests(withIdentifiers: ["nexa_inactivity_reminder"])
     }
+
+    func scheduleReceiptDetectedNotification(count: Int) {
+        guard count > 0 else { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = "New Receipts in Photos"
+        content.body = "You have \(count) new receipt\(count == 1 ? "" : "s"). Open the app to confirm importing into Spending."
+        content.sound = .default
+
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
+        let request = UNNotificationRequest(identifier: "pa_receipt_detected_\(UUID().uuidString)", content: content, trigger: trigger)
+
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else { return }
+            UNUserNotificationCenter.current().add(request) { error in
+                if let error = error {
+                    print("Failed to schedule receipt notification: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
 }

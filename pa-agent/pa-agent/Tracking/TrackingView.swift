@@ -9,12 +9,15 @@ import SwiftUI
 
 struct TrackingCategoriesView: View {
     @ObservedObject var trackingManager: TrackingManager
+    var onRescanReceipts: (() -> Void)? = nil
+    var onResetReceiptHistory: (() -> Void)? = nil
     @State private var showingAddCategory = false
     @State private var newCategoryName = ""
     @State private var newCategoryUnit = ""
     
     @State private var showingEditCategory = false
     @State private var categoryToEdit: TrackingCategory?
+    @State private var showingResetReceiptAlert = false
     
     var body: some View {
         NavigationStack {
@@ -68,6 +71,22 @@ struct TrackingCategoriesView: View {
             .navigationTitle("Tracking Categories")
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
+                    Menu {
+                        Button {
+                            onRescanReceipts?()
+                        } label: {
+                            Label("Rescan Receipts Now", systemImage: "arrow.clockwise")
+                        }
+
+                        Button(role: .destructive) {
+                            showingResetReceiptAlert = true
+                        } label: {
+                            Label("Reset Receipt Sync History", systemImage: "trash")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+
                     NavigationLink(destination: DashboardView(manager: trackingManager)) {
                         Image(systemName: "chart.bar")
                     }
@@ -113,6 +132,14 @@ struct TrackingCategoriesView: View {
                     newCategoryUnit = ""
                     categoryToEdit = nil
                 }
+            }
+            .alert("Reset receipt sync history?", isPresented: $showingResetReceiptAlert) {
+                Button("Reset", role: .destructive) {
+                    onResetReceiptHistory?()
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Previously scanned receipts can be detected again. Duplicate imports are still prevented.")
             }
         }
     }
