@@ -244,6 +244,8 @@ struct TaskItem: Identifiable, Hashable, Codable {
     var priority: Int = 2
     var type: SourceType = .app
     var externalId: String? = nil
+    var eventCategory: String? = nil
+    var isAllDay: Bool = false
     
     // New fields for Agent delegation
     var executor: Executor = .user
@@ -4148,6 +4150,28 @@ struct ContentView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }
+            if task.type == .calendar {
+                HStack {
+                    if let eventCategory = task.eventCategory {
+                        Text(eventCategory)
+                            .font(.caption2)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 2)
+                            .background(Color.blue.opacity(0.1))
+                            .foregroundStyle(.blue)
+                            .cornerRadius(4)
+                    }
+                    if task.isAllDay {
+                        Text("All Day")
+                            .font(.caption2)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 2)
+                            .background(Color.purple.opacity(0.1))
+                            .foregroundStyle(.purple)
+                            .cornerRadius(4)
+                    }
+                }
+            }
             Text(
                 task.status == .completed || task.isDone
                     ? "Completed: \((task.completedAt ?? task.startDate).formatted(date: .abbreviated, time: .omitted))"
@@ -4275,21 +4299,49 @@ struct TasksListSheet: View {
                         }
                         .buttonStyle(.plain)
 
-                        VStack(alignment: .leading) {
+                        VStack(alignment: .leading, spacing: 6) {
                             Text(task.title)
                                 .font(.headline)
                                 .strikethrough(task.isDone)
                                 .foregroundStyle(task.isDone ? .secondary : .primary)
                             Text(task.statusLabel)
-                                .font(.caption2)
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(statusColor(for: task).opacity(0.18))
                                 .foregroundStyle(statusColor(for: task))
+                                .clipShape(Capsule())
                             Text(
                                 task.status == .completed || task.isDone
-                                    ? "Completed: \((task.completedAt ?? task.startDate).formatted(date: .abbreviated, time: .shortened))"
-                                    : "\(task.type == .calendar ? "📅 " : "")Start: \(task.startDate.formatted(date: .abbreviated, time: .shortened))"
+                                    ? "Completed: \((task.completedAt ?? task.startDate).formatted(date: .abbreviated, time: task.isAllDay ? .omitted : .shortened))"
+                                    : "\(task.type == .calendar ? "📅 " : "")Start: \(task.startDate.formatted(date: .abbreviated, time: task.isAllDay ? .omitted : .shortened))"
                             )
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                            
+                            if task.type == .calendar {
+                                HStack(spacing: 6) {
+                                    if let eventCategory = task.eventCategory {
+                                        Text(eventCategory)
+                                            .font(.caption2)
+                                            .padding(.horizontal, 4)
+                                            .padding(.vertical, 2)
+                                            .background(Color.blue.opacity(0.1))
+                                            .foregroundStyle(.blue)
+                                            .cornerRadius(4)
+                                    }
+                                    if task.isAllDay {
+                                        Text("All Day")
+                                            .font(.caption2)
+                                            .padding(.horizontal, 4)
+                                            .padding(.vertical, 2)
+                                            .background(Color.purple.opacity(0.1))
+                                            .foregroundStyle(.purple)
+                                            .cornerRadius(4)
+                                    }
+                                }
+                                .padding(.top, 2)
+                            }
                         }
                         Spacer()
                         HStack(spacing: 6) {
@@ -4546,8 +4598,11 @@ struct TaskDetailsSheet: View {
                 }
 
                 Section("Schedule") {
-                    LabeledContent("Start", value: task.startDate.formatted(date: .abbreviated, time: .shortened))
-                    LabeledContent("Due", value: task.dueDate.formatted(date: .abbreviated, time: .shortened))
+                    LabeledContent("Start", value: task.startDate.formatted(date: .abbreviated, time: task.isAllDay ? .omitted : .shortened))
+                    LabeledContent("Due", value: task.dueDate.formatted(date: .abbreviated, time: task.isAllDay ? .omitted : .shortened))
+                    if task.isAllDay {
+                        LabeledContent("All Day", value: "Yes")
+                    }
                 }
 
                 Section("Source") {
@@ -7303,6 +7358,7 @@ extension ContentView {
         let taskEnd = max(task.dueDate, taskStart.addingTimeInterval(30 * 60))
 
         func overlaps(_ existing: TaskItem) -> Bool {
+            if existing.isAllDay || task.isAllDay { return false }
             let existingStart = existing.startDate
             let existingEnd = max(existing.dueDate, existingStart.addingTimeInterval(30 * 60))
             return taskStart < existingEnd && taskEnd > existingStart
@@ -7319,14 +7375,20 @@ extension ContentView {
 
             liveConflicts = events
                 .map { event in
-                    TaskItem(
+                    let category: String
+                    switch event.calendar.type {
+                    case .birthday: category = "Birthday"
+                    default: category = "Event"
+                    }
+                    return TaskItem(
                         title: event.title ?? "Event",
                         tag: event.calendar.title,
                         startDate: event.startDate,
                         dueDate: event.endDate,
                         priority: 2,
                         type: .calendar,
-                        externalId: event.eventIdentifier
+                        externalId: event.eventIdentifier,
+                        eventCategory: category
                     )
                 }
                 .filter(overlaps)
@@ -7795,7 +7857,7 @@ extension ContentView {
 
         // 1. Fetch Events
         let predicate = eventStore.predicateForEvents(withStart: start, end: end, calendars: userCalendars)
-        let events = eventStore.events(matching: predicate).filter { !$0.isAllDay }
+        let events = eventStore.events(matching: predicate)
         for event in events {
             if event.startDate < calendarEventStartDate {
                 // Remove sync'd app tasks from the local device calendar if they are before the start date
@@ -7821,7 +7883,8 @@ extension ContentView {
                     dueDate: event.endDate,
                     priority: 2,
                     type: .app,
-                    externalId: event.eventIdentifier
+                    externalId: event.eventIdentifier,
+                    isAllDay: event.isAllDay
                 ))
                 continue
             }
@@ -7850,11 +7913,22 @@ extension ContentView {
                 dueDate: event.endDate,
                 priority: 2,
                 type: .calendar,
-                externalId: event.eventIdentifier
+                externalId: event.eventIdentifier,
+                eventCategory: mapEventCategory(event),
+                isAllDay: event.isAllDay
             ))
         }
         
         return fetchedItems
+    }
+
+    private func mapEventCategory(_ event: EKEvent) -> String {
+        switch event.calendar.type {
+        case .birthday:
+            return "Birthday"
+        default:
+            return "Event"
+        }
     }
 
     private func debugCalendarStatus(_ message: String) {
@@ -7902,7 +7976,8 @@ extension ContentView {
                             dueDate: dueDate,
                             priority: mappedPriority,
                             type: .reminder,
-                            externalId: reminder.calendarItemIdentifier
+                            externalId: reminder.calendarItemIdentifier,
+                            isAllDay: reminder.alarms?.contains(where: { $0.absoluteDate != nil }) == false // Reminders don't natively have isAllDay in the same way, but we'll default to false unless we know
                         )
                     }
                 continuation.resume(returning: rows)
