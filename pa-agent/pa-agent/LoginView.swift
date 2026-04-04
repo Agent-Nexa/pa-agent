@@ -69,8 +69,8 @@ struct LoginView: View {
                     .background(Color.purple.opacity(0.08))
                     .clipShape(RoundedRectangle(cornerRadius: 12))
 
-                    // Microsoft sign-in button
-                    SignInWithMicrosoftButton {
+                    // Sign-in button
+                    SignInButton {
                         signIn()
                     }
                     .disabled(authManager.isLoading)
@@ -123,19 +123,19 @@ struct LoginView: View {
     }
 }
 
-// MARK: - Custom Microsoft Sign-In Button
+// MARK: - Generic Sign-In Button
 
-private struct SignInWithMicrosoftButton: View {
+private struct SignInButton: View {
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 12) {
-                // Microsoft logo (four-square grid)
-                MicrosoftLogoShape()
-                    .frame(width: 20, height: 20)
+                Image(systemName: "person.badge.key.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.white)
 
-                Text("Sign in with Microsoft")
+                Text("Sign in to continue")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(.white)
 
@@ -143,48 +143,20 @@ private struct SignInWithMicrosoftButton: View {
             }
             .padding(.horizontal, 20)
             .frame(maxWidth: .infinity, minHeight: 50)
-            .background(Color(red: 0.01, green: 0.43, blue: 0.74))   // Microsoft blue #0078d4
+            .background(
+                LinearGradient(
+                    colors: [Color.purple, Color.purple.opacity(0.8)],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+            )
             .clipShape(RoundedRectangle(cornerRadius: 10))
         }
         .buttonStyle(.plain)
     }
 }
 
-private struct MicrosoftLogoShape: View {
-    var body: some View {
-        GeometryReader { geo in
-            let w = geo.size.width
-            let h = geo.size.height
-            let gap: CGFloat = w * 0.06
 
-            ZStack {
-                // Top-left: orange
-                Rectangle()
-                    .fill(Color(red: 0.94, green: 0.38, blue: 0.07))
-                    .frame(width: (w - gap) / 2, height: (h - gap) / 2)
-                    .offset(x: -(w / 4) - gap / 4, y: -(h / 4) - gap / 4)
-
-                // Top-right: green
-                Rectangle()
-                    .fill(Color(red: 0.12, green: 0.73, blue: 0.28))
-                    .frame(width: (w - gap) / 2, height: (h - gap) / 2)
-                    .offset(x: (w / 4) + gap / 4, y: -(h / 4) - gap / 4)
-
-                // Bottom-left: blue
-                Rectangle()
-                    .fill(Color(red: 0.01, green: 0.43, blue: 0.74))
-                    .frame(width: (w - gap) / 2, height: (h - gap) / 2)
-                    .offset(x: -(w / 4) - gap / 4, y: (h / 4) + gap / 4)
-
-                // Bottom-right: yellow
-                Rectangle()
-                    .fill(Color(red: 1.0, green: 0.73, blue: 0.0))
-                    .frame(width: (w - gap) / 2, height: (h - gap) / 2)
-                    .offset(x: (w / 4) + gap / 4, y: (h / 4) + gap / 4)
-            }
-        }
-    }
-}
 
 #Preview {
     LoginView()

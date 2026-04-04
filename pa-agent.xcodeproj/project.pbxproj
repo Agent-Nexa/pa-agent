@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		AE5E908A2F80C7DB00315DE5 /* MSAL in Frameworks */ = {isa = PBXBuildFile; productRef = AE5E90892F80C7DB00315DE5 /* MSAL */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		AEF59D242F3D994900FC4B5D /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -24,7 +28,6 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		AE5E908A2F80C7DB00315DE5 /* MSAL in Frameworks */ = {isa = PBXBuildFile; productRef = AE5E90892F80C7DB00315DE5 /* MSAL */; };
 		AE5E90872F80C8A300315DE5 /* nexa-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "nexa-Info.plist"; sourceTree = "<group>"; };
 		AEF59D162F3D994800FC4B5D /* nexa.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = nexa.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AEF59D232F3D994900FC4B5D /* nexaTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = nexaTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };

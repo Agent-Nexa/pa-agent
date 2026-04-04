@@ -3762,32 +3762,31 @@ struct ContentView: View {
                 Text("Speak tasks, capture details, and keep priorities tight.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+
+                // Credits indicator pill — sits under the subtitle
+                Button(action: { showSettingsSheet = true }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: creditManager.credits > 0 ? "sparkles" : "sparkles.slash")
+                            .font(.caption2.weight(.semibold))
+                        Text(creditManager.displayText)
+                            .font(.caption2.monospacedDigit().weight(.semibold))
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        (creditManager.credits > 50 ? Color.green
+                         : creditManager.credits > 10 ? Color.orange : Color.red)
+                        .opacity(0.15)
+                    )
+                    .foregroundStyle(
+                        creditManager.credits > 50 ? Color.green
+                        : creditManager.credits > 10 ? Color.orange : Color.red
+                    )
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
             }
             Spacer()
-
-            // Credits indicator pill
-            Button(action: { showSettingsSheet = true }) {
-                HStack(spacing: 4) {
-                    Image(systemName: creditManager.credits > 0 ? "sparkles" : "sparkles.slash")
-                        .font(.caption2.weight(.semibold))
-                    Text(creditManager.displayText)
-                        .font(.caption2.monospacedDigit().weight(.semibold))
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(
-                    (creditManager.credits > 50 ? Color.green
-                     : creditManager.credits > 10 ? Color.orange : Color.red)
-                    .opacity(0.15)
-                )
-                .foregroundStyle(
-                    creditManager.credits > 50 ? Color.green
-                    : creditManager.credits > 10 ? Color.orange : Color.red
-                )
-                .clipShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            .padding(.trailing, 6)
 
             Button(action: { showTasksList = true }) {
                 Image(systemName: "checklist")
