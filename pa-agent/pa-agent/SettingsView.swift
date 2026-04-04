@@ -15,6 +15,8 @@ import UIKit
 
 struct SettingsView: View {
     @Environment(\.openURL) private var openURL
+    @EnvironmentObject private var authManager: AuthManager
+    @EnvironmentObject private var creditManager: CreditManager
     @AppStorage("OPENAI_EMBEDDING_MODEL") private var storedEmbeddingModel: String = "text-embedding-3-small"
     @AppStorage("OPENAI_MODEL") private var storedModel: String = "gpt-5.2"
     @AppStorage("OPENAI_USE_AZURE") private var useAzure: Bool = true
@@ -110,6 +112,45 @@ struct SettingsView: View {
 
                 switch selectedSettingsTab {
                 case .editable:
+                    // ── Account (Entra profile + credits) ──────────────────
+                    Section("Account") {
+                        HStack(spacing: 14) {
+                            // Monogram avatar
+                            ZStack {
+                                Circle()
+                                    .fill(Color.purple.opacity(0.18))
+                                    .frame(width: 46, height: 46)
+                                Text(authManager.displayName.prefix(1).uppercased())
+                                    .font(.title3.weight(.semibold))
+                                    .foregroundStyle(.purple)
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(authManager.displayName.isEmpty ? "Signed In" : authManager.displayName)
+                                    .font(.subheadline.weight(.semibold))
+                                if !authManager.email.isEmpty {
+                                    Text(authManager.email)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Spacer()
+                        }
+
+                        HStack {
+                            Label("Credits Remaining", systemImage: "sparkles")
+                            Spacer()
+                            Text(creditManager.displayText)
+                                .foregroundStyle(creditManager.credits > 50 ? .green
+                                                  : creditManager.credits > 10 ? .orange : .red)
+                                .font(.subheadline.monospacedDigit())
+                        }
+
+                        Button(role: .destructive) {
+                            authManager.signOut()
+                        } label: {
+                            Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
+                        }
+                    }
                     Section {
                         HStack(spacing: 8) {
                             Text("Environment")
@@ -202,13 +243,19 @@ struct SettingsView: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
-                        TextField("Your Name", text: $localUserName)
-                        Picker("User Icon", selection: $localUserIcon) {
-                            ForEach(iconChoices(including: localUserIcon, defaults: userIconOptions), id: \.self) { symbol in
-                                Label(symbol, systemImage: symbol).tag(symbol)
+                        if authManager.isSignedIn {
+                            Text("Name and avatar are provided by your Microsoft account.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            TextField("Your Name", text: $localUserName)
+                            Picker("User Icon", selection: $localUserIcon) {
+                                ForEach(iconChoices(including: localUserIcon, defaults: userIconOptions), id: \.self) { symbol in
+                                    Label(symbol, systemImage: symbol).tag(symbol)
+                                }
                             }
+                            .pickerStyle(.menu)
                         }
-                        .pickerStyle(.menu)
                     }
                     .disabled(!isEditing)
 

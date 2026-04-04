@@ -374,6 +374,9 @@ final class IntentService {
     private let session = URLSession(configuration: .default)
     private let tokenUsageManager = TokenUsageManager.shared
 
+    /// Entra access token forwarded as X-User-Token for APIM user identification.
+    var accessToken: String = ""
+
     func infer(from text: String, imageDataURL: String? = nil, apiKey: String?, model: String?, useAzure: Bool, azureEndpoint: String?, userName: String?, agentName: String = "Nexa", appContext: String? = nil) async -> IntentResult? {
         let rawKey = apiKey ?? ""
         guard (!rawKey.isEmpty || useAzure) else {
@@ -420,6 +423,9 @@ final class IntentService {
             // Azure 2024-12-01-preview + gpt-5.2/o1 models do NOT support max_tokens.
         } else {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        if !accessToken.isEmpty {
+            request.setValue(accessToken, forHTTPHeaderField: "X-User-Token")
         }
 
         let df = DateFormatter()
@@ -615,6 +621,9 @@ final class IntentService {
             }
         } else {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        if !accessToken.isEmpty {
+            request.setValue(accessToken, forHTTPHeaderField: "X-User-Token")
         }
 
         let userContext = (userName?.isEmpty == false) ? "The user's name is \(userName!)." : ""
@@ -3063,6 +3072,9 @@ private extension Array {
 // MARK: - View
 
 struct ContentView: View {
+    @EnvironmentObject private var authManager: AuthManager
+    @EnvironmentObject private var creditManager: CreditManager
+
     private let maxChatMessages = 250
     @State private var tasks: [TaskItem] = []
     @State private var messages: [ChatMessage] = []
@@ -3150,7 +3162,9 @@ struct ContentView: View {
 
     var body: some View {
         Group {
-            if permissionSetupShown {
+            if !authManager.isSignedIn {
+                LoginView()
+            } else if permissionSetupShown {
                 mainContent
             } else {
                 PermissionWelcomeView {
@@ -3750,6 +3764,30 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+
+            // Credits indicator pill
+            Button(action: { showSettingsSheet = true }) {
+                HStack(spacing: 4) {
+                    Image(systemName: creditManager.credits > 0 ? "sparkles" : "sparkles.slash")
+                        .font(.caption2.weight(.semibold))
+                    Text(creditManager.displayText)
+                        .font(.caption2.monospacedDigit().weight(.semibold))
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    (creditManager.credits > 50 ? Color.green
+                     : creditManager.credits > 10 ? Color.orange : Color.red)
+                    .opacity(0.15)
+                )
+                .foregroundStyle(
+                    creditManager.credits > 50 ? Color.green
+                    : creditManager.credits > 10 ? Color.orange : Color.red
+                )
+                .clipShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, 6)
 
             Button(action: { showTasksList = true }) {
                 Image(systemName: "checklist")
@@ -5590,6 +5628,15 @@ extension ContentView {
         let attachment = pendingAttachment
         guard !trimmed.isEmpty || attachment != nil else { return }
 
+        // Hard block: no credits remaining
+        if creditManager.credits <= 0 {
+            messages.append(ChatMessage(
+                isUser: false,
+                text: "⚠️ You've used all your credits. More credits will be available soon — stay tuned!"
+            ))
+            return
+        }
+
         // Reset inactivity timer when user sends a message
         NotificationManager.shared.scheduleInactivityReminder(days: 3)
 
@@ -5602,7 +5649,22 @@ extension ContentView {
         pendingAttachment = nil
         dismissKeyboard()
 
-        Task { await handleIntent(for: intentInput, attachedImageDataURL: attachment?.visionImageDataURL) }
+        // Snapshot token-usage entry count before the call so we can measure
+        // exactly which entries were added during this interaction.
+        let tokensBefore = TokenUsageManager.shared.entries.reduce(0) { $0 + $1.totalTokens }
+
+        Task {
+            await handleIntent(for: intentInput, attachedImageDataURL: attachment?.visionImageDataURL)
+
+            // Deduct credits equal to tokens consumed during this interaction
+            let tokensAfter = TokenUsageManager.shared.entries.reduce(0) { $0 + $1.totalTokens }
+            let tokensUsed = tokensAfter - tokensBefore
+            if tokensUsed > 0 {
+                await MainActor.run {
+                    creditManager.deduct(tokensUsed)
+                }
+            }
+        }
     }
 
     private func composeUserVisibleMessage(text: String, attachment: PendingAttachment?) -> String {
@@ -6593,6 +6655,8 @@ extension ContentView {
         }
     
         let activeKey = storedApiKey.isEmpty ? ProcessInfo.processInfo.environment["OPENAI_API_KEY"] : storedApiKey
+        // Forward the Entra access token so APIM can identify the user
+        intentService.accessToken = authManager.accessToken
         let inferred: IntentResult?
         if isAIFeatureEnabled {
             await MainActor.run {

@@ -8,6 +8,7 @@
 import SwiftUI
 import UserNotifications
 import BackgroundTasks
+import MSAL
 #if canImport(Photos)
 import Photos
 #endif
@@ -20,6 +21,11 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         registerBackgroundTasks()
         scheduleReceiptBackgroundRefresh()
         return true
+    }
+
+    // MSAL redirect handling — required for interactive sign-in to complete
+    func application(_ app: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
+        return AuthManager.handleMSALResponse(url)
     }
     
     // Show notification even when app is in foreground
@@ -124,11 +130,22 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 struct nexaApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @Environment(\.scenePhase) var scenePhase
-    
+
+    @StateObject private var authManager  = AuthManager()
+    @StateObject private var creditManager = CreditManager.shared
+
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .preferredColorScheme(.light)
+                .environmentObject(authManager)
+                .environmentObject(creditManager)
+                // Grant new-user credits immediately after a successful sign-in
+                .onChange(of: authManager.isSignedIn) { signedIn in
+                    if signedIn {
+                        creditManager.grantNewUserCreditsIfNeeded(userId: authManager.userId)
+                    }
+                }
         }
         .onChange(of: scenePhase) { newPhase in
             if newPhase == .background {

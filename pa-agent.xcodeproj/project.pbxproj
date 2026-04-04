@@ -24,6 +24,8 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		AE5E908A2F80C7DB00315DE5 /* MSAL in Frameworks */ = {isa = PBXBuildFile; productRef = AE5E90892F80C7DB00315DE5 /* MSAL */; };
+		AE5E90872F80C8A300315DE5 /* nexa-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "nexa-Info.plist"; sourceTree = "<group>"; };
 		AEF59D162F3D994800FC4B5D /* nexa.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = nexa.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AEF59D232F3D994900FC4B5D /* nexaTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = nexaTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		AEF59D2D2F3D994900FC4B5D /* nexaUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = nexaUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -52,6 +54,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AE5E908A2F80C7DB00315DE5 /* MSAL in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -75,6 +78,7 @@
 		AEF59D0D2F3D994800FC4B5D = {
 			isa = PBXGroup;
 			children = (
+				AE5E90872F80C8A300315DE5 /* nexa-Info.plist */,
 				AEF59D182F3D994800FC4B5D /* pa-agent */,
 				AEF59D262F3D994900FC4B5D /* pa-agentTests */,
 				AEF59D302F3D994900FC4B5D /* pa-agentUITests */,
@@ -112,6 +116,7 @@
 			);
 			name = nexa;
 			packageProductDependencies = (
+				AE5E90892F80C7DB00315DE5 /* MSAL */,
 			);
 			productName = nexa;
 			productReference = AEF59D162F3D994800FC4B5D /* nexa.app */;
@@ -202,6 +207,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				AEF59DAC2F3DACBA00FC4B5D /* XCRemoteSwiftPackageReference "swift-llm-chat-openai" */,
+				AE5E90862F80C7DB00315DE5 /* XCRemoteSwiftPackageReference "microsoft-authentication-library-for-objc" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = AEF59D172F3D994800FC4B5D /* Products */;
@@ -407,6 +413,7 @@
 				DEVELOPMENT_TEAM = SXM7L9UCM6;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "nexa-Info.plist";
 				INFOPLIST_KEY_BGTaskSchedulerPermittedIdentifiers_0 = "z.Nexa.receipt-refresh";
 				INFOPLIST_KEY_CFBundleDisplayName = Nexa;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
@@ -451,6 +458,7 @@
 				DEVELOPMENT_TEAM = SXM7L9UCM6;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "nexa-Info.plist";
 				INFOPLIST_KEY_BGTaskSchedulerPermittedIdentifiers_0 = "z.Nexa.receipt-refresh";
 				INFOPLIST_KEY_CFBundleDisplayName = Nexa;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
@@ -610,6 +618,14 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		AE5E90862F80C7DB00315DE5 /* XCRemoteSwiftPackageReference "microsoft-authentication-library-for-objc" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/AzureAD/microsoft-authentication-library-for-objc";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.10.0;
+			};
+		};
 		AEF59DAC2F3DACBA00FC4B5D /* XCRemoteSwiftPackageReference "swift-llm-chat-openai" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/kevinhermawan/swift-llm-chat-openai";
@@ -619,6 +635,14 @@
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		AE5E90892F80C7DB00315DE5 /* MSAL */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AE5E90862F80C7DB00315DE5 /* XCRemoteSwiftPackageReference "microsoft-authentication-library-for-objc" */;
+			productName = MSAL;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = AEF59D0E2F3D994800FC4B5D /* Project object */;
 }
