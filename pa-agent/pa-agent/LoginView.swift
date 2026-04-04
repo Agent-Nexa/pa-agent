@@ -11,7 +11,7 @@ struct LoginView: View {
         ZStack {
             // Background gradient
             LinearGradient(
-                colors: [Color(.systemBackground), Color.purple.opacity(0.08)],
+                colors: [Color(.systemBackground), Color.blue.opacity(0.08)],
                 startPoint: .top,
                 endPoint: .bottom
             )
@@ -25,13 +25,13 @@ struct LoginView: View {
                     Circle()
                         .fill(
                             LinearGradient(
-                                colors: [Color.purple.opacity(0.85), Color.purple.opacity(0.55)],
+                                colors: [Color.blue.opacity(0.85), Color.blue.opacity(0.55)],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
                         )
                         .frame(width: 88, height: 88)
-                        .shadow(color: Color.purple.opacity(0.35), radius: 16, x: 0, y: 8)
+                        .shadow(color: Color.blue.opacity(0.35), radius: 16, x: 0, y: 8)
 
                     Image(systemName: "brain.head.profile")
                         .font(.system(size: 40, weight: .medium))
@@ -55,7 +55,7 @@ struct LoginView: View {
                     // New-user offer banner
                     HStack(spacing: 10) {
                         Image(systemName: "gift.fill")
-                            .foregroundStyle(Color.purple)
+                            .foregroundStyle(Color.blue)
                         VStack(alignment: .leading, spacing: 2) {
                             Text("New users get 200 free credits")
                                 .font(.subheadline.weight(.semibold))
@@ -66,7 +66,7 @@ struct LoginView: View {
                         Spacer()
                     }
                     .padding(14)
-                    .background(Color.purple.opacity(0.08))
+                    .background(Color.blue.opacity(0.08))
                     .clipShape(RoundedRectangle(cornerRadius: 12))
 
                     // Sign-in button
@@ -107,7 +107,7 @@ struct LoginView: View {
                 ProgressView()
                     .progressViewStyle(.circular)
                     .scaleEffect(1.4)
-                    .tint(.purple)
+                    .tint(.blue)
             }
         }
     }
@@ -145,7 +145,7 @@ private struct SignInButton: View {
             .frame(maxWidth: .infinity, minHeight: 50)
             .background(
                 LinearGradient(
-                    colors: [Color.purple, Color.purple.opacity(0.8)],
+                    colors: [Color.blue, Color.blue.opacity(0.8)],
                     startPoint: .leading,
                     endPoint: .trailing
                 )
