@@ -69,8 +69,14 @@ struct LoginView: View {
                     .background(Color.blue.opacity(0.08))
                     .clipShape(RoundedRectangle(cornerRadius: 12))
 
-                    // Sign-in button
-                    SignInButton {
+                    // Sign-up button (primary)
+                    SignInButton(label: "Create account", style: .primary) {
+                        signIn()
+                    }
+                    .disabled(authManager.isLoading)
+
+                    // Sign-in button (secondary)
+                    SignInButton(label: "Sign in", style: .secondary) {
                         signIn()
                     }
                     .disabled(authManager.isLoading)
@@ -126,31 +132,40 @@ struct LoginView: View {
 // MARK: - Generic Sign-In Button
 
 private struct SignInButton: View {
+    enum Style { case primary, secondary }
+
+    let label: String
+    let style: Style
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 12) {
-                Image(systemName: "person.badge.key.fill")
+                Image(systemName: style == .primary ? "person.badge.plus.fill" : "person.badge.key.fill")
                     .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(style == .primary ? .white : Color.blue)
 
-                Text("Sign in to continue")
+                Text(label)
                     .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(style == .primary ? .white : Color.blue)
 
                 Spacer()
             }
             .padding(.horizontal, 20)
             .frame(maxWidth: .infinity, minHeight: 50)
-            .background(
-                LinearGradient(
-                    colors: [Color.blue, Color.blue.opacity(0.8)],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .background {
+                if style == .primary {
+                    LinearGradient(
+                        colors: [Color.blue, Color.blue.opacity(0.8)],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                } else {
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.blue, lineWidth: 1.5)
+                }
+            }
         }
         .buttonStyle(.plain)
     }

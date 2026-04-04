@@ -12,8 +12,8 @@ private enum MSALConfig {
     static let authority   = "https://\(tenantName).ciamlogin.com/\(tenantId)"
     static let redirectUri = "msauth.z.Nexa://auth"
     // openid, profile, offline_access are reserved — MSAL adds them automatically.
-    // email is requested explicitly to ensure the claim is returned in the ID token.
-    static let scopes      = ["email"]
+    // Pass empty array so MSAL uses the defaults; avoids scope rejection on CIAM tenants.
+    static let scopes: [String] = []
 }
 
 // MARK: - AuthManager
