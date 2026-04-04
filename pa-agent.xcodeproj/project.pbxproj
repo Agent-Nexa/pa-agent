@@ -407,6 +407,7 @@
 				DEVELOPMENT_TEAM = SXM7L9UCM6;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_BGTaskSchedulerPermittedIdentifiers_0 = "z.Nexa.receipt-refresh";
 				INFOPLIST_KEY_CFBundleDisplayName = Nexa;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "Allow access so tasks can be added to your Calendar.";
@@ -416,7 +417,6 @@
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "We use the microphone to capture your spoken tasks.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Allow photo access so you can attach images in chat.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Allow speech recognition so you can speak tasks to the assistant.";
-				INFOPLIST_KEY_BGTaskSchedulerPermittedIdentifiers_0 = "z.Nexa.receipt-refresh";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UIBackgroundModes_0 = fetch;
@@ -451,6 +451,7 @@
 				DEVELOPMENT_TEAM = SXM7L9UCM6;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_BGTaskSchedulerPermittedIdentifiers_0 = "z.Nexa.receipt-refresh";
 				INFOPLIST_KEY_CFBundleDisplayName = Nexa;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "Allow access so tasks can be added to your Calendar.";
@@ -460,7 +461,6 @@
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "We use the microphone to capture your spoken tasks.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Allow photo access so you can attach images in chat.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Allow speech recognition so you can speak tasks to the assistant.";
-				INFOPLIST_KEY_BGTaskSchedulerPermittedIdentifiers_0 = "z.Nexa.receipt-refresh";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UIBackgroundModes_0 = fetch;

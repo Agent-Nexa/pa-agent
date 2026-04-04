@@ -3132,9 +3132,10 @@ struct ContentView: View {
     @State private var timerCancellable: Cancellable?
     @State private var showingAgentTaskAlert = false
     @State private var pendingAgentTask: TaskItem?
-    @State private var showingOverdueTaskAlert = false
-    @State private var pendingOverdueTask: TaskItem?
     @State private var promptedOverdueTaskIDs: Set<UUID> = []
+    @State private var showingOverdueSheet = false
+    @State private var overdueTasksToPresent: [TaskItem] = []
+    @State private var selectedOverdueIDs: Set<UUID> = []
     @State private var isAgentThinking = false
     @State private var copiedAgentMessageID: UUID?
     @State private var showScheduleConflictAlert = false
@@ -3385,30 +3386,15 @@ struct ContentView: View {
             }, message: {
                 Text("I couldn't schedule a start-date reminder. Check notification permissions.")
             })
-            .alert("Task Overdue", isPresented: $showingOverdueTaskAlert, presenting: pendingOverdueTask) { task in
-                if canDoTaskNow(task) {
-                    Button("Do It Now") {
-                        doTaskNow(task)
-                        pendingOverdueTask = nil
-                    }
-                }
-                Button("Complete") {
-                    completeTask(task)
-                    pendingOverdueTask = nil
-                }
-                Button("Postpone 1 Hour") {
-                    postponeTask(task, by: 3600)
-                    pendingOverdueTask = nil
-                }
-                Button("Cancel Task", role: .destructive) {
-                    cancelTask(task)
-                    pendingOverdueTask = nil
-                }
-                Button("Close", role: .cancel) {
-                    pendingOverdueTask = nil
-                }
-            } message: { task in
-                Text("\(task.title) is overdue. You can complete, postpone, or cancel it.")
+            .sheet(isPresented: $showingOverdueSheet) {
+                OverdueTasksSheet(
+                    tasks: $overdueTasksToPresent,
+                    selectedIDs: $selectedOverdueIDs,
+                    onComplete: { task in completeTask(task) },
+                    onPostpone: { task in postponeTask(task, by: 3600) },
+                    onCancel: { task in cancelTask(task) },
+                    onDismiss: { showingOverdueSheet = false }
+                )
             }
             .alert("Calendar access needed", isPresented: $showCalendarAlert, actions: {
                 Button("OK", role: .cancel) {}
@@ -3503,12 +3489,14 @@ struct ContentView: View {
 
     private func checkAgentTasks(at time: Date) {
         // Prevent interruption if already handling tasks
-        guard !showMessageComposer, !showEmailComposer, !showingAgentTaskAlert, !showingOverdueTaskAlert else { return }
+        guard !showMessageComposer, !showEmailComposer, !showingAgentTaskAlert, !showingOverdueSheet else { return }
 
-        if let overdueTask = tasks.first(where: { $0.isOverdue(now: time) && !promptedOverdueTaskIDs.contains($0.id) }) {
-            pendingOverdueTask = overdueTask
-            promptedOverdueTaskIDs.insert(overdueTask.id)
-            showingOverdueTaskAlert = true
+        let overdueBatch = tasks.filter { $0.isOverdue(now: time) && !promptedOverdueTaskIDs.contains($0.id) }
+        if !overdueBatch.isEmpty {
+            overdueBatch.forEach { promptedOverdueTaskIDs.insert($0.id) }
+            overdueTasksToPresent = overdueBatch
+            selectedOverdueIDs = Set(overdueBatch.map { $0.id })
+            showingOverdueSheet = true
             return
         }
 
@@ -5884,11 +5872,12 @@ extension ContentView {
         pendingEmail = .init()
         pendingCallRecipient = ""
         pendingAgentTask = nil
-        pendingOverdueTask = nil
         pendingConflictTask = nil
         pendingConflictMatches = []
         showingAgentTaskAlert = false
-        showingOverdueTaskAlert = false
+        showingOverdueSheet = false
+        overdueTasksToPresent = []
+        selectedOverdueIDs = []
         showScheduleConflictAlert = false
         isAgentThinking = false
     }
