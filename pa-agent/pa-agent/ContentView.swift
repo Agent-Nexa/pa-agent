@@ -3162,7 +3162,12 @@ struct ContentView: View {
 
     var body: some View {
         Group {
-            if !authManager.isSignedIn {
+            if authManager.isLoading {
+                // Splash while silent sign-in / biometric check resolves
+                SplashView()
+            } else if authManager.requiresBiometric {
+                BiometricLockView()
+            } else if !authManager.isSignedIn {
                 LoginView()
             } else if permissionSetupShown {
                 mainContent
@@ -3202,6 +3207,13 @@ struct ContentView: View {
                 showPermissionSetupSheet = false
             }
             .interactiveDismissDisabled(!permissionSetupShown)
+        }
+        .sheet(isPresented: Binding(
+            get: { authManager.shouldPromptBiometricSetup },
+            set: { _ in }
+        )) {
+            BiometricSetupSheet()
+                .environmentObject(authManager)
         }
     }
 

@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import MSAL
+import LocalAuthentication
 
 // MARK: - Configuration
 // Replace these values with your Azure Entra External ID app registration details.
@@ -23,13 +24,30 @@ final class AuthManager: ObservableObject {
 
     // MARK: Published state
 
-    @Published private(set) var isSignedIn: Bool = false
-    @Published private(set) var displayName: String = ""
-    @Published private(set) var email: String = ""
-    @Published private(set) var userId: String = ""        // Entra object ID (used for credit grant deduplication)
-    @Published private(set) var accessToken: String = ""
-    @Published private(set) var isLoading: Bool = false    // true while silent sign-in is resolving on launch
+    @Published private(set) var isSignedIn: Bool        = false
+    @Published private(set) var displayName: String      = ""
+    @Published private(set) var email: String            = ""
+    @Published private(set) var userId: String           = ""
+    @Published private(set) var accessToken: String      = ""
+    @Published private(set) var isLoading: Bool          = true  // true until silentSignIn resolves
     @Published private(set) var authError: String?
+    /// True when a cached account exists and biometric verification is pending.
+    @Published private(set) var requiresBiometric: Bool        = false
+    /// True after first sign-in when device has biometrics and user hasn't been asked yet.
+    @Published private(set) var shouldPromptBiometricSetup: Bool = false
+
+    private let biometricSetupAskedKey = "BIOMETRIC_SETUP_ASKED"
+    /// UserDefaults key — set after every successful sign-in, cleared on sign-out.
+    /// Used to drive the biometric relaunch gate independently of MSAL's Keychain cache.
+    private let lastUserIdKey       = "LAST_SIGNED_IN_USER_ID"
+    private let lastDisplayNameKey  = "LAST_SIGNED_IN_DISPLAY_NAME"
+    private let lastEmailKey        = "LAST_SIGNED_IN_EMAIL"
+    /// Whether the device supports and has biometrics enrolled.
+    var biometryType: LABiometryType {
+        let ctx = LAContext()
+        _ = ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
+        return ctx.biometryType
+    }
 
     // MARK: Private
 
@@ -48,6 +66,7 @@ final class AuthManager: ObservableObject {
         guard MSALConfig.clientId != "YOUR_CLIENT_ID" else {
             print("[AuthManager] ⚠️  MSALConfig placeholders not yet replaced. Skipping MSAL init.")
             authError = "Placeholders not replaced in AuthManager.swift"
+            isLoading = false
             return
         }
 
@@ -57,6 +76,7 @@ final class AuthManager: ObservableObject {
             let msg = "Could not form URL from: \(MSALConfig.authority)"
             print("[AuthManager] ❌ \(msg)")
             authError = msg
+            isLoading = false
             return
         }
 
@@ -73,12 +93,21 @@ final class AuthManager: ObservableObject {
             let msg = "MSAL init failed: \(error.localizedDescription)"
             print("[AuthManager] ❌ \(msg)\nFull error: \(error)")
             authError = msg
+            isLoading = false
         }
     }
 
     // MARK: - Interactive Sign-In
 
     func signIn(presenting viewController: UIViewController) {
+        acquireToken(presenting: viewController, prompt: .login)
+    }
+
+    func signUp(presenting viewController: UIViewController) {
+        acquireToken(presenting: viewController, prompt: .create)
+    }
+
+    private func acquireToken(presenting viewController: UIViewController, prompt: MSALPromptType) {
         guard let msalApp else {
             authError = "Auth not configured. Set Client ID and Tenant ID in AuthManager.swift."
             return
@@ -86,6 +115,7 @@ final class AuthManager: ObservableObject {
 
         let webParameters = MSALWebviewParameters(authPresentationViewController: viewController)
         let interactiveParameters = MSALInteractiveTokenParameters(scopes: MSALConfig.scopes, webviewParameters: webParameters)
+        interactiveParameters.promptType = prompt
 
         isLoading = true
         authError = nil
@@ -115,16 +145,92 @@ final class AuthManager: ObservableObject {
     // MARK: - Silent Sign-In (restore session on launch)
 
     func silentSignIn() async {
-        guard let msalApp else {
+        // Check UserDefaults for a previously signed-in user.
+        // This is more reliable than querying MSAL's allAccounts() on CIAM tenants
+        // where Keychain reads silently fail between cold launches.
+        let savedUserId = UserDefaults.standard.string(forKey: lastUserIdKey)
+        print("[AuthManager] silentSignIn: savedUserId=\(savedUserId ?? "nil")")
+
+        guard savedUserId != nil else {
+            print("[AuthManager] silentSignIn: no saved user — showing LoginView")
             isLoading = false
             return
         }
 
-        // allAccounts() is synchronous in MSAL iOS
-        guard let account = try? msalApp.allAccounts().first else {
+        // A user was previously signed in — gate with Face ID / Touch ID if available.
+        let ctx = LAContext()
+        var biometricError: NSError?
+        let canUseBiometrics = ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &biometricError)
+        print("[AuthManager] silentSignIn: canUseBiometrics=\(canUseBiometrics) biometryType=\(ctx.biometryType.rawValue)")
+
+        if canUseBiometrics {
+            isLoading = false
+            requiresBiometric = true
+            print("[AuthManager] silentSignIn: requiresBiometric=true — BiometricLockView shown")
+            return
+        }
+
+        // No biometrics on device — try silent MSAL token refresh, fall back to UserDefaults profile.
+        guard let msalApp else {
+            restoreFromSavedProfile()
             isLoading = false
             return
         }
+
+        let msalAccount = (try? msalApp.allAccounts())?.first
+        if let account = msalAccount {
+            await performSilentTokenRefresh(account: account)
+        } else {
+            isLoading = false
+        }
+        if !isSignedIn {
+            restoreFromSavedProfile()
+        }
+    }
+
+    // MARK: - Biometric Sign-In
+
+    func biometricSignIn() async {
+        let msalAccount = (try? msalApp?.allAccounts())?.first
+        print("[AuthManager] biometricSignIn: msalAccount=\(msalAccount?.username ?? "nil")")
+        let ctx = LAContext()
+        let reason = "Verify your identity to access Nexa"
+
+        let success = await withCheckedContinuation { continuation in
+            ctx.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics,
+                               localizedReason: reason) { success, error in
+                print("[AuthManager] biometricSignIn: result=\(success) error=\(error?.localizedDescription ?? "none")")
+                continuation.resume(returning: success)
+            }
+        }
+
+        guard success else {
+            // Biometric failed — keep requiresBiometric true so user can retry
+            authError = "Biometric verification failed. Try again."
+            return
+        }
+
+        authError = nil
+        requiresBiometric = false
+
+        if let account = msalAccount {
+            await performSilentTokenRefresh(account: account)
+        }
+        // Regardless of whether MSAL silent refresh worked, if not signed in yet
+        // restore from UserDefaults (biometric already verified identity).
+        if !isSignedIn {
+            restoreFromSavedProfile()
+        }
+    }
+
+    /// Dismiss biometric lock and fall back to full sign-in
+    func cancelBiometricAndSignOut() {
+        requiresBiometric = false
+        signOut()
+    }
+
+    private func performSilentTokenRefresh(account: MSALAccount) async {
+        guard let msalApp else { return }
 
         guard let authorityURL = URL(string: MSALConfig.authority),
               let authority = try? MSALCIAMAuthority(url: authorityURL) else {
@@ -132,22 +238,38 @@ final class AuthManager: ObservableObject {
             return
         }
 
-        let silentParameters = MSALSilentTokenParameters(scopes: MSALConfig.scopes, account: account)
+        // CIAM silent refresh: pass the actual OIDC scopes MSAL expanded during interactive login.
+        // Using empty scopes [] fails because MSAL can't match the cached token entry.
+        let silentScopes = ["openid", "profile", "offline_access"]
+        let silentParameters = MSALSilentTokenParameters(scopes: silentScopes, account: account)
         silentParameters.authority = authority
 
-        // MSAL uses callbacks, not async/await — wrap with a continuation
         let result: MSALResult? = await withCheckedContinuation { continuation in
             msalApp.acquireTokenSilent(with: silentParameters) { result, error in
                 if let error {
-                    print("[AuthManager] Silent sign-in failed (expected on first launch): \(error.localizedDescription)")
+                    print("[AuthManager] Silent token refresh failed: \(error.localizedDescription)")
                 }
                 continuation.resume(returning: result)
             }
         }
 
         isLoading = false
-        if let result { applyResult(result) }
-        // If nil, the cached token is expired — LoginView will show
+        if let result {
+            applyResult(result)
+        } else {
+            // Silent refresh failed (expired token or CIAM issue).
+            // Do NOT remove the cached MSAL account — preserve it so Face ID
+            // can gate the next launch. Just clear in-memory state so LoginView
+            // is shown and the user can interactively re-authenticate once.
+            print("[AuthManager] Silent refresh failed — clearing in-memory state but keeping MSAL account in cache")
+            isSignedIn        = false
+            requiresBiometric = false
+            displayName       = ""
+            email             = ""
+            userId            = ""
+            accessToken       = ""
+            authError         = nil
+        }
     }
 
     // MARK: - Sign Out
@@ -164,12 +286,18 @@ final class AuthManager: ObservableObject {
             print("[AuthManager] Sign-out error: \(error)")
         }
 
-        isSignedIn = false
-        displayName = ""
-        email = ""
-        userId = ""
-        accessToken = ""
-        authError = nil
+        isSignedIn        = false
+        requiresBiometric = false
+        displayName       = ""
+        email             = ""
+        userId            = ""
+        accessToken       = ""
+        authError         = nil
+        // Clear persisted login state so next launch goes straight to LoginView.
+        UserDefaults.standard.removeObject(forKey: lastUserIdKey)
+        UserDefaults.standard.removeObject(forKey: lastDisplayNameKey)
+        UserDefaults.standard.removeObject(forKey: lastEmailKey)
+        UserDefaults.standard.removeObject(forKey: biometricSetupAskedKey)
     }
 
     // MARK: - Handle Redirect URL (called from AppDelegate)
@@ -179,6 +307,32 @@ final class AuthManager: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    /// Populate state from a cached account when silent token refresh is unavailable.
+    /// The user authenticated via biometrics so identity is verified; access token is empty
+    /// and will be refreshed on the next API call.
+    private func applyAccountAsFallback(_ account: MSALAccount) {
+        isSignedIn  = true
+        displayName = account.username ?? ""
+        email       = account.username ?? ""
+        userId      = account.identifier ?? ""
+        accessToken = ""
+        print("[AuthManager] Biometric fallback: signed in from cached account (no fresh token)")
+    }
+
+    /// Restore profile from UserDefaults when MSAL Keychain returns no account.
+    private func restoreFromSavedProfile() {
+        let savedId   = UserDefaults.standard.string(forKey: lastUserIdKey) ?? ""
+        let savedName = UserDefaults.standard.string(forKey: lastDisplayNameKey) ?? ""
+        let savedEmail = UserDefaults.standard.string(forKey: lastEmailKey) ?? ""
+        guard !savedId.isEmpty else { return }
+        isSignedIn   = true
+        userId       = savedId
+        displayName  = savedName
+        email        = savedEmail
+        accessToken  = ""   // will be refreshed on next API call
+        print("[AuthManager] Restored profile from UserDefaults: \(savedEmail)")
+    }
 
     private func applyResult(_ result: MSALResult) {
         isSignedIn  = true
@@ -193,6 +347,33 @@ final class AuthManager: ObservableObject {
                       ?? account.username
                       ?? ""
         userId      = account.identifier ?? ""
+
+        // Persist profile to UserDefaults so the biometric relaunch gate works
+        // even if MSAL's Keychain cache is not readable on the next launch.
+        UserDefaults.standard.set(userId,      forKey: lastUserIdKey)
+        UserDefaults.standard.set(displayName, forKey: lastDisplayNameKey)
+        UserDefaults.standard.set(email,       forKey: lastEmailKey)
+
+        // Prompt biometric setup on first interactive sign-in if not yet asked
+        let alreadyAsked = UserDefaults.standard.bool(forKey: biometricSetupAskedKey)
+        if !alreadyAsked {
+            let ctx = LAContext()
+            if ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil) {
+                shouldPromptBiometricSetup = true
+            }
+        }
+    }
+
+    /// User agreed to use biometrics — mark as asked.
+    func confirmBiometricSetup() {
+        UserDefaults.standard.set(true, forKey: biometricSetupAskedKey)
+        shouldPromptBiometricSetup = false
+    }
+
+    /// User declined biometrics — mark as asked so we never prompt again.
+    func skipBiometricSetup() {
+        UserDefaults.standard.set(true, forKey: biometricSetupAskedKey)
+        shouldPromptBiometricSetup = false
     }
 
     private func extractClaim(_ claim: String, from idToken: String?) -> String? {

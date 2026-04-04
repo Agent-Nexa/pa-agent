@@ -71,7 +71,7 @@ struct LoginView: View {
 
                     // Sign-up button (primary)
                     SignInButton(label: "Create account", style: .primary) {
-                        signIn()
+                        signUp()
                     }
                     .disabled(authManager.isLoading)
 
@@ -121,11 +121,19 @@ struct LoginView: View {
     // MARK: - Actions
 
     private func signIn() {
-        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let rootVC = windowScene.windows.first?.rootViewController else {
-            return
-        }
+        guard let rootVC = rootViewController() else { return }
         authManager.signIn(presenting: rootVC)
+    }
+
+    private func signUp() {
+        guard let rootVC = rootViewController() else { return }
+        authManager.signUp(presenting: rootVC)
+    }
+
+    private func rootViewController() -> UIViewController? {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first?.windows.first?.rootViewController
     }
 }
 
