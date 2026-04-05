@@ -105,7 +105,7 @@ extension NotificationManager {
         center.removePendingNotificationRequests(withIdentifiers: [identifier])
         
         // Determine the dynamically configured agent name
-        let agentName = UserDefaults.standard.string(forKey: "AGENT_NAME") ?? "Nexa"
+        let agentName = UserDefaults.standard.string(forKey: AppConfig.Keys.agentName) ?? AppConfig.Defaults.agentName
         
         // Create the engaging content
         let content = UNMutableNotificationContent()

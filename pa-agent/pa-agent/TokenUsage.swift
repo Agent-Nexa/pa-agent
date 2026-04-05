@@ -115,8 +115,7 @@ final class TokenUsageManager: ObservableObject {
     var currentUserId: String = ""
 
     private var serverBaseURL: String {
-        UserDefaults.standard.string(forKey: "PA_AGENT_SERVER_URL")
-            ?? "https://pa-agent-web-frontend.agreeableisland-6e08f0fa.australiaeast.azurecontainerapps.io"
+        UserDefaults.standard.string(forKey: AppConfig.Keys.serverURL) ?? AppConfig.Defaults.serverURL
     }
 
     private let storageKey = "AI_TOKEN_USAGE_ENTRIES"

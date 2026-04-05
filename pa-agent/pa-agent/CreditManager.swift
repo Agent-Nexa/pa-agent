@@ -18,11 +18,9 @@ final class CreditManager: ObservableObject {
     static let newUserGrantAmount = 200
     private let creditsKey = "USER_CREDITS"
 
-    /// Base URL of the PA-Agent backend.  Override via UserDefaults key
-    /// "PA_AGENT_SERVER_URL" (e.g. in Settings) or change this default.
+    /// Base URL of the PA-Agent backend. Configured via AppConfig.Keys.serverURL.
     private var serverBaseURL: String {
-        UserDefaults.standard.string(forKey: "PA_AGENT_SERVER_URL")
-            ?? "https://pa-agent-web-frontend.agreeableisland-6e08f0fa.australiaeast.azurecontainerapps.io"
+        UserDefaults.standard.string(forKey: AppConfig.Keys.serverURL) ?? AppConfig.Defaults.serverURL
     }
 
     // MARK: Published

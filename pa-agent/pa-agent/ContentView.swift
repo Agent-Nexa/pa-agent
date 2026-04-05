@@ -75,6 +75,9 @@ struct IntentResult: Codable {
     
     // Multi-tracking
     var trackings: [TrackingIntent]? = nil
+
+    // Skill routing — IDs the LLM selected as relevant to this query
+    var usedSkillIds: [String]? = nil
 }
 
 struct TrackingIntent: Codable {
@@ -438,6 +441,14 @@ final class IntentService {
         let contextBlock = (appContext?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
             ? "\nAPP CONTEXT (from local app state):\n\(appContext!)\n"
             : ""
+        let skillCatalogBlock: String = {
+            let skills = SkillsStore.shared.enabledSkills
+            guard !skills.isEmpty else { return "" }
+            let lines = skills.map {
+                "  - id=\"\($0.skill_id)\" name=\"\($0.name)\" desc=\"\(String(($0.description ?? $0.name).prefix(80)))\""
+            }.joined(separator: "\n")
+            return "\nUSER SKILL CATALOG (select relevant skill IDs for usedSkillIds):\n\(lines)\n"
+        }()
         
         let systemPrompt = """
         You are \(agentName), an intelligent personal assistant. \(userContext) The current time is \(nowString) (\(weekdayStr)).
@@ -451,7 +462,7 @@ final class IntentService {
         3. Send Email (Action: 'sendEmail'): Prepare an email.
         4. Make Phone Call (Action: 'makePhoneCall'): Prepare a phone call.
         5. Answer/Chat (Action: 'answer'): Answer questions, chat, or explain limitations.
-        6. Record Tracking Data (Action: 'track'): Record a value like spending or fitness for a tracking category.
+        6. Record Tracking Data (Action: 'track'): Record a value like spending or fitness for a tracking category.\(SkillsManager.shared.extraCapabilities())
 
         LOGIC RULES:
         1. GENERATIVE CONTENT:
@@ -520,7 +531,10 @@ final class IntentService {
           "trackings": [
              { "trackingCategoryId": "...",
           "trackingUnit": "...", "trackingValue": 123.45, "trackingNote": "...", "trackingDate": "YYYY-MM-DD HH:mm" }
-          ]
+          ],
+          "usedSkillIds": ["<skill_id>"]  // IDs from USER SKILL CATALOG relevant to this query; [] if none
+        }
+        \(skillCatalogBlock)
         Respond ONLY with valid JSON.
         """
 
@@ -1516,7 +1530,8 @@ final class IntentService {
         let trackingNote = dict["trackingNote"] as? String
         let trackingUnit = dict["trackingUnit"] as? String
         let trackingDate = parseDate(dict["trackingDate"])
-        
+        let usedSkillIds = dict["usedSkillIds"] as? [String]
+
         var parsedTrackings: [TrackingIntent]? = nil
         if let trackingsArr = dict["trackings"] as? [[String: Any]] {
             parsedTrackings = trackingsArr.compactMap { tDict -> TrackingIntent? in
@@ -1559,7 +1574,8 @@ final class IntentService {
                 recipient: recipient,
                 messageBody: messageBody,
                 performer: performer,
-                isScheduled: isScheduled
+                isScheduled: isScheduled,
+                usedSkillIds: usedSkillIds
             )
         }
 
@@ -1583,7 +1599,8 @@ final class IntentService {
             trackingValue: trackingValue,
             trackingNote: trackingNote,
             trackingDate: trackingDate,
-            trackings: parsedTrackings
+            trackings: parsedTrackings,
+            usedSkillIds: usedSkillIds
         )
     }
 
@@ -1633,14 +1650,16 @@ struct ChatMessage: Identifiable, Hashable {
     let timestamp: Date
     let taskStatusSnapshot: TaskStatusSnapshot?
     let responseTitle: String?
+    let usedSkillNames: [String]?
 
-    init(id: UUID = UUID(), isUser: Bool, text: String, timestamp: Date = .init(), taskStatusSnapshot: TaskStatusSnapshot? = nil, responseTitle: String? = nil) {
+    init(id: UUID = UUID(), isUser: Bool, text: String, timestamp: Date = .init(), taskStatusSnapshot: TaskStatusSnapshot? = nil, responseTitle: String? = nil, usedSkillNames: [String]? = nil) {
         self.id = id
         self.isUser = isUser
         self.text = text
         self.timestamp = timestamp
         self.taskStatusSnapshot = taskStatusSnapshot
         self.responseTitle = responseTitle
+        self.usedSkillNames = usedSkillNames
     }
 }
 
@@ -2247,7 +2266,7 @@ struct PendingAttachment: Equatable {
     }
 }
 
-struct EmailDraft: Equatable {
+struct PendingEmailDraft: Equatable {
     var recipient: String = ""
     var recipientName: String = ""
     var subject: String = ""
@@ -2264,7 +2283,7 @@ enum InteractionState: Equatable {
     case collectingEmailBody
     case collectingUserName 
     case answeringEmailQuestion
-    case confirmingEmail(EmailDraft)
+    case confirmingEmail(PendingEmailDraft)
     case clarifyingContact(candidates: [SimpleContact], forCall: Bool, forEmail: Bool)
     case verifyingEmailContact(contact: SimpleContact)
     case collectingEmailAddressForContact(contact: SimpleContact)
@@ -3089,7 +3108,7 @@ struct ContentView: View {
     @State private var draft: String = ""
     @State private var pendingDraft: TaskDraft = .init(title: "")
     @State private var pendingMessage: MessageDraft = .init()
-    @State private var pendingEmail: EmailDraft = .init()
+    @State private var pendingEmail: PendingEmailDraft = .init()
     @State private var pendingCallRecipient: String = ""
     @State private var pendingScheduledActionPayload: TaskItem.AgentAction? = nil
     @State private var interactionState: InteractionState = .idle
@@ -3132,8 +3151,14 @@ struct ContentView: View {
     @StateObject private var notificationManager = NotificationManager.shared
     @StateObject private var speechManager = SpeechManager()
     @StateObject private var subscriptionManager = SubscriptionManager.shared
+    @StateObject private var skillsManager = SkillsManager.shared
+    @StateObject private var skillsStore   = SkillsStore.shared
+    @StateObject private var emailStore = EmailStore.shared
+    @StateObject private var sharedContentProcessor = SharedContentProcessor.shared
     @State private var showNotificationList = false
     @State private var showSavedItemsSheet = false
+    @State private var showSkillsSheet = false
+    @State private var showEmailInbox = false
     @State private var selectedTaskForDetail: TaskItem?
     @State private var pendingDetectedReceipts: [DetectedReceipt] = []
     @State private var showReceiptImportReviewSheet = false
@@ -3260,6 +3285,31 @@ struct ContentView: View {
                      checkAgentTasks(at: Date())
                      Task { await refreshSystemTasks() }
                      Task { await checkForNewPhotoReceipts() }
+                     // Restore email sessions
+                     Task { await GmailService.shared.restoreSession() }
+                     Task { await OutlookService.shared.restoreSession() }
+                     // Process any items forwarded via the Share Extension
+                     if skillsManager.isEnabled(.messaging) {
+                         sharedContentProcessor.refreshPendingCount()
+                         Task {
+                             await sharedContentProcessor.processAll(
+                                 intentService: intentService,
+                                 agentName: agentName,
+                                 userName: userName.isEmpty ? nil : userName,
+                                 apiKey: storedApiKey.isEmpty ? nil : storedApiKey,
+                                 model: storedModel,
+                                 useAzure: useAzure,
+                                 azureEndpoint: azureEndpoint
+                             )
+                         }
+                     }
+                     if skillsManager.isEnabled(.email) {
+                         Task { await emailStore.refresh() }
+                     }
+                     // Refresh user-defined skills from the server
+                     if !authManager.email.isEmpty {
+                         Task { await SkillsStore.shared.fetch(userID: authManager.email) }
+                     }
                 } else if newPhase == .inactive || newPhase == .background {
                     ChatHistoryStore.shared.flushMessages(messages)
                     if newPhase == .background {
@@ -3286,6 +3336,17 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showAIUsageSheet) {
                 AIUsageView()
+            }
+            .sheet(isPresented: $showEmailInbox) {
+                EmailInboxView(
+                    intentService: intentService,
+                    apiKey: storedApiKey.isEmpty ? nil : storedApiKey,
+                    model: storedModel,
+                    useAzure: useAzure,
+                    azureEndpoint: azureEndpoint,
+                    agentName: agentName,
+                    userName: userName.isEmpty ? nil : userName
+                )
             }
             .sheet(isPresented: $showTrackingSheet) {
                 TrackingCategoriesView(
@@ -3320,6 +3381,10 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showSavedItemsSheet) {
                 SavedItemsSheet(items: $savedAgentItems)
+            }
+            .sheet(isPresented: $showSkillsSheet) {
+                SkillsSheetView()
+                    .environmentObject(authManager)
             }
             .sheet(item: $selectedTaskForDetail) { task in
                 TaskDetailsSheet(task: task)
@@ -3656,7 +3721,7 @@ struct ContentView: View {
                     showMessageComposer = true
                 } else if payload.type == "sendEmail" {
                     if finalBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        pendingEmail = EmailDraft(recipient: finalRecipient, subject: payload.subject ?? "Update", body: "")
+                        pendingEmail = PendingEmailDraft(recipient: finalRecipient, subject: payload.subject ?? "Update", body: "")
                         interactionState = .collectingEmailBody
                         withAnimation {
                             messages.append(.init(isUser: false, text: "What should the email to \(finalRecipient) say?"))
@@ -3666,7 +3731,7 @@ struct ContentView: View {
                     // For email, we might want to generate a subject too if missing? 
                     // PolishMessage returns just body. 
                     // Let's keep subject as is for now.
-                    pendingEmail = EmailDraft(recipient: finalRecipient, subject: payload.subject ?? "Update", body: finalBody)
+                    pendingEmail = PendingEmailDraft(recipient: finalRecipient, subject: payload.subject ?? "Update", body: finalBody)
                     showEmailComposer = true
                 } else if payload.type == "makePhoneCall" || payload.type == "call" {
                     if let script = payload.script, !script.isEmpty {
@@ -3814,6 +3879,28 @@ struct ContentView: View {
             }
             Spacer()
 
+            // Mail button — only visible when Email skill is enabled
+            if skillsManager.isEnabled(.email) {
+                Button(action: { showEmailInbox = true }) {
+                    ZStack(alignment: .topTrailing) {
+                        Image(systemName: "envelope")
+                            .font(.title3)
+                        let unread = emailStore.emails.filter { !$0.isRead }.count
+                        if unread > 0 {
+                            Text(unread > 99 ? "99+" : "\(unread)")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 3)
+                                .background(Color.red)
+                                .clipShape(Capsule())
+                                .offset(x: 8, y: -6)
+                        }
+                    }
+                }
+                .padding(.trailing, 8)
+                .accessibilityLabel("Email inbox")
+            }
+
             Button(action: { showTasksList = true }) {
                 Image(systemName: "checklist")
                     .font(.title3)
@@ -3826,6 +3913,13 @@ struct ContentView: View {
             }
             .padding(.trailing, 8)
             .accessibilityLabel("Saved items")
+
+            Button(action: { showSkillsSheet = true }) {
+                Image(systemName: "sparkles")
+                    .font(.title3)
+            }
+            .padding(.trailing, 8)
+            .accessibilityLabel("Skills")
 
             Button(action: startNewChatSession) {
                 Image(systemName: "square.and.pencil")
@@ -4086,6 +4180,25 @@ struct ContentView: View {
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel("Copy response")
+                        }
+                        if let skills = message.usedSkillNames, !skills.isEmpty {
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 4) {
+                                    ForEach(skills, id: \.self) { skillName in
+                                        HStack(spacing: 3) {
+                                            Image(systemName: "sparkles")
+                                                .font(.system(size: 8, weight: .semibold))
+                                            Text(skillName)
+                                                .font(.system(size: 10, weight: .medium))
+                                        }
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 3)
+                                        .background(Color.purple.opacity(0.10))
+                                        .foregroundStyle(Color.purple.opacity(0.8))
+                                        .clipShape(Capsule())
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -6381,7 +6494,7 @@ extension ContentView {
         }
     }
 
-    private func extractEmailDraftFromAssistantText(_ assistantText: String) -> EmailDraft? {
+    private func extractEmailDraftFromAssistantText(_ assistantText: String) -> PendingEmailDraft? {
         let lower = assistantText.lowercased()
         guard lower.contains("open mail app"), lower.contains("yes") else { return nil }
 
@@ -6404,7 +6517,7 @@ extension ContentView {
         let cleanedBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !cleanedBody.isEmpty else { return nil }
-        return EmailDraft(recipient: cleanedRecipient, recipientName: pendingEmail.recipientName, subject: cleanedSubject, body: cleanedBody)
+        return PendingEmailDraft(recipient: cleanedRecipient, recipientName: pendingEmail.recipientName, subject: cleanedSubject, body: cleanedBody)
     }
 
     private func cleanDraftBodyText(_ text: String) -> String {
@@ -7026,7 +7139,7 @@ extension ContentView {
                 let to = draft.recipient ?? ""
                 // Trim body to ensure meaningful content
                 let cleanBody = draft.messageBody?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                pendingEmail = EmailDraft(recipient: to, subject: draft.subject ?? "", body: cleanBody)
+                pendingEmail = PendingEmailDraft(recipient: to, subject: draft.subject ?? "", body: cleanBody)
                 
                 if !to.isEmpty {
                      await resolveAndProceed(recipient: to, forCall: false, forEmail: true)
@@ -7154,13 +7267,18 @@ extension ContentView {
                 let statusSnapshot = shouldShowTaskStatusChart(for: text) ? currentTaskStatusSnapshot() : nil
                 let fallbackReply = draft.answer ?? "I'm here to help."
                 let responseTitle = resolveResponseTitle(userText: text, modelTitle: draft.title, replyText: fallbackReply)
+                let routedSkills: [SkillDefinitionModel] = {
+                    guard let ids = draft.usedSkillIds, !ids.isEmpty else { return SkillsStore.shared.enabledSkills }
+                    return SkillsStore.shared.enabledSkills.filter { ids.contains($0.skill_id) }
+                }()
+                let activeSkillNames: [String]? = routedSkills.isEmpty ? nil : routedSkills.map(\.name)
                 var latestAgentReplyText: String? = nil
                 if isAIFeatureEnabled, lastIntentSource == "openai" {
                     let placeholderId = UUID()
                     var didReceiveStreamEvent = false
                     withAnimation {
                         isAgentThinking = true
-                        messages.append(.init(id: placeholderId, isUser: false, text: "", taskStatusSnapshot: statusSnapshot, responseTitle: responseTitle))
+                        messages.append(.init(id: placeholderId, isUser: false, text: "", taskStatusSnapshot: statusSnapshot, responseTitle: responseTitle, usedSkillNames: activeSkillNames))
                     }
 
                     let streamResult = await intentService.streamAnswer(
@@ -7172,7 +7290,7 @@ extension ContentView {
                         azureEndpoint: azureEndpoint,
                         userName: userName,
                         agentName: agentName,
-                        appContext: buildAIContextSnapshot(),
+                        appContext: buildAIContextSnapshot(filteredSkillIds: draft.usedSkillIds),
                         previousResponseId: lastResponseId,
                         onStreamEvent: {
                             if !didReceiveStreamEvent {
@@ -7185,7 +7303,7 @@ extension ContentView {
                     ) { partial in
                         if let index = messages.firstIndex(where: { $0.id == placeholderId }) {
                             let existing = messages[index]
-                            messages[index] = .init(id: existing.id, isUser: existing.isUser, text: partial, timestamp: existing.timestamp, taskStatusSnapshot: existing.taskStatusSnapshot, responseTitle: existing.responseTitle)
+                            messages[index] = .init(id: existing.id, isUser: existing.isUser, text: partial, timestamp: existing.timestamp, taskStatusSnapshot: existing.taskStatusSnapshot, responseTitle: existing.responseTitle, usedSkillNames: existing.usedSkillNames)
                         }
                     }
                     lastResponseId = streamResult?.responseId
@@ -7201,21 +7319,21 @@ extension ContentView {
                         latestAgentReplyText = streamed
                         if let index = messages.firstIndex(where: { $0.id == placeholderId }) {
                             let existing = messages[index]
-                            messages[index] = .init(id: existing.id, isUser: existing.isUser, text: streamed, timestamp: existing.timestamp, taskStatusSnapshot: existing.taskStatusSnapshot, responseTitle: existing.responseTitle)
+                            messages[index] = .init(id: existing.id, isUser: existing.isUser, text: streamed, timestamp: existing.timestamp, taskStatusSnapshot: existing.taskStatusSnapshot, responseTitle: existing.responseTitle, usedSkillNames: existing.usedSkillNames)
                         }
                     } else {
                         let reply = fallbackReply
                         latestAgentReplyText = reply
                         if let index = messages.firstIndex(where: { $0.id == placeholderId }) {
                             let existing = messages[index]
-                            messages[index] = .init(id: existing.id, isUser: existing.isUser, text: reply, timestamp: existing.timestamp, taskStatusSnapshot: existing.taskStatusSnapshot, responseTitle: existing.responseTitle)
+                            messages[index] = .init(id: existing.id, isUser: existing.isUser, text: reply, timestamp: existing.timestamp, taskStatusSnapshot: existing.taskStatusSnapshot, responseTitle: existing.responseTitle, usedSkillNames: existing.usedSkillNames)
                         }
                     }
                 } else {
                     let reply = fallbackReply
                     latestAgentReplyText = reply
                     withAnimation {
-                        messages.append(.init(isUser: false, text: reply, taskStatusSnapshot: statusSnapshot, responseTitle: responseTitle))
+                        messages.append(.init(isUser: false, text: reply, taskStatusSnapshot: statusSnapshot, responseTitle: responseTitle, usedSkillNames: activeSkillNames))
                     }
                 }
 
@@ -9137,7 +9255,7 @@ extension ContentView {
         }
     }
 
-    private func buildAIContextSnapshot() -> String {
+    private func buildAIContextSnapshot(filteredSkillIds: [String]? = nil) -> String {
         let calendar = Calendar.current
         let now = Date()
         let startOfToday = calendar.startOfDay(for: now)
@@ -9226,6 +9344,16 @@ extension ContentView {
 
         TRACKING_CATEGORIES:
         \(trackingCats.isEmpty ? "- none" : trackingCats)
+        \(SkillsManager.shared.contextSnippet(emailStore: emailStore).isEmpty ? "" : "\n" + SkillsManager.shared.contextSnippet(emailStore: emailStore))\({
+            let skills: [SkillDefinitionModel] = {
+                if let ids = filteredSkillIds, !ids.isEmpty {
+                    return SkillsStore.shared.enabledSkills.filter { ids.contains($0.skill_id) }
+                }
+                return SkillsStore.shared.enabledSkills
+            }()
+            let suffix = SkillsStore.shared.buildInlinePromptSuffix(for: skills)
+            return suffix.isEmpty ? "" : "\n" + suffix
+        }())
         """
     }
 
