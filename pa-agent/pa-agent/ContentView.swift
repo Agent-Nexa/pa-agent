@@ -377,7 +377,7 @@ final class IntentService {
     /// Entra access token forwarded as X-User-Token for APIM user identification.
     var accessToken: String = ""
 
-    func infer(from text: String, imageDataURL: String? = nil, apiKey: String?, model: String?, useAzure: Bool, azureEndpoint: String?, userName: String?, agentName: String = "Nexa", appContext: String? = nil) async -> IntentResult? {
+    func infer(from text: String, imageDataURL: String? = nil, apiKey: String?, model: String?, useAzure: Bool, azureEndpoint: String?, userName: String?, agentName: String = "Nexa", appContext: String? = nil, conversationHistory: [ChatMessage] = []) async -> IntentResult? {
         let rawKey = apiKey ?? ""
         guard (!rawKey.isEmpty || useAzure) else {
             usedOpenAI = false
@@ -534,14 +534,16 @@ final class IntentService {
             userMessageContent = text
         }
 
+        var apiMessages: [[String: Any]] = [["role": "system", "content": systemPrompt]]
+        for msg in conversationHistory.suffix(20) {
+            apiMessages.append(["role": msg.isUser ? "user" : "assistant", "content": msg.text])
+        }
+        apiMessages.append(["role": "user", "content": userMessageContent])
         let body: [String: Any] = [
             "model": chosenModel,
             "temperature": 0,
             "response_format": ["type": "json_object"],
-            "messages": [
-                ["role": "system", "content": systemPrompt],
-                ["role": "user", "content": userMessageContent]
-            ]
+            "messages": apiMessages
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         let requestText = "\(systemPrompt)\n\nUser:\n\(text)\n\nHasImage:\(imageDataURL?.isEmpty == false)"
@@ -591,9 +593,10 @@ final class IntentService {
         userName: String?,
         agentName: String = "Nexa",
         appContext: String? = nil,
+        previousResponseId: String? = nil,
         onStreamEvent: (@MainActor () -> Void)? = nil,
         onDelta: @escaping @MainActor (String) -> Void
-    ) async -> String? {
+    ) async -> (text: String, responseId: String?)? {
         let rawKey = apiKey ?? ""
         guard (!rawKey.isEmpty || useAzure) else { return nil }
         let apiKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -602,14 +605,14 @@ final class IntentService {
         let endpointURL: URL
 
         if useAzure {
-            guard var azureString = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
-            if let range = azureString.range(of: "/deployments/[^/]+/", options: .regularExpression) {
-                azureString.replaceSubrange(range, with: "/deployments/\(chosenModel)/")
-            }
-            guard let scriptUrl = URL(string: azureString) else { return nil }
-            endpointURL = scriptUrl
+            guard let azureString = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  let azureBaseURL = URL(string: azureString),
+                  let host = azureBaseURL.host else { return nil }
+            let scheme = azureBaseURL.scheme ?? "https"
+            guard let url = URL(string: "\(scheme)://\(host)/openai/v1/responses") else { return nil }
+            endpointURL = url
         } else {
-            endpointURL = URL(string: "https://api.openai.com/v1/chat/completions")!
+            endpointURL = URL(string: "https://api.openai.com/v1/responses")!
         }
 
         var request = URLRequest(url: endpointURL)
@@ -642,26 +645,27 @@ final class IntentService {
         \(contextBlock)
         """
 
-        let userMessageContent: Any
+        let userInput: Any
         if let imageDataURL, !imageDataURL.isEmpty {
-            userMessageContent = [
-                ["type": "text", "text": text.isEmpty ? "Please analyze this image, intelligently deduce the true intent, logically estimate the subject's metric value (e.g. calories, price), and explicitly ask the user if they'd like to track that specific estimated value." : text],
-                ["type": "image_url", "image_url": ["url": imageDataURL]]
+            userInput = [
+                ["type": "input_text", "text": text.isEmpty ? "Please analyze this image, intelligently deduce the true intent, logically estimate the subject's metric value (e.g. calories, price), and explicitly ask the user if they'd like to track that specific estimated value." : text],
+                ["type": "input_image", "image_url": imageDataURL]
             ]
         } else {
-            userMessageContent = text
+            userInput = text
         }
 
-        let body: [String: Any] = [
+        var bodyDict: [String: Any] = [
             "model": chosenModel,
             "temperature": 0.6,
             "stream": true,
-            "messages": [
-                ["role": "system", "content": systemPrompt],
-                ["role": "user", "content": userMessageContent]
-            ]
+            "instructions": systemPrompt,
+            "input": userInput
         ]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        if let prevId = previousResponseId {
+            bodyDict["previous_response_id"] = prevId
+        }
+        request.httpBody = try? JSONSerialization.data(withJSONObject: bodyDict)
 
         let requestText = "answer_stream userText=\(text) hasImage=\(imageDataURL?.isEmpty == false)"
         let provider = useAzure ? "azure-openai" : "openai"
@@ -696,6 +700,7 @@ final class IntentService {
             }
 
             var fullResponse = ""
+            var capturedResponseId: String? = nil
             var didNotifyStreamStarted = false
 
             for try await line in bytes.lines {
@@ -706,33 +711,35 @@ final class IntentService {
                     break
                 }
 
-                if !didNotifyStreamStarted {
-                    didNotifyStreamStarted = true
-                    await onStreamEvent?()
-                }
-
                 guard let chunkData = payload.data(using: .utf8),
                       let root = try? JSONSerialization.jsonObject(with: chunkData) as? [String: Any],
-                      let choices = root["choices"] as? [[String: Any]],
-                      let first = choices.first,
-                      let delta = first["delta"] as? [String: Any]
+                      let eventType = root["type"] as? String
                 else {
                     continue
                 }
 
-                if let content = delta["content"] as? String, !content.isEmpty {
-                    fullResponse += content
-                    await onDelta(fullResponse)
-                    continue
-                }
-
-                if let contentParts = delta["content"] as? [[String: Any]] {
-                    let joined = contentParts.compactMap { $0["text"] as? String }.joined()
-                    if !joined.isEmpty {
-                        fullResponse += joined
+                switch eventType {
+                case "response.created":
+                    if let responseObj = root["response"] as? [String: Any],
+                       let respId = responseObj["id"] as? String {
+                        capturedResponseId = respId
+                    }
+                case "response.output_text.delta":
+                    if !didNotifyStreamStarted {
+                        didNotifyStreamStarted = true
+                        await onStreamEvent?()
+                    }
+                    if let delta = root["delta"] as? String, !delta.isEmpty {
+                        fullResponse += delta
                         await onDelta(fullResponse)
                     }
+                default:
+                    break
                 }
+            }
+
+            if !didNotifyStreamStarted {
+                await onStreamEvent?()
             }
 
             let finalText = fullResponse.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -748,7 +755,7 @@ final class IntentService {
                 isEstimated: true
             )
 
-            return success ? finalText : nil
+            return success ? (text: finalText, responseId: capturedResponseId) : nil
         } catch {
             tokenUsageManager.addEntry(
                 feature: "answer_stream",
@@ -3078,6 +3085,7 @@ struct ContentView: View {
     private let maxChatMessages = 250
     @State private var tasks: [TaskItem] = []
     @State private var messages: [ChatMessage] = []
+    @State private var lastResponseId: String? = nil
     @State private var draft: String = ""
     @State private var pendingDraft: TaskDraft = .init(title: "")
     @State private var pendingMessage: MessageDraft = .init()
@@ -6080,6 +6088,7 @@ extension ContentView {
         ChatHistoryStore.shared.archiveCurrentSession(messages)
         ChatHistoryStore.shared.clearCurrentSession()
         messages.removeAll()
+        lastResponseId = nil
 
         let displayUser = userName.isEmpty ? "You" : userName
         messages.append(.init(isUser: false, text: "Hi \(displayUser)! I’m \(agentName). Tell me what you need and I’ll track and prioritize tasks for you."))
@@ -6820,7 +6829,7 @@ extension ContentView {
                     isAgentThinking = true
                 }
             }
-            inferred = await intentService.infer(from: text, imageDataURL: attachedImageDataURL, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint, userName: userName, agentName: agentName, appContext: buildAIContextSnapshot()) ?? intentAnalyzer.infer(from: text, agentName: agentName)
+            inferred = await intentService.infer(from: text, imageDataURL: attachedImageDataURL, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint, userName: userName, agentName: agentName, appContext: buildAIContextSnapshot(), conversationHistory: Array(messages.dropLast())) ?? intentAnalyzer.infer(from: text, agentName: agentName)
             await MainActor.run {
                 withAnimation {
                     isAgentThinking = false
@@ -7161,7 +7170,7 @@ extension ContentView {
                         messages.append(.init(id: placeholderId, isUser: false, text: "", taskStatusSnapshot: statusSnapshot, responseTitle: responseTitle))
                     }
 
-                    let streamed = await intentService.streamAnswer(
+                    let streamResult = await intentService.streamAnswer(
                         for: text,
                         imageDataURL: attachedImageDataURL,
                         apiKey: activeKey,
@@ -7171,6 +7180,7 @@ extension ContentView {
                         userName: userName,
                         agentName: agentName,
                         appContext: buildAIContextSnapshot(),
+                        previousResponseId: lastResponseId,
                         onStreamEvent: {
                             if !didReceiveStreamEvent {
                                 didReceiveStreamEvent = true
@@ -7185,6 +7195,8 @@ extension ContentView {
                             messages[index] = .init(id: existing.id, isUser: existing.isUser, text: partial, timestamp: existing.timestamp, taskStatusSnapshot: existing.taskStatusSnapshot, responseTitle: existing.responseTitle)
                         }
                     }
+                    lastResponseId = streamResult?.responseId
+                    let streamed = streamResult?.text
 
                     if !didReceiveStreamEvent {
                         withAnimation {
