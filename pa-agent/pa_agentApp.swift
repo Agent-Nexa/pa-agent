@@ -133,6 +133,7 @@ struct nexaApp: App {
 
     @StateObject private var authManager  = AuthManager()
     @StateObject private var creditManager = CreditManager.shared
+    @StateObject private var creditPurchaseManager = CreditPurchaseManager.shared
 
     var body: some Scene {
         WindowGroup {
@@ -140,16 +141,36 @@ struct nexaApp: App {
                 .preferredColorScheme(.light)
                 .environmentObject(authManager)
                 .environmentObject(creditManager)
-                // Grant new-user credits immediately after a successful sign-in
+                .environmentObject(creditPurchaseManager)
+                // Initialise credits from the server after a successful sign-in.
+                // The server is the source of truth for the new-user grant.
                 .onChange(of: authManager.isSignedIn) { signedIn in
                     if signedIn {
-                        creditManager.grantNewUserCreditsIfNeeded(userId: authManager.userId)
+                        Task {
+                            // Use email as UserID to match dbo.tb_CreditManager schema
+                            await creditManager.initializeFromServer(userId: authManager.email)
+                            // Close any gap between logged token usage and credit deductions
+                            // (catches tokens used before the deduction system was in place
+                            // and any interactions where deductOnServer may have been skipped).
+                            await creditManager.reconcileFromServer(userId: authManager.email)
+                        }
+                        // Wire token logging to the signed-in user
+                        TokenUsageManager.shared.currentUserId = authManager.email
+                    } else {
+                        TokenUsageManager.shared.currentUserId = ""
                     }
                 }
         }
         .onChange(of: scenePhase) { newPhase in
             if newPhase == .background {
                 NotificationManager.shared.scheduleInactivityReminder(days: 3)
+            } else if newPhase == .active && authManager.isSignedIn {
+                // Re-read the live DB balance every time the app comes to foreground.
+                // This ensures stale UserDefaults cache is corrected whenever the
+                // backend is reachable, and catches credits consumed on other devices.
+                Task {
+                    await creditManager.refreshFromServer(userId: authManager.email)
+                }
             }
         }
     }

@@ -111,3 +111,42 @@ Nexa (formerly PA-Agent) is a SwiftUI personal assistant app that combines local
      - “Remind me to send the report tomorrow at 9 AM.”
      - “Text Alex I’m running 10 minutes late.”
      - “What’s the weather tomorrow?”
+
+## Credits & pricing
+
+Nexa uses a credit system to meter AI usage. Credits are stored server-side in `dbo.tb_CreditManager` and synced on every sign-in and app foreground.
+
+### Credit grant
+- New users receive **200 credits** (≈ $5 value) on first sign-in.
+
+### Pricing model (gpt-5.2 via Azure OpenAI)
+
+| Token type | Price per 1,000,000 tokens |
+|---|---|
+| Input | $1.75 |
+| Cached input | $0.18 |
+| Output | $14.00 |
+
+### Credit value
+
+1 credit = $5 ÷ 200 = **$0.025**
+
+### Tokens per credit
+
+| Token type | Tokens per 1 credit |
+|---|---|
+| Input | 14,286 |
+| Cached input | 138,889 |
+| Output | 1,786 |
+| **Blended** (85% input / 15% output) | **~7,000** |
+
+### Blended rate calculation
+
+Blended price = (0.85 × $1.75) + (0.15 × $14.00) = **$3.5875 per 1M tokens**
+
+Tokens per credit = $0.025 ÷ ($3.5875 / 1,000,000) ≈ **6,970 tokens**
+
+So **200 credits ≈ 1,394,000 blended tokens** in total.
+
+### Implementation
+The iOS app deducts credits after each AI interaction using a divisor of **7,000 tokens per credit** (`max(1, tokensUsed / 7000)`), with the exact balance reconciled server-side via `POST /api/credits/deduct`.

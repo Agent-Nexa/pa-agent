@@ -3133,6 +3133,7 @@ struct ContentView: View {
     @State private var isCheckingReceipts = false
     @AppStorage("PERMISSION_SETUP_SHOWN") private var permissionSetupShown: Bool = false
     @State private var showPermissionSetupSheet = false
+    @State private var showBuyCredits = false
     @FocusState private var isInputFocused: Bool
     @Namespace private var scrollSpace
     private let eventStore = EKEventStore()
@@ -3214,6 +3215,11 @@ struct ContentView: View {
         )) {
             BiometricSetupSheet()
                 .environmentObject(authManager)
+        }
+        .sheet(isPresented: $showBuyCredits) {
+            BuyCreditsSheet()
+                .environmentObject(authManager)
+                .environmentObject(creditManager)
         }
     }
 
@@ -5207,66 +5213,121 @@ struct AIUsageView: View {
         var id: String { rawValue }
     }
 
+    @EnvironmentObject private var authManager: AuthManager
+    @EnvironmentObject private var creditManager: CreditManager
     @StateObject private var tokenUsageManager = TokenUsageManager.shared
-    @StateObject private var subscriptionManager = SubscriptionManager.shared
     @State private var reportRange: ReportRange = .daily
+    @State private var serverStats: TokenServerStats? = nil
+    @State private var isLoadingStats = false
+
+    // MARK: - Derived display values (server-primary, local fallback)
+
+    /// True only when the server actually returned meaningful data.
+    /// Prevents a freshly-fetched but empty server response from zeroing out
+    /// stats while the daily chart still shows local cached data.
+    private var hasServerData: Bool {
+        guard let s = serverStats else { return false }
+        return s.currentMonth.requestCount > 0 || !s.daily.isEmpty || !s.monthly.isEmpty
+    }
+
+    private var todayStats: (requests: Int, prompt: Int, completion: Int, total: Int) {
+        if hasServerData, let s = serverStats {
+            return (s.today.requestCount, s.today.promptTokens, s.today.completionTokens, s.today.totalTokens)
+        }
+        let local = tokenUsageManager.summary(for: Date())
+        return (local.requestCount, local.promptTokens, local.completionTokens, local.totalTokens)
+    }
+
+    private var monthStats: (total: Int, requests: Int) {
+        if hasServerData, let s = serverStats {
+            return (s.currentMonth.totalTokens, s.currentMonth.requestCount)
+        }
+        let local = tokenUsageManager.monthlySummary(for: Date())
+        return (local.totalTokens, local.requestCount)
+    }
+
+    private var dailyRows: [any Identifiable] {
+        if hasServerData, let s = serverStats, !s.daily.isEmpty { return s.daily }
+        return tokenUsageManager.dailySummaries(limit: 14)
+    }
+
+    private var monthlyRows: [any Identifiable] {
+        if hasServerData, let s = serverStats, !s.monthly.isEmpty { return s.monthly }
+        return tokenUsageManager.monthlySummaries(limit: 12)
+    }
 
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    if isLoadingStats {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("Loading live data…")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if hasServerData {
+                        Label("Live data from server", systemImage: "checkmark.icloud.fill")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    } else {
+                        Label("Offline — showing local data", systemImage: "icloud.slash")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 Section("AI Tokens (Today)") {
-                    let today = tokenUsageManager.summary(for: Date())
-                    let month = tokenUsageManager.monthlySummary(for: Date())
-                    let limit = tokenUsageManager.monthlyTokenLimit(hasActiveSubscription: subscriptionManager.hasActiveSubscription)
-                    let remaining = tokenUsageManager.remainingTokensThisMonth(hasActiveSubscription: subscriptionManager.hasActiveSubscription)
+                    let usedMonth = monthStats.total
+                    let creditsLeft = creditManager.credits
+                    // Tokens remaining is driven by credit balance, not a static subscription cap.
+                    // 1 credit = 5,000 tokens (blended rate).
+                    let tokensRemaining = creditsLeft * 5000
 
                     HStack {
                         Text("Requests")
                         Spacer()
-                        Text("\(today.requestCount)")
+                        Text("\(todayStats.requests)")
                             .foregroundStyle(.secondary)
                     }
-
                     HStack {
                         Text("Prompt Tokens")
                         Spacer()
-                        Text("\(today.promptTokens)")
+                        Text("\(todayStats.prompt)")
                             .foregroundStyle(.secondary)
                     }
-
                     HStack {
                         Text("Completion Tokens")
                         Spacer()
-                        Text("\(today.completionTokens)")
+                        Text("\(todayStats.completion)")
                             .foregroundStyle(.secondary)
                     }
-
                     HStack {
-                        Text("Total Tokens")
+                        Text("Total Tokens (Today)")
                         Spacer()
-                        Text("\(today.totalTokens)")
+                        Text("\(todayStats.total)")
                             .fontWeight(.semibold)
                     }
-
-                    HStack {
-                        Text("Monthly Limit")
-                        Spacer()
-                        Text("\(limit)")
-                            .foregroundStyle(.secondary)
-                    }
-
                     HStack {
                         Text("Used This Month")
                         Spacer()
-                        Text("\(month.totalTokens)")
+                        Text("\(usedMonth)")
                             .foregroundStyle(.secondary)
                     }
-
                     HStack {
-                        Text("Remaining This Month")
+                        Text("Credits Remaining")
                         Spacer()
-                        Text("\(remaining)")
-                            .foregroundStyle(remaining > 0 ? Color.secondary : Color.orange)
+                        Text(creditManager.displayText)
+                            .foregroundStyle(creditsLeft > 50 ? .green
+                                             : creditsLeft > 10 ? .orange : .red)
+                            .fontWeight(.semibold)
+                    }
+                    HStack {
+                        Text("Est. Tokens Remaining")
+                        Spacer()
+                        Text("~\(tokensRemaining.formatted())")
+                            .foregroundStyle(creditsLeft > 0 ? Color.secondary : Color.red)
                     }
                 }
 
@@ -5278,73 +5339,130 @@ struct AIUsageView: View {
                     }
                     .pickerStyle(.segmented)
 
-                    let dailyRows = tokenUsageManager.dailySummaries(limit: 14)
-                    let monthlyRows = tokenUsageManager.monthlySummaries(limit: 12)
-
-                    if reportRange == .daily && dailyRows.isEmpty {
-                        Text("No AI token usage yet.")
-                            .foregroundStyle(.secondary)
-                    } else if reportRange == .monthly && monthlyRows.isEmpty {
-                        Text("No AI token usage yet.")
-                            .foregroundStyle(.secondary)
-                    } else if reportRange == .daily {
-                        #if canImport(Charts)
-                        let chartRows = dailyRows.sorted { $0.dayStart < $1.dayStart }
-                        Chart(chartRows) { day in
-                            BarMark(
-                                x: .value("Day", day.dayStart, unit: .day),
-                                y: .value("Tokens", day.totalTokens)
-                            )
-                            .foregroundStyle(.blue)
-                        }
-                        .frame(height: 180)
-                        .chartYAxis {
-                            AxisMarks(position: .leading)
-                        }
-                        #endif
-
-                        ForEach(dailyRows) { day in
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(day.dayStart.formatted(date: .abbreviated, time: .omitted))
-                                        .font(.subheadline)
-                                    Text("Requests: \(day.requestCount) • Success: \(day.successfulRequestCount)")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
+                    if reportRange == .daily {
+                        if dailyRows.isEmpty {
+                            Text("No AI token usage yet.")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            #if canImport(Charts)
+                            if let serverDaily = serverStats?.daily, !serverDaily.isEmpty {
+                                let sorted = serverDaily.sorted { $0.date < $1.date }
+                                Chart(sorted) { day in
+                                    BarMark(
+                                        x: .value("Day", day.date, unit: .day),
+                                        y: .value("Tokens", day.totalTokens)
+                                    )
+                                    .foregroundStyle(.blue)
                                 }
-                                Spacer()
-                                Text("\(day.totalTokens)")
-                                    .font(.headline)
+                                .frame(height: 180)
+                                .chartYAxis { AxisMarks(position: .leading) }
+                            } else {
+                                let sorted = tokenUsageManager.dailySummaries(limit: 14).sorted { $0.dayStart < $1.dayStart }
+                                Chart(sorted) { day in
+                                    BarMark(
+                                        x: .value("Day", day.dayStart, unit: .day),
+                                        y: .value("Tokens", day.totalTokens)
+                                    )
+                                    .foregroundStyle(.blue)
+                                }
+                                .frame(height: 180)
+                                .chartYAxis { AxisMarks(position: .leading) }
+                            }
+                            #endif
+
+                            if let serverDaily = serverStats?.daily, !serverDaily.isEmpty {
+                                ForEach(serverDaily) { day in
+                                    HStack {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(day.date.formatted(date: .abbreviated, time: .omitted))
+                                                .font(.subheadline)
+                                            Text("Requests: \(day.requestCount) • Success: \(day.successCount)")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                        Text("\(day.totalTokens)")
+                                            .font(.headline)
+                                    }
+                                }
+                            } else {
+                                ForEach(tokenUsageManager.dailySummaries(limit: 14)) { day in
+                                    HStack {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(day.dayStart.formatted(date: .abbreviated, time: .omitted))
+                                                .font(.subheadline)
+                                            Text("Requests: \(day.requestCount) • Success: \(day.successfulRequestCount)")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                        Text("\(day.totalTokens)")
+                                            .font(.headline)
+                                    }
+                                }
                             }
                         }
                     } else {
-                        #if canImport(Charts)
-                        let chartRows = monthlyRows.sorted { $0.monthStart < $1.monthStart }
-                        Chart(chartRows) { month in
-                            BarMark(
-                                x: .value("Month", month.monthStart, unit: .month),
-                                y: .value("Tokens", month.totalTokens)
-                            )
-                            .foregroundStyle(.blue)
-                        }
-                        .frame(height: 180)
-                        .chartYAxis {
-                            AxisMarks(position: .leading)
-                        }
-                        #endif
-
-                        ForEach(monthlyRows) { month in
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(month.monthStart.formatted(.dateTime.year().month(.abbreviated)))
-                                        .font(.subheadline)
-                                    Text("Requests: \(month.requestCount) • Success: \(month.successfulRequestCount)")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
+                        if monthlyRows.isEmpty {
+                            Text("No AI token usage yet.")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            #if canImport(Charts)
+                            if let serverMonthly = serverStats?.monthly, !serverMonthly.isEmpty {
+                                let sorted = serverMonthly.sorted { $0.monthStart < $1.monthStart }
+                                Chart(sorted) { m in
+                                    BarMark(
+                                        x: .value("Month", m.monthStart, unit: .month),
+                                        y: .value("Tokens", m.totalTokens)
+                                    )
+                                    .foregroundStyle(.blue)
                                 }
-                                Spacer()
-                                Text("\(month.totalTokens)")
-                                    .font(.headline)
+                                .frame(height: 180)
+                                .chartYAxis { AxisMarks(position: .leading) }
+                            } else {
+                                let sorted = tokenUsageManager.monthlySummaries(limit: 12).sorted { $0.monthStart < $1.monthStart }
+                                Chart(sorted) { m in
+                                    BarMark(
+                                        x: .value("Month", m.monthStart, unit: .month),
+                                        y: .value("Tokens", m.totalTokens)
+                                    )
+                                    .foregroundStyle(.blue)
+                                }
+                                .frame(height: 180)
+                                .chartYAxis { AxisMarks(position: .leading) }
+                            }
+                            #endif
+
+                            if let serverMonthly = serverStats?.monthly, !serverMonthly.isEmpty {
+                                ForEach(serverMonthly) { m in
+                                    HStack {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(m.monthStart.formatted(.dateTime.year().month(.abbreviated)))
+                                                .font(.subheadline)
+                                            Text("Requests: \(m.requestCount) • Success: \(m.successCount)")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                        Text("\(m.totalTokens)")
+                                            .font(.headline)
+                                    }
+                                }
+                            } else {
+                                ForEach(tokenUsageManager.monthlySummaries(limit: 12)) { m in
+                                    HStack {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(m.monthStart.formatted(.dateTime.year().month(.abbreviated)))
+                                                .font(.subheadline)
+                                            Text("Requests: \(m.requestCount) • Success: \(m.successfulRequestCount)")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                        Text("\(m.totalTokens)")
+                                            .font(.headline)
+                                    }
+                                }
                             }
                         }
                     }
@@ -5353,6 +5471,18 @@ struct AIUsageView: View {
                 }
             }
             .navigationTitle("AI Usage")
+            .task {
+                let userId = authManager.email
+                guard !userId.isEmpty else { return }
+                isLoadingStats = true
+                serverStats = await tokenUsageManager.fetchServerStats(userId: userId)
+                isLoadingStats = false
+            }
+            .refreshable {
+                let userId = authManager.email
+                guard !userId.isEmpty else { return }
+                serverStats = await tokenUsageManager.fetchServerStats(userId: userId)
+            }
         }
     }
 }
@@ -5382,6 +5512,28 @@ extension ContentView {
         VStack(spacing: 8) {
             let trimmedDraft = draft.trimmingCharacters(in: .whitespacesAndNewlines)
             Divider()
+
+            // ── Out-of-credits banner ────────────────────────────────
+            if creditManager.outOfCredits {
+                HStack(spacing: 10) {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .foregroundStyle(.red)
+                    Text("You've run out of credits.")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    Button("Buy Credits →") {
+                        showBuyCredits = true
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .tint(.accentColor)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(Color.red.opacity(0.10))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .padding(.horizontal)
+            }
 
             if speechManager.isSpeaking {
                 HStack(alignment: .center, spacing: 10) {
@@ -5564,12 +5716,13 @@ extension ContentView {
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(1...3)
                     .submitLabel(.send)
+                    .disabled(creditManager.outOfCredits)
 
                 Button(action: sendMessage) {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.title2)
                 }
-                .disabled(trimmedDraft.isEmpty && pendingAttachment == nil)
+                .disabled((trimmedDraft.isEmpty && pendingAttachment == nil) || creditManager.outOfCredits)
 
                 Button(action: toggleKeyboard) {
                     Image(systemName: isInputFocused ? "keyboard.chevron.compact.down" : "keyboard")
@@ -5638,15 +5791,7 @@ extension ContentView {
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         let attachment = pendingAttachment
         guard !trimmed.isEmpty || attachment != nil else { return }
-
-        // Hard block: no credits remaining
-        if creditManager.credits <= 0 {
-            messages.append(ChatMessage(
-                isUser: false,
-                text: "⚠️ You've used all your credits. More credits will be available soon — stay tuned!"
-            ))
-            return
-        }
+        guard !creditManager.outOfCredits else { return }
 
         // Reset inactivity timer when user sends a message
         NotificationManager.shared.scheduleInactivityReminder(days: 3)
@@ -5667,13 +5812,13 @@ extension ContentView {
         Task {
             await handleIntent(for: intentInput, attachedImageDataURL: attachment?.visionImageDataURL)
 
-            // Deduct credits equal to tokens consumed during this interaction
+            // Deduct credits based on tokens consumed (1 credit = 5,000 tokens).
+            // Server response is the authoritative balance — no local deduct.
             let tokensAfter = TokenUsageManager.shared.entries.reduce(0) { $0 + $1.totalTokens }
             let tokensUsed = tokensAfter - tokensBefore
             if tokensUsed > 0 {
-                await MainActor.run {
-                    creditManager.deduct(tokensUsed)
-                }
+                let creditsToDeduct = max(1, tokensUsed / 5000)
+                await creditManager.deductOnServer(userId: authManager.email, amount: creditsToDeduct)
             }
         }
     }

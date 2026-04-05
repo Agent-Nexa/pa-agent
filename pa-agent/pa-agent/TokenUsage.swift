@@ -66,10 +66,58 @@ struct MonthlyTokenUsage: Identifiable {
     var id: Date { monthStart }
 }
 
+// MARK: - Server stats models
+
+struct TokenServerPeriodStats {
+    let promptTokens: Int
+    let completionTokens: Int
+    let totalTokens: Int
+    let requestCount: Int
+    let successCount: Int
+}
+
+struct TokenServerDailyStat: Identifiable {
+    let date: Date
+    let promptTokens: Int
+    let completionTokens: Int
+    let totalTokens: Int
+    let requestCount: Int
+    let successCount: Int
+    var id: Date { date }
+}
+
+struct TokenServerMonthlyStat: Identifiable {
+    let monthStart: Date
+    let promptTokens: Int
+    let completionTokens: Int
+    let totalTokens: Int
+    let requestCount: Int
+    let successCount: Int
+    var id: Date { monthStart }
+}
+
+struct TokenServerStats {
+    let today: TokenServerPeriodStats
+    let currentMonth: TokenServerPeriodStats
+    let daily: [TokenServerDailyStat]
+    let monthly: [TokenServerMonthlyStat]
+}
+
+// MARK: - TokenUsageManager
+
 final class TokenUsageManager: ObservableObject {
     static let shared = TokenUsageManager()
 
     @Published private(set) var entries: [TokenUsageEntry] = []
+
+    /// Set this to the signed-in user's email as soon as auth completes.
+    /// Every subsequent addEntry call will fire a background server log.
+    var currentUserId: String = ""
+
+    private var serverBaseURL: String {
+        UserDefaults.standard.string(forKey: "PA_AGENT_SERVER_URL")
+            ?? "https://pa-agent-web-frontend.agreeableisland-6e08f0fa.australiaeast.azurecontainerapps.io"
+    }
 
     private let storageKey = "AI_TOKEN_USAGE_ENTRIES"
     private var calendar: Calendar {
@@ -107,10 +155,26 @@ final class TokenUsageManager: ObservableObject {
             isEstimated: isEstimated
         )
 
-        DispatchQueue.main.async {
-            self.entries.insert(entry, at: 0)
-            self.trimEntriesIfNeeded()
-            self.save()
+        // Insert synchronously when already on the main thread so that callers
+        // reading `entries` immediately after addEntry see the new value.
+        if Thread.isMainThread {
+            entries.insert(entry, at: 0)
+            trimEntriesIfNeeded()
+            save()
+        } else {
+            DispatchQueue.main.async {
+                self.entries.insert(entry, at: 0)
+                self.trimEntriesIfNeeded()
+                self.save()
+            }
+        }
+
+        // Fire-and-forget server log — never blocks the UI.
+        if !currentUserId.isEmpty {
+            let userId = currentUserId
+            Task.detached(priority: .utility) { [weak self] in
+                await self?.logToServer(entry, userId: userId)
+            }
         }
     }
 
@@ -176,6 +240,118 @@ final class TokenUsageManager: ObservableObject {
         let today = summary(for: Date()).totalTokens
         return max(0, limit - today)
     }
+
+    // MARK: - Server logging
+
+    private func logToServer(_ entry: TokenUsageEntry, userId: String) async {
+        guard let url = URL(string: "\(serverBaseURL)/api/token-transactions") else { return }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 10
+
+        let body: [String: Any] = [
+            "user_id":           userId,
+            "feature":           entry.feature,
+            "provider":          entry.provider,
+            "model":             entry.model,
+            "prompt_tokens":     entry.promptTokens,
+            "completion_tokens": entry.completionTokens,
+            "total_tokens":      entry.totalTokens,
+            "success":           entry.success,
+            "error_reason":      entry.errorReason as Any,
+            "is_estimated":      entry.isEstimated,
+        ]
+        guard let httpBody = try? JSONSerialization.data(withJSONObject: body) else { return }
+        request.httpBody = httpBody
+
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                print("[TokenUsageManager] ⚠️  Server log returned \(http.statusCode)")
+            }
+        } catch {
+            print("[TokenUsageManager] ⚠️  Server log failed (\(error.localizedDescription))")
+        }
+    }
+
+    // MARK: - Fetch server stats
+
+    func fetchServerStats(userId: String, days: Int = 14, months: Int = 12) async -> TokenServerStats? {
+        guard !userId.isEmpty,
+              let url = URL(string: "\(serverBaseURL)/api/token-transactions/\(userId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? userId)/stats?days=\(days)&months=\(months)")
+        else { return nil }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 10
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return nil }
+
+            func parsePeriod(_ d: [String: Any]?) -> TokenServerPeriodStats {
+                guard let d else { return TokenServerPeriodStats(promptTokens: 0, completionTokens: 0, totalTokens: 0, requestCount: 0, successCount: 0) }
+                return TokenServerPeriodStats(
+                    promptTokens:     d["prompt_tokens"]     as? Int ?? 0,
+                    completionTokens: d["completion_tokens"] as? Int ?? 0,
+                    totalTokens:      d["total_tokens"]      as? Int ?? 0,
+                    requestCount:     d["request_count"]     as? Int ?? 0,
+                    successCount:     d["success_count"]     as? Int ?? 0
+                )
+            }
+
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd"
+            formatter.timeZone = TimeZone(identifier: "UTC")
+
+            let monthFormatter = DateFormatter()
+            monthFormatter.dateFormat = "yyyy-MM"
+            monthFormatter.timeZone = TimeZone(identifier: "UTC")
+
+            let dailyArr = (json["daily"] as? [[String: Any]] ?? []).compactMap { d -> TokenServerDailyStat? in
+                guard let dateStr = d["date"] as? String,
+                      let date = formatter.date(from: dateStr) else { return nil }
+                return TokenServerDailyStat(
+                    date:             date,
+                    promptTokens:     d["prompt_tokens"]     as? Int ?? 0,
+                    completionTokens: d["completion_tokens"] as? Int ?? 0,
+                    totalTokens:      d["total_tokens"]      as? Int ?? 0,
+                    requestCount:     d["request_count"]     as? Int ?? 0,
+                    successCount:     d["success_count"]     as? Int ?? 0
+                )
+            }
+
+            let monthlyArr = (json["monthly"] as? [[String: Any]] ?? []).compactMap { d -> TokenServerMonthlyStat? in
+                guard let monthStr = d["month"] as? String,
+                      let date = monthFormatter.date(from: monthStr) else { return nil }
+                return TokenServerMonthlyStat(
+                    monthStart:       date,
+                    promptTokens:     d["prompt_tokens"]     as? Int ?? 0,
+                    completionTokens: d["completion_tokens"] as? Int ?? 0,
+                    totalTokens:      d["total_tokens"]      as? Int ?? 0,
+                    requestCount:     d["request_count"]     as? Int ?? 0,
+                    successCount:     d["success_count"]     as? Int ?? 0
+                )
+            }
+
+            return TokenServerStats(
+                today:        parsePeriod(json["today"]         as? [String: Any]),
+                currentMonth: parsePeriod(json["current_month"] as? [String: Any]),
+                daily:        dailyArr,
+                monthly:      monthlyArr
+            )
+        } catch {
+            print("[TokenUsageManager] ⚠️  fetchServerStats failed (\(error.localizedDescription))")
+            return nil
+        }
+    }
+
+    // MARK: - Summaries
 
     private func buildSummary(for dayStart: Date, rows: [TokenUsageEntry]) -> DailyTokenUsage {
         let prompt = rows.reduce(0) { $0 + $1.promptTokens }

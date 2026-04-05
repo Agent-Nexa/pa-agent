@@ -49,6 +49,7 @@ struct SettingsView: View {
     @State private var connectionStatus: String = "not tested"
     @State private var embeddingConnectionStatus: String = "not tested"
     @State private var savedMessage: String = ""
+    @State private var showBuyCredits = false
     @State private var chatHistoryStatusText: String = ""
     @State private var permissionStatusText: String = ""
     @State private var notificationsPermissionText: String = "Unknown"
@@ -143,6 +144,17 @@ struct SettingsView: View {
                                 .foregroundStyle(creditManager.credits > 50 ? .green
                                                   : creditManager.credits > 10 ? .orange : .red)
                                 .font(.subheadline.monospacedDigit())
+                        }
+
+                        Button {
+                            showBuyCredits = true
+                        } label: {
+                            Label("Buy Credits", systemImage: "plus.circle.fill")
+                        }
+                        .sheet(isPresented: $showBuyCredits) {
+                            BuyCreditsSheet()
+                                .environmentObject(authManager)
+                                .environmentObject(creditManager)
                         }
 
                         Button(role: .destructive) {
