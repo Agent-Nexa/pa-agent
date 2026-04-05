@@ -6843,13 +6843,6 @@ extension ContentView {
             lastIntentReason = "subscription-required"
         }
 
-        // DEBUG LOGGING
-        if Bundle.main.isTestFlight {
-            await MainActor.run {
-                messages.append(.init(isUser: false, text: "DEBUG => Source: \(lastIntentSource), Reason: \(lastIntentReason)"))
-            }
-        }
-
         if var draft = inferred {
             if draft.action == "answer", isWeatherInquiry(text) {
                 let weatherReply = await weatherService.response(for: text)
