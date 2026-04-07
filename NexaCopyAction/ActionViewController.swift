@@ -10,6 +10,7 @@
 import UIKit
 import UniformTypeIdentifiers
 import MobileCoreServices
+import UserNotifications
 
 // ── SharedItem — must match EmailModels.swift field-for-field ─────────────────
 private struct SharedItem: Codable {
@@ -28,9 +29,14 @@ private struct SharedItem: Codable {
 
 class ActionViewController: UIViewController {
 
-    private let suiteName = "group.z.Nexa"
-    private let udKey     = "pendingSharedItems"
-    private let maxItems  = 50
+    private let appGroupID = "group.z.Nexa"
+    private let maxItems   = 50
+
+    private var itemsFileURL: URL? {
+        FileManager.default
+            .containerURL(forSecurityApplicationGroupIdentifier: appGroupID)?
+            .appendingPathComponent("pendingSharedItems.json")
+    }
 
     // ── Extracted content ──────────────────────────────────────────────
     private var extractedText: String = ""
@@ -185,24 +191,58 @@ class ActionViewController: UIViewController {
             processed:     false
         )
 
-        if let ud = UserDefaults(suiteName: suiteName) {
-            var items: [SharedItem] = []
-            if let data = ud.data(forKey: udKey),
-               let decoded = try? JSONDecoder().decode([SharedItem].self, from: data) {
-                items = decoded
-            }
-            items.append(item)
-            if items.count > maxItems { items = Array(items.suffix(maxItems)) }
-            if let data = try? JSONEncoder().encode(items) {
-                ud.set(data, forKey: udKey)
-            }
+        guard let url = itemsFileURL else { return }
+        // Read existing items directly from the shared file — no in-process cache.
+        var items: [SharedItem] = []
+        if let data = try? Data(contentsOf: url),
+           let decoded = try? JSONDecoder().decode([SharedItem].self, from: data) {
+            items = decoded
         }
+        items.append(item)
+        if items.count > maxItems { items = Array(items.suffix(maxItems)) }
+        // .atomic write guarantees the reader never sees a half-written file.
+        if let data = try? JSONEncoder().encode(items) {
+            try? data.write(to: url, options: .atomic)
+        }
+        // Signal the main app via Darwin notification — works even when the
+        // main app is already in the foreground (scenePhase won't re-fire).
+        CFNotificationCenterPostNotification(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            CFNotificationName("group.z.Nexa.sharedItemAdded" as CFString),
+            nil, nil, true
+        )
+        // Local notification so the user knows content arrived if the app is backgrounded.
+        scheduleLocalNotification(for: item)
 
         extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
     }
 
     @objc private func didTapCancel() {
         extensionContext?.cancelRequest(withError: NSError(domain: "NexaCopyAction", code: 0))
+    }
+
+    // ── Local notification ─────────────────────────────────────────────
+
+    private func scheduleLocalNotification(for item: SharedItem) {
+        let content = UNMutableNotificationContent()
+        content.title = "Nexa received new content"
+        switch item.contentType {
+        case "image":
+            content.body = "New image — tap to open"
+        case "url":
+            let host = URL(string: item.content)?.host ?? item.content
+            content.body = "New link: \(host)"
+        default:
+            content.body = String(item.content.prefix(80))
+        }
+        content.sound = .default
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
+        let request  = UNNotificationRequest(
+            identifier: "nexa_shared_\(item.id)",
+            content:    content,
+            trigger:    trigger
+        )
+        UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
     }
 
     // ── Helpers ────────────────────────────────────────────────────────

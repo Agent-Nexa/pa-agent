@@ -45,8 +45,11 @@ struct SharedInboxView: View {
 
     @State private var items: [SharedItem] = []
 
-    private let suiteName = "group.z.Nexa"
-    private let udKey     = "pendingSharedItems"
+    private var itemsFileURL: URL? {
+        FileManager.default
+            .containerURL(forSecurityApplicationGroupIdentifier: "group.z.Nexa")?
+            .appendingPathComponent("pendingSharedItems.json")
+    }
 
     var body: some View {
         NavigationStack {
@@ -127,8 +130,8 @@ struct SharedInboxView: View {
     // ── Data helpers ───────────────────────────────────────────────────
 
     private func loadItems() {
-        guard let ud = UserDefaults(suiteName: suiteName),
-              let data = ud.data(forKey: udKey),
+        guard let url = itemsFileURL,
+              let data = try? Data(contentsOf: url),
               let decoded = try? JSONDecoder().decode([SharedItem].self, from: data) else {
             items = []
             return
@@ -142,9 +145,9 @@ struct SharedInboxView: View {
     }
 
     private func saveItems(_ newItems: [SharedItem]) {
-        guard let ud = UserDefaults(suiteName: suiteName),
+        guard let url = itemsFileURL,
               let data = try? JSONEncoder().encode(newItems) else { return }
-        ud.set(data, forKey: udKey)
+        try? data.write(to: url, options: .atomic)
     }
 }
 

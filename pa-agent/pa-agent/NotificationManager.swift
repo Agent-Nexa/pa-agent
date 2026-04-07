@@ -133,6 +133,35 @@ extension NotificationManager {
             .removePendingNotificationRequests(withIdentifiers: ["nexa_inactivity_reminder"])
     }
 
+    /// Fires a local OS notification informing the user that shared content arrived.
+    /// Safe to call from inside the main app (e.g. after background processing).
+    func scheduleSharedContentNotification(sourceApp: String, contentType: String, contentPreview: String) {
+        let content = UNMutableNotificationContent()
+        let agentName = UserDefaults.standard.string(forKey: AppConfig.Keys.agentName) ?? AppConfig.Defaults.agentName
+        content.title = "\(agentName) received new content"
+        let knownSource = !sourceApp.isEmpty && sourceApp != "Shared"
+        switch contentType {
+        case "image":
+            content.body = knownSource ? "Image from \(sourceApp) — tap to open" : "New image — tap to open"
+        case "url":
+            content.body = knownSource ? "Link from \(sourceApp): \(contentPreview)" : "New link: \(contentPreview)"
+        default:
+            let preview = contentPreview.prefix(80)
+            content.body = knownSource ? "From \(sourceApp): \(preview)" : String(preview)
+        }
+        content.sound = .default
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
+        let request  = UNNotificationRequest(
+            identifier: "nexa_shared_main_\(UUID().uuidString)",
+            content:    content,
+            trigger:    trigger
+        )
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else { return }
+            UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
+        }
+    }
+
     func scheduleReceiptDetectedNotification(count: Int) {
         guard count > 0 else { return }
 

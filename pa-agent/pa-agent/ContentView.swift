@@ -3274,6 +3274,13 @@ struct ContentView: View {
             .onAppear {
                 setupNotifications()
                 setupSpeech()
+                // Start listening for Darwin notifications posted by the share / copy
+                // extensions so content is injected even when the app is foregrounded.
+                sharedContentProcessor.startListeningForExtensionEvents()
+                // Drain any items queued while the app was loading/locked/backgrounded.
+                // scenePhase may already be .active at this point so onChange won't re-fire.
+                sharedContentProcessor.refreshPendingCount()
+                Task { await injectSharedItemsIntoChat() }
                 #if !DEBUG
                 Task { await subscriptionManager.refreshSubscriptionStatus() }
                 #endif
@@ -3283,6 +3290,12 @@ struct ContentView: View {
                 checkAgentTasks(at: Date())
                 Task { await refreshSystemTasks() }
                 Task { await checkForNewPhotoReceipts() }
+            }
+            // Darwin bridge: fires when an extension writes to the App Group,
+            // even if scenePhase doesn't transition (app already in foreground).
+            .onReceive(NotificationCenter.default.publisher(for: .nexaSharedItemArrived)) { _ in
+                sharedContentProcessor.refreshPendingCount()
+                Task { await injectSharedItemsIntoChat() }
             }
             .onChange(of: scenePhase) { newPhase in
                 if newPhase == .active {
@@ -5997,6 +6010,16 @@ extension ContentView {
             // ── Inject into chat ────────────────────────────────────────
             await MainActor.run {
                 messages.append(ChatMessage(isUser: true, text: visibleText, imageData: item.imageData))
+                // Log to the in-app notification feed so the user can review it later.
+                let knownSource = !item.sourceAppName.isEmpty && item.sourceAppName != "Shared"
+                let notifTitle  = knownSource ? "Content from \(item.sourceAppName)" : "Shared content"
+                let notifBody: String
+                switch item.contentType {
+                case "image": notifBody = "An image was shared to Nexa."
+                case "url":   notifBody = item.content
+                default:      notifBody = String(item.content.prefix(120))
+                }
+                notificationManager.addNotification(title: notifTitle, body: notifBody)
             }
 
             // Process one item at a time so the agent's replies stay coherent.
