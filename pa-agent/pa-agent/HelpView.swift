@@ -78,6 +78,18 @@ struct HelpView: View {
             iconName: "chart.line.uptrend.xyaxis",
             userLine: "user: Track $15 for lunch and 30 minutes of running.",
             agentLine: "agent: I logged $15 under 'Spending' and 30 under 'Fitness'. You can view your history in the tracking dashboard."
+        ),
+        HelpUseCase(
+            title: "Share from WhatsApp / iMessage",
+            iconName: "square.and.arrow.up.fill",
+            userLine: "user: [Shared a WhatsApp message] 'Team lunch this Friday at 1pm at Nobu'",
+            agentLine: "agent: Looks like a lunch event on Friday at 1pm. Would you like me to add it to your calendar?"
+        ),
+        HelpUseCase(
+            title: "Share a Receipt Photo",
+            iconName: "photo.on.rectangle.angled",
+            userLine: "user: [Shared an image] Receipt photo from WhatsApp",
+            agentLine: "agent: I can see a receipt for $42.50 at Grab. Would you like me to log this as an expense?"
         )
     ]
 
@@ -101,7 +113,9 @@ struct HelpView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
-        }
+            ShareWithNexaGuideView()
+                .padding(.horizontal)
+                .padding(.bottom, 8)        }
         .padding(.horizontal)
         .padding(.vertical, 8)
         .navigationTitle("Help")
@@ -204,7 +218,86 @@ private struct HelpDiagramSampleView: View {
 
 #Preview {
     NavigationStack {
-        HelpView()
+        ScrollView {
+            HelpView()
+        }
+    }
+}
+
+// MARK: - Share with Nexa Guide
+
+private struct ShareStep: Identifiable {
+    let id = UUID()
+    let number: Int
+    let icon: String
+    let title: String
+    let detail: String
+}
+
+private struct ShareWithNexaGuideView: View {
+    @State private var expanded = false
+
+    private let steps: [ShareStep] = [
+        ShareStep(number: 1, icon: "hand.tap.fill",        title: "Open any app",          detail: "Go to WhatsApp, iMessage, Safari, or any app that has a message, image, or link you want to share."),
+        ShareStep(number: 2, icon: "square.and.arrow.up",  title: "Tap the Share button",  detail: "Long-press a message or image, or tap the Share icon (□↑). This opens the iOS share sheet."),
+        ShareStep(number: 3, icon: "ellipsis",             title: "Find Nexa",             detail: "In the top app row tap the Nexa icon. If you don't see it, tap More (•••) and toggle Nexa on. For actions (Copy, Save…) swipe to the second strip and tap Send to Nexa."),
+        ShareStep(number: 4, icon: "paperplane.fill",      title: "Tap Send to Nexa",      detail: "A preview sheet appears. Optionally add a note, then tap Send to Nexa."),
+        ShareStep(number: 5, icon: "sparkles",             title: "Nexa organises it",     detail: "Switch back to Nexa. The shared content appears in chat and Nexa will suggest the right action — add to calendar, track an expense, set a reminder, and more.")
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.spring(response: 0.3)) { expanded.toggle() }
+            } label: {
+                HStack {
+                    Label("How to share with Nexa", systemImage: "square.and.arrow.up.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .padding()
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+            .buttonStyle(.plain)
+
+            if expanded {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(steps) { step in
+                        HStack(alignment: .top, spacing: 12) {
+                            // Step number circle
+                            ZStack {
+                                Circle()
+                                    .fill(Color.purple.opacity(0.15))
+                                    .frame(width: 30, height: 30)
+                                Text("\(step.number)")
+                                    .font(.caption.weight(.bold))
+                                    .foregroundStyle(.purple)
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Label(step.title, systemImage: step.icon)
+                                    .font(.subheadline.weight(.semibold))
+                                Text(step.detail)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .padding(.horizontal)
+                        .padding(.vertical, 10)
+                        if step.number < steps.count {
+                            Divider().padding(.leading, 54)
+                        }
+                    }
+                }
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .padding(.top, 6)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
     }
 }
 
@@ -224,7 +317,11 @@ class DailyTipManager: ObservableObject {
         DailyTip(text: "Did you know? You can ask the agent to remind you about important tasks just by using your voice.", icon: "mic.fill"),
         DailyTip(text: "Save important notes by asking the agent to remember them. Access them later from the Saved Items.", icon: "bookmark.fill"),
         DailyTip(text: "Send quick emails or text messages by telling the agent who to contact and what to say.", icon: "paperplane.fill"),
-        DailyTip(text: "Make it personal! Go to Settings to give the agent a custom name, and tell it your name so it greets you personally.", icon: "person.text.rectangle.fill")
+        DailyTip(text: "Make it personal! Go to Settings to give the agent a custom name, and tell it your name so it greets you personally.", icon: "person.text.rectangle.fill"),
+        DailyTip(text: "Tip: Share any message, image, or link from WhatsApp, iMessage, or Safari directly into Nexa — tap the share button and choose Send to Nexa. Nexa will read it and help you organise it.", icon: "square.and.arrow.up.fill"),
+        DailyTip(text: "Did you know? Share a WhatsApp message about an upcoming event and Nexa will ask if you'd like to add it to your calendar automatically.", icon: "calendar.badge.plus"),
+        DailyTip(text: "Tip: Forward a receipt or invoice photo from any chat app to Nexa and it will extract the amount and offer to track it as an expense for you.", icon: "photo.on.rectangle.angled"),
+        DailyTip(text: "Stay organised effortlessly — share your messages and conversations with Nexa and let it decide what to do: schedule events, track expenses, set reminders, and more.", icon: "sparkles")
     ]
     
     @Published var currentTip: DailyTip?
