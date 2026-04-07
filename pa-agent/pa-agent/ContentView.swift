@@ -1651,8 +1651,11 @@ struct ChatMessage: Identifiable, Hashable {
     let taskStatusSnapshot: TaskStatusSnapshot?
     let responseTitle: String?
     let usedSkillNames: [String]?
+    /// Raw JPEG data for messages that carry an image (e.g. shared from WhatsApp / iMessage).
+    /// Optional so existing stored messages decode without errors.
+    let imageData: Data?
 
-    init(id: UUID = UUID(), isUser: Bool, text: String, timestamp: Date = .init(), taskStatusSnapshot: TaskStatusSnapshot? = nil, responseTitle: String? = nil, usedSkillNames: [String]? = nil) {
+    init(id: UUID = UUID(), isUser: Bool, text: String, timestamp: Date = .init(), taskStatusSnapshot: TaskStatusSnapshot? = nil, responseTitle: String? = nil, usedSkillNames: [String]? = nil, imageData: Data? = nil) {
         self.id = id
         self.isUser = isUser
         self.text = text
@@ -1660,6 +1663,7 @@ struct ChatMessage: Identifiable, Hashable {
         self.taskStatusSnapshot = taskStatusSnapshot
         self.responseTitle = responseTitle
         self.usedSkillNames = usedSkillNames
+        self.imageData = imageData
     }
 }
 
@@ -3288,21 +3292,10 @@ struct ContentView: View {
                      // Restore email sessions
                      Task { await GmailService.shared.restoreSession() }
                      Task { await OutlookService.shared.restoreSession() }
-                     // Process any items forwarded via the Share Extension
-                     if skillsManager.isEnabled(.messaging) {
-                         sharedContentProcessor.refreshPendingCount()
-                         Task {
-                             await sharedContentProcessor.processAll(
-                                 intentService: intentService,
-                                 agentName: agentName,
-                                 userName: userName.isEmpty ? nil : userName,
-                                 apiKey: storedApiKey.isEmpty ? nil : storedApiKey,
-                                 model: storedModel,
-                                 useAzure: useAzure,
-                                 azureEndpoint: azureEndpoint
-                             )
-                         }
-                     }
+                     // Inject any items forwarded via the Share Extension into chat.
+                     // No skill gate — the user explicitly chose to share to Nexa.
+                     sharedContentProcessor.refreshPendingCount()
+                     Task { await injectSharedItemsIntoChat() }
                      if skillsManager.isEnabled(.email) {
                          Task { await emailStore.refresh() }
                      }
@@ -3901,6 +3894,18 @@ struct ContentView: View {
                 .accessibilityLabel("Email inbox")
             }
 
+            // Shared inbox badge — only visible when Messaging skill is enabled and items are pending
+            if skillsManager.isEnabled(.messaging) && sharedContentProcessor.pendingCount > 0 {
+                Text(sharedContentProcessor.pendingCount > 99 ? "99+" : "\(sharedContentProcessor.pendingCount) shared")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.purple)
+                    .clipShape(Capsule())
+                    .padding(.trailing, 4)
+            }
+
             Button(action: { showTasksList = true }) {
                 Image(systemName: "checklist")
                     .font(.title3)
@@ -4147,6 +4152,14 @@ struct ContentView: View {
 
                     Text(message.text)
                         .foregroundStyle(.primary)
+
+                    if message.isUser, let imgData = message.imageData, let uiImg = UIImage(data: imgData) {
+                        Image(uiImage: uiImg)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: 220)
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
 
                     if let snapshot = message.taskStatusSnapshot {
                         taskStatusChart(snapshot)
@@ -5941,6 +5954,53 @@ extension ContentView {
                 let creditsToDeduct = max(1, tokensUsed / 5000)
                 await creditManager.deductOnServer(userId: authManager.email, amount: creditsToDeduct)
             }
+        }
+    }
+
+    // MARK: - Share Extension injection
+
+    /// Drains the App-Group queue and injects each shared item directly into
+    /// the chat as a user message, then calls handleIntent so the Nexa agent
+    /// can respond inline (calendar event? expense? task? etc.)
+    private func injectSharedItemsIntoChat() async {
+        let items = sharedContentProcessor.drainUnprocessed()
+        guard !items.isEmpty else { return }
+
+        for item in items {
+            // ── Build the user-visible message ──────────────────────────
+            let knownSource = !item.sourceAppName.isEmpty && item.sourceAppName != "Shared"
+            var visibleParts: [String] = []
+            switch item.contentType {
+            case "image":
+                visibleParts.append(knownSource ? "📲 Shared an image from \(item.sourceAppName)" : "📲 Shared an image")
+            case "url":
+                visibleParts.append(knownSource ? "🔗 Shared from \(item.sourceAppName):\n\(item.content)" : "🔗 Shared link:\n\(item.content)")
+            default:
+                visibleParts.append(knownSource ? "📲 Shared from \(item.sourceAppName):\n\(item.content)" : "📲 Shared:\n\(item.content)")
+            }
+            if !item.userNote.isEmpty {
+                visibleParts.append("Note: \(item.userNote)")
+            }
+            let visibleText = visibleParts.joined(separator: "\n")
+
+            // ── Build the intent prompt ─────────────────────────────────
+            var intentParts: [String] = []
+            if !item.content.isEmpty { intentParts.append(item.content) }
+            if !item.userNote.isEmpty { intentParts.append("User note: \(item.userNote)") }
+            let intentText = intentParts.joined(separator: "\n")
+
+            // ── Image → base64 data URL for vision models ───────────────
+            let imageDataURL: String? = item.imageData.map {
+                "data:image/jpeg;base64,\($0.base64EncodedString())"
+            }
+
+            // ── Inject into chat ────────────────────────────────────────
+            await MainActor.run {
+                messages.append(ChatMessage(isUser: true, text: visibleText, imageData: item.imageData))
+            }
+
+            // Process one item at a time so the agent's replies stay coherent.
+            await handleIntent(for: intentText, attachedImageDataURL: imageDataURL)
         }
     }
 

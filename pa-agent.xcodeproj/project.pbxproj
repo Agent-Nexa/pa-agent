@@ -7,11 +7,19 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		ABCD00022F82851200ABCD01 /* NexaCopyAction.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = ABCD00012F82851200ABCD01 /* NexaCopyAction.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		AE5E908A2F80C7DB00315DE5 /* MSAL in Frameworks */ = {isa = PBXBuildFile; productRef = AE5E90892F80C7DB00315DE5 /* MSAL */; };
 		AE5E91DC2F82851200315DE5 /* NexaShareExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = AE5E91D22F82851200315DE5 /* NexaShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		ABCD00032F82851200ABCD01 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AEF59D0E2F3D994800FC4B5D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = ABCD00092F82851200ABCD01;
+			remoteInfo = NexaCopyAction;
+		};
 		AE5E91DA2F82851200315DE5 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = AEF59D0E2F3D994800FC4B5D /* Project object */;
@@ -42,6 +50,7 @@
 			dstPath = "";
 			dstSubfolderSpec = 13;
 			files = (
+				ABCD00022F82851200ABCD01 /* NexaCopyAction.appex in Embed Foundation Extensions */,
 				AE5E91DC2F82851200315DE5 /* NexaShareExtension.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
@@ -50,6 +59,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		ABCD00012F82851200ABCD01 /* NexaCopyAction.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = NexaCopyAction.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		AE5E90872F80C8A300315DE5 /* nexa-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "nexa-Info.plist"; sourceTree = "<group>"; };
 		AE5E91D22F82851200315DE5 /* NexaShareExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = NexaShareExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		AEF59D162F3D994800FC4B5D /* nexa.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = nexa.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -58,6 +68,13 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		ABCD00042F82851200ABCD01 /* Exceptions for "NexaCopyAction" folder in "NexaCopyAction" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = ABCD00092F82851200ABCD01 /* NexaCopyAction */;
+		};
 		AE5E91DD2F82851200315DE5 /* Exceptions for "NexaShareExtension" folder in "NexaShareExtension" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -68,11 +85,25 @@
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		ABCD00052F82851200ABCD01 /* NexaCopyAction */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				ABCD00042F82851200ABCD01 /* Exceptions for "NexaCopyAction" folder in "NexaCopyAction" target */,
+			);
+			explicitFileTypes = {
+				NexaCopyAction.entitlements = text.plist.entitlements;
+			};
+			path = NexaCopyAction;
+			sourceTree = "<group>";
+		};
 		AE5E91D32F82851200315DE5 /* NexaShareExtension */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				AE5E91DD2F82851200315DE5 /* Exceptions for "NexaShareExtension" folder in "NexaShareExtension" target */,
 			);
+			explicitFileTypes = {
+				NexaShareExtension.entitlements = text.plist.entitlements;
+			};
 			path = NexaShareExtension;
 			sourceTree = "<group>";
 		};
@@ -94,6 +125,13 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		ABCD00062F82851200ABCD01 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		AE5E91CF2F82851200315DE5 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -134,6 +172,7 @@
 				AEF59D262F3D994900FC4B5D /* pa-agentTests */,
 				AEF59D302F3D994900FC4B5D /* pa-agentUITests */,
 				AE5E91D32F82851200315DE5 /* NexaShareExtension */,
+				ABCD00052F82851200ABCD01 /* NexaCopyAction */,
 				AEF59D172F3D994800FC4B5D /* Products */,
 			);
 			sourceTree = "<group>";
@@ -145,6 +184,7 @@
 				AEF59D232F3D994900FC4B5D /* nexaTests.xctest */,
 				AEF59D2D2F3D994900FC4B5D /* nexaUITests.xctest */,
 				AE5E91D22F82851200315DE5 /* NexaShareExtension.appex */,
+				ABCD00012F82851200ABCD01 /* NexaCopyAction.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -152,6 +192,28 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		ABCD00092F82851200ABCD01 /* NexaCopyAction */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = ABCD000D2F82851200ABCD01 /* Build configuration list for PBXNativeTarget "NexaCopyAction" */;
+			buildPhases = (
+				ABCD00082F82851200ABCD01 /* Sources */,
+				ABCD00062F82851200ABCD01 /* Frameworks */,
+				ABCD00072F82851200ABCD01 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				ABCD00052F82851200ABCD01 /* NexaCopyAction */,
+			);
+			name = NexaCopyAction;
+			packageProductDependencies = (
+			);
+			productName = NexaCopyAction;
+			productReference = ABCD00012F82851200ABCD01 /* NexaCopyAction.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 		AE5E91D12F82851200315DE5 /* NexaShareExtension */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = AE5E91DE2F82851200315DE5 /* Build configuration list for PBXNativeTarget "NexaShareExtension" */;
@@ -186,6 +248,7 @@
 			buildRules = (
 			);
 			dependencies = (
+				ABCD000A2F82851200ABCD01 /* PBXTargetDependency */,
 				AE5E91DB2F82851200315DE5 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
@@ -255,6 +318,9 @@
 				LastSwiftUpdateCheck = 2630;
 				LastUpgradeCheck = 2630;
 				TargetAttributes = {
+					ABCD00092F82851200ABCD01 = {
+						CreatedOnToolsVersion = 26.3;
+					};
 					AE5E91D12F82851200315DE5 = {
 						CreatedOnToolsVersion = 26.3;
 					};
@@ -298,11 +364,19 @@
 				AEF59D222F3D994900FC4B5D /* nexaTests */,
 				AEF59D2C2F3D994900FC4B5D /* nexaUITests */,
 				AE5E91D12F82851200315DE5 /* NexaShareExtension */,
+				ABCD00092F82851200ABCD01 /* NexaCopyAction */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		ABCD00072F82851200ABCD01 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		AE5E91D02F82851200315DE5 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -334,6 +408,13 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		ABCD00082F82851200ABCD01 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		AE5E91CE2F82851200315DE5 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -365,6 +446,11 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		ABCD000A2F82851200ABCD01 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = ABCD00092F82851200ABCD01 /* NexaCopyAction */;
+			targetProxy = ABCD00032F82851200ABCD01 /* PBXContainerItemProxy */;
+		};
 		AE5E91DB2F82851200315DE5 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = AE5E91D12F82851200315DE5 /* NexaShareExtension */;
@@ -383,9 +469,72 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		ABCD000B2F82851200ABCD01 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = NexaCopyAction/NexaCopyAction.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = SXM7L9UCM6;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = NexaCopyAction/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Send to Nexa";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = z.Nexa.NexaCopyAction;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		ABCD000C2F82851200ABCD01 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = NexaCopyAction/NexaCopyAction.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = SXM7L9UCM6;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = NexaCopyAction/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Send to Nexa";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = z.Nexa.NexaCopyAction;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 		AE5E91DF2F82851200315DE5 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = NexaShareExtension/NexaShareExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = SXM7L9UCM6;
@@ -414,6 +563,7 @@
 		AE5E91E02F82851200315DE5 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = NexaShareExtension/NexaShareExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = SXM7L9UCM6;
@@ -564,6 +714,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+				CODE_SIGN_ENTITLEMENTS = "pa-agent/pa-agent.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 4;
 				DEVELOPMENT_TEAM = SXM7L9UCM6;
@@ -609,6 +760,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+				CODE_SIGN_ENTITLEMENTS = "pa-agent/pa-agent.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 4;
 				DEVELOPMENT_TEAM = SXM7L9UCM6;
@@ -735,6 +887,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		ABCD000D2F82851200ABCD01 /* Build configuration list for PBXNativeTarget "NexaCopyAction" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				ABCD000B2F82851200ABCD01 /* Debug */,
+				ABCD000C2F82851200ABCD01 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		AE5E91DE2F82851200315DE5 /* Build configuration list for PBXNativeTarget "NexaShareExtension" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

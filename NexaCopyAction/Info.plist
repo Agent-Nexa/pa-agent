@@ -2,22 +2,6 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleDisplayName</key>
-	<string>Nexa</string>
-	<key>CFBundleExecutable</key>
-	<string>$(EXECUTABLE_NAME)</string>
-	<key>CFBundleIdentifier</key>
-	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
-	<key>CFBundleInfoDictionaryVersion</key>
-	<string>6.0</string>
-	<key>CFBundleName</key>
-	<string>$(PRODUCT_NAME)</string>
-	<key>CFBundlePackageType</key>
-	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
-	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
-	<key>CFBundleVersion</key>
-	<string>1</string>
 	<key>NSExtension</key>
 	<dict>
 		<key>NSExtensionAttributes</key>
@@ -33,19 +17,17 @@
     || ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.jpeg"
     || ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.png"
     || ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.heic"
-    || ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.gif"
-    || ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.file-url"
     || ANY $attachment.registeredTypeIdentifiers UTI-CONFORMS-TO "public.data"
+    || ANY $attachment.registeredTypeIdentifiers == "com.apple.uikit.image"
     || ANY $attachment.registeredTypeIdentifiers == "com.whatsapp.image"
     || ANY $attachment.registeredTypeIdentifiers == "net.whatsapp.WhatsApp.image"
-    || ANY $attachment.registeredTypeIdentifiers == "com.apple.uikit.image"
   ).@count > 0
 ).@count > 0</string>
 		</dict>
 		<key>NSExtensionPointIdentifier</key>
-		<string>com.apple.share-services</string>
+		<string>com.apple.ui-services</string>
 		<key>NSExtensionPrincipalClass</key>
-		<string>$(PRODUCT_MODULE_NAME).ShareViewController</string>
+		<string>$(PRODUCT_MODULE_NAME).ActionViewController</string>
 	</dict>
 </dict>
 </plist>
