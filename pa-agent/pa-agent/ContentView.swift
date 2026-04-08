@@ -2296,8 +2296,6 @@ enum InteractionState: Equatable {
     case collectingNewContactDetail(task: TaskItem, name: String, missingType: String)
     case collectingScheduledTaskContact(name: String, missingType: String, draft: TaskDraft, actionType: String)
     case collectingScheduledActionContent(draft: TaskDraft, actionType: String, recipient: String, promptLabel: String)
-    case confirmingTaskConflict(draft: TaskDraft, actionPayload: TaskItem.AgentAction?, conflicts: [TaskItem], suggestions: [Date])
-    case collectingConflictDateTime(draft: TaskDraft, actionPayload: TaskItem.AgentAction?)
     case confirmingTrackingRequest(categoryId: UUID, categoryName: String, value: Double, note: String?, rawText: String?, recordDate: Date)
     case confirmingMultipleTrackingRequests(trackings: [TrackingConfirmationItem], rawText: String?, recordDate: Date)
 }
@@ -3188,9 +3186,7 @@ struct ContentView: View {
     @State private var selectedOverdueIDs: Set<UUID> = []
     @State private var isAgentThinking = false
     @State private var copiedAgentMessageID: UUID?
-    @State private var showScheduleConflictAlert = false
-    @State private var pendingConflictTask: TaskItem?
-    @State private var pendingConflictMatches: [TaskItem] = []
+
     @State private var savedAgentItems: [SavedAgentItem] = []
     @State private var recentCalendarOccurrenceStatuses: [String: TaskItem.TaskStatus] = [:]
     private let calendarOccurrenceStatusesStoreKey = "calendar_occurrence_statuses_v1"
@@ -3511,35 +3507,6 @@ struct ContentView: View {
                 Button("OK", role: .cancel) {}
             }, message: {
                 Text("I couldn't add the task to Calendar. Please enable calendar access in Settings.")
-            })
-            .alert("Schedule conflict", isPresented: $showScheduleConflictAlert, actions: {
-                Button("Change Date/Time", role: .cancel) {
-                    if let task = pendingConflictTask {
-                        pendingDraft = TaskDraft(
-                            title: task.title,
-                            startDate: task.startDate,
-                            dueDate: task.dueDate,
-                            priority: task.priority,
-                            tag: task.tag
-                        )
-                        pendingScheduledActionPayload = task.actionPayload
-                    }
-                    showTaskDetailSheet = true
-                    pendingConflictTask = nil
-                    pendingConflictMatches = []
-                }
-                Button("Create Anyway") {
-                    if let task = pendingConflictTask {
-                        insertTask(task, announce: true)
-                        pendingDraft = TaskDraft(title: "")
-                        pendingScheduledActionPayload = nil
-                        showTaskDetailSheet = false
-                    }
-                    pendingConflictTask = nil
-                    pendingConflictMatches = []
-                }
-            }, message: {
-                Text(scheduleConflictMessage)
             })
             .onAppear {
                 migrateSettings()
@@ -4046,37 +4013,6 @@ struct ContentView: View {
                             .buttonStyle(.bordered)
                         }
                         .padding()
-                    }
-
-                    if case .confirmingTaskConflict(_, _, _, let suggestions) = interactionState {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Choose a time option:")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-
-                            ForEach(Array(suggestions.enumerated()), id: \.offset) { index, suggestion in
-                                Button {
-                                    Task { await handleIntent(for: "\(index + 1)") }
-                                } label: {
-                                    HStack {
-                                        Text("\(index + 1). \(suggestion.formatted(date: .abbreviated, time: .shortened))")
-                                            .foregroundStyle(.primary)
-                                        Spacer()
-                                    }
-                                    .padding()
-                                    .background(Color.white)
-                                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                                    .shadow(color: .black.opacity(0.05), radius: 2, x: 0, y: 1)
-                                }
-                            }
-
-                            Button("Go ahead with current time") {
-                                Task { await handleIntent(for: "go ahead") }
-                            }
-                            .buttonStyle(.bordered)
-                        }
-                        .padding(.horizontal, 4)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
 
                     if isAgentThinking {
@@ -6295,13 +6231,10 @@ extension ContentView {
         pendingEmail = .init()
         pendingCallRecipient = ""
         pendingAgentTask = nil
-        pendingConflictTask = nil
-        pendingConflictMatches = []
         showingAgentTaskAlert = false
         showingOverdueSheet = false
         overdueTasksToPresent = []
         selectedOverdueIDs = []
-        showScheduleConflictAlert = false
         isAgentThinking = false
     }
     
@@ -6707,51 +6640,6 @@ extension ContentView {
                 pendingEmail = recovered
                 interactionState = .confirmingEmail(recovered)
             }
-        }
-
-        if case .confirmingTaskConflict(let draftForTask, let actionPayload, let conflicts, let suggestions) = interactionState {
-            if let optionIndex = selectedConflictSuggestionIndex(from: lower, max: suggestions.count) {
-                let duration = max(draftForTask.dueDate.timeIntervalSince(draftForTask.startDate), 30 * 60)
-                var updatedDraft = draftForTask
-                updatedDraft.startDate = suggestions[optionIndex]
-                updatedDraft.dueDate = suggestions[optionIndex].addingTimeInterval(duration)
-                beginTaskConfirmationFlow(draft: updatedDraft, actionPayload: actionPayload)
-                return
-            }
-
-            if lower.contains("pick") || lower.contains("myself") || lower.contains("manual") || lower.contains("new time") {
-                interactionState = .collectingConflictDateTime(draft: draftForTask, actionPayload: actionPayload)
-                messages.append(.init(isUser: false, text: "Sure — tell me the new date and time, for example ‘tomorrow 11am’."))
-                return
-            }
-
-            if let updatedDraft = await updatedDraftWithNewDateTime(from: text, baseDraft: draftForTask) {
-                beginTaskConfirmationFlow(draft: updatedDraft, actionPayload: actionPayload)
-                return
-            }
-
-            if isAffirmativeReply(lower) {
-                interactionState = .idle
-                pendingDraft = draftForTask
-                pendingScheduledActionPayload = actionPayload
-                messages.append(.init(isUser: false, text: "Understood. I’ll proceed even though it overlaps with \(conflicts.first?.title ?? "another event"). Please confirm details."))
-                showTaskDetailSheet = true
-                return
-            }
-
-            interactionState = .collectingConflictDateTime(draft: draftForTask, actionPayload: actionPayload)
-            messages.append(.init(isUser: false, text: "Please choose one of the suggested options, reply 'go ahead', or type a new date/time."))
-            return
-        }
-
-        if case .collectingConflictDateTime(let draftForTask, let actionPayload) = interactionState {
-            guard let updatedDraft = await updatedDraftWithNewDateTime(from: text, baseDraft: draftForTask) else {
-                messages.append(.init(isUser: false, text: "I couldn’t parse that date/time. Please try like ‘tomorrow 11am’ or ‘next Tuesday at 3pm’."))
-                return
-            }
-
-            beginTaskConfirmationFlow(draft: updatedDraft, actionPayload: actionPayload)
-            return
         }
 
         // 0. Check disambiguation
@@ -7791,144 +7679,15 @@ extension ContentView {
             actionPayload: actionPayload
         )
 
-        let conflicts = calendarConflicts(for: candidateTask)
-        if !conflicts.isEmpty {
-            let suggestions = suggestedFreeStartTimes(for: draft, maxSuggestions: 3)
-            interactionState = .confirmingTaskConflict(draft: draft, actionPayload: actionPayload, conflicts: conflicts, suggestions: suggestions)
-            messages.append(.init(isUser: false, text: conflictPromptMessage(for: draft, conflicts: conflicts, suggestions: suggestions)))
-            return
-        }
-
         pendingDraft = draft
         pendingScheduledActionPayload = actionPayload
         interactionState = .idle
         showTaskDetailSheet = true
     }
 
-    private func conflictPromptMessage(for draft: TaskDraft, conflicts: [TaskItem], suggestions: [Date]) -> String {
-        guard let first = conflicts.first else {
-            return "This time conflicts with an existing calendar event. Do you want to proceed anyway, or provide a new date/time?"
-        }
-
-        let firstStart = first.startDate.formatted(date: .abbreviated, time: .shortened)
-        let firstEnd = first.dueDate.formatted(date: .abbreviated, time: .shortened)
-        var lines: [String] = []
-        lines.append("I found a clash: \(draft.title) overlaps with \"\(first.title)\" (\(firstStart) - \(firstEnd)).")
-
-        if suggestions.isEmpty {
-            lines.append("No clear free slot found nearby.")
-        } else {
-            lines.append("Here are free time options:")
-            for (index, suggestion) in suggestions.enumerated() {
-                lines.append("\(index + 1). \(suggestion.formatted(date: .abbreviated, time: .shortened))")
-            }
-        }
-
-        lines.append("You can tap an option, type a new date/time, or reply 'go ahead' to keep the current clashing time.")
-        return lines.joined(separator: "\n")
-    }
-
-    private func selectedConflictSuggestionIndex(from lowerText: String, max: Int) -> Int? {
-        guard max > 0 else { return nil }
-
-        let options = [
-            (1, ["1", "option 1", "first"]),
-            (2, ["2", "option 2", "second"]),
-            (3, ["3", "option 3", "third"])
-        ]
-
-        for option in options where option.0 <= max {
-            if option.1.contains(where: { token in lowerText == token || lowerText.contains(token + " ") || lowerText.hasSuffix(" " + token) || lowerText.contains(" " + token + " ") }) {
-                return option.0 - 1
-            }
-        }
-
-        if let number = Int(lowerText.trimmingCharacters(in: .whitespacesAndNewlines)), number >= 1, number <= max {
-            return number - 1
-        }
-
-        return nil
-    }
-
-    private func suggestedFreeStartTimes(for draft: TaskDraft, maxSuggestions: Int) -> [Date] {
-        let duration = max(draft.dueDate.timeIntervalSince(draft.startDate), 30 * 60)
-        let step: TimeInterval = 30 * 60
-        let horizon: TimeInterval = 7 * 24 * 60 * 60
-        var suggestions: [Date] = []
-
-        var cursor = draft.startDate.addingTimeInterval(step)
-        let end = draft.startDate.addingTimeInterval(horizon)
-
-        while cursor <= end && suggestions.count < maxSuggestions {
-            let candidate = TaskItem(
-                title: draft.title,
-                tag: draft.tag,
-                startDate: cursor,
-                dueDate: cursor.addingTimeInterval(duration),
-                priority: draft.priority,
-                executor: .user,
-                actionPayload: nil
-            )
-
-            if calendarConflicts(for: candidate).isEmpty {
-                suggestions.append(cursor)
-            }
-
-            cursor = cursor.addingTimeInterval(step)
-        }
-
-        return suggestions
-    }
-
     private func isAffirmativeReply(_ lowerText: String) -> Bool {
         let affirmatives = ["yes", "y", "ok", "okay", "sure", "go ahead", "proceed", "confirm", "continue"]
         return affirmatives.contains { lowerText.contains($0) }
-    }
-
-    private func updatedDraftWithNewDateTime(from text: String, baseDraft: TaskDraft) async -> TaskDraft? {
-        let duration = max(baseDraft.dueDate.timeIntervalSince(baseDraft.startDate), 30 * 60)
-        let lower = text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if lower.isEmpty {
-            return nil
-        }
-
-        if isAIFeatureEnabled {
-            let activeKey = storedApiKey.isEmpty ? ProcessInfo.processInfo.environment["OPENAI_API_KEY"] : storedApiKey
-            if let aiStart = await intentService.parseRescheduleStartDate(
-                from: text,
-                currentStart: baseDraft.startDate,
-                apiKey: activeKey,
-                model: storedModel,
-                useAzure: useAzure,
-                azureEndpoint: azureEndpoint,
-                agentName: agentName
-            ) {
-                var updated = baseDraft
-                updated.startDate = aiStart
-                updated.dueDate = aiStart.addingTimeInterval(duration)
-                return updated
-            }
-        }
-
-        if let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.date.rawValue),
-           let match = detector.firstMatch(in: text, options: [], range: NSRange(location: 0, length: text.utf16.count)),
-           let start = match.date {
-            var updated = baseDraft
-            updated.startDate = start
-            updated.dueDate = start.addingTimeInterval(duration)
-            return updated
-        }
-
-        if let inferred = intentAnalyzer.infer(from: text, agentName: agentName),
-           let start = inferred.startDate {
-            var updated = baseDraft
-            updated.startDate = start
-            updated.dueDate = start.addingTimeInterval(duration)
-            return updated
-        }
-
-        return nil
     }
 
     private func commitPendingTask() {
@@ -7942,90 +7701,11 @@ extension ContentView {
             actionPayload: pendingScheduledActionPayload
         )
 
-        let conflicts = calendarConflicts(for: newTask)
-        if !conflicts.isEmpty {
-            pendingConflictTask = newTask
-            pendingConflictMatches = conflicts
-            showScheduleConflictAlert = true
-            return
-        }
-
         insertTask(newTask, announce: true)
 
         pendingDraft = TaskDraft(title: "")
         pendingScheduledActionPayload = nil
         showTaskDetailSheet = false
-    }
-
-    private var scheduleConflictMessage: String {
-        guard let first = pendingConflictMatches.first else {
-            return "This time overlaps with an existing calendar event. You can change date/time or create anyway."
-        }
-
-        let start = first.startDate.formatted(date: .abbreviated, time: .shortened)
-        let end = first.dueDate.formatted(date: .abbreviated, time: .shortened)
-        return "This task overlaps with \"\(first.title)\" (\(start) - \(end)). Change date/time or create anyway."
-    }
-
-    private func calendarConflicts(for task: TaskItem) -> [TaskItem] {
-        let taskStart = task.startDate
-        let taskEnd = max(task.dueDate, taskStart.addingTimeInterval(30 * 60))
-
-        func overlaps(_ existing: TaskItem) -> Bool {
-            if existing.isAllDay || task.isAllDay { return false }
-            let existingStart = existing.startDate
-            let existingEnd = max(existing.dueDate, existingStart.addingTimeInterval(30 * 60))
-            return taskStart < existingEnd && taskEnd > existingStart
-        }
-
-        var liveConflicts: [TaskItem] = []
-        if canReadCalendarEventsForConflicts() {
-            let calendars = eventStore.calendars(for: .event).filter {
-                !shouldIgnoreCalendarForTaskSync($0)
-            }
-
-            let predicate = eventStore.predicateForEvents(withStart: taskStart, end: taskEnd, calendars: calendars)
-            let events = eventStore.events(matching: predicate).filter { !$0.isAllDay }
-
-            liveConflicts = events
-                .map { event in
-                    let category: String
-                    switch event.calendar.type {
-                    case .birthday: category = "Birthday"
-                    default: category = "Event"
-                    }
-                    return TaskItem(
-                        title: event.title ?? "Event",
-                        tag: event.calendar.title,
-                        startDate: event.startDate,
-                        dueDate: event.endDate,
-                        priority: 2,
-                        type: .calendar,
-                        externalId: event.eventIdentifier,
-                        eventCategory: category
-                    )
-                }
-                .filter(overlaps)
-        }
-
-        if !liveConflicts.isEmpty {
-            return liveConflicts.sorted { $0.startDate < $1.startDate }
-        }
-
-        return tasks
-            .filter { $0.type == .calendar }
-            .filter(overlaps)
-            .sorted { $0.startDate < $1.startDate }
-    }
-
-    private func canReadCalendarEventsForConflicts() -> Bool {
-        if #available(iOS 17, *) {
-            let status = EKEventStore.authorizationStatus(for: .event)
-            return status == .fullAccess
-        }
-
-        let status = EKEventStore.authorizationStatus(for: .event)
-        return status == .authorized
     }
 
     private func insertTask(_ newTask: TaskItem, announce: Bool) {
