@@ -572,19 +572,100 @@ final class IntentService {
             userMessageContent = text
         }
 
+        let requestText = "\(systemPrompt)\n\nUser:\n\(text)\n\nHasImage:\(imageDataURL?.isEmpty == false)"
+        let provider = useAzure ? "azure-openai" : "openai"
+
+        // ── When no active server-side chain, fall back to Chat Completions ─────
+        // The Responses API requires a valid previous_response_id to work reliably
+        // on this Azure APIM gateway. Chat Completions works with or without history.
+        if previousResponseId == nil {
+            // Build Chat Completions endpoint
+            let chatURL: URL
+            if useAzure {
+                guard let azureString = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      let azureBaseURL = URL(string: azureString),
+                      let host = azureBaseURL.host,
+                      let url = URL(string: "\(azureBaseURL.scheme ?? "https")://\(host)/openai/models/chat/completions?api-version=2024-05-01-preview")
+                else {
+                    usedOpenAI = false; lastReason = "invalid Azure URL (chat)"; return nil
+                }
+                chatURL = url
+            } else {
+                chatURL = URL(string: "https://api.openai.com/v1/chat/completions")!
+            }
+
+            var chatRequest = URLRequest(url: chatURL)
+            chatRequest.httpMethod = "POST"
+            chatRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            if useAzure {
+                if !apiKey.isEmpty { chatRequest.setValue(apiKey, forHTTPHeaderField: "api-key") }
+            } else {
+                chatRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            }
+            if !accessToken.isEmpty { chatRequest.setValue(accessToken, forHTTPHeaderField: "X-User-Token") }
+
+            // Build messages array: system + prior turns + current user message
+            var messages: [[String: Any]] = [
+                ["role": "system", "content": systemPromptOverride ?? systemPrompt]
+            ]
+            let priorTurns = conversationHistory.dropLast().suffix(20)
+                .filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            for msg in priorTurns {
+                messages.append(["role": msg.isUser ? "user" : "assistant",
+                                 "content": msg.text.trimmingCharacters(in: .whitespacesAndNewlines)])
+            }
+            // Current user message (with optional image)
+            if let imageDataURL, !imageDataURL.isEmpty {
+                messages.append(["role": "user", "content": [
+                    ["type": "text", "text": text.isEmpty ? "Analyze this image." : text],
+                    ["type": "image_url", "image_url": ["url": imageDataURL]]
+                ] as [[String: Any]]])
+            } else {
+                messages.append(["role": "user", "content": text])
+            }
+
+            let chatBody: [String: Any] = [
+                "model": chosenModel,
+                "temperature": 0,
+                "response_format": ["type": "json_object"],
+                "messages": messages
+            ]
+            chatRequest.httpBody = try? JSONSerialization.data(withJSONObject: chatBody)
+
+            do {
+                let (data, response) = try await session.data(for: chatRequest)
+                guard let http = response as? HTTPURLResponse else {
+                    usedOpenAI = false; lastReason = "no http response (chat)"; return nil
+                }
+                guard 200..<300 ~= http.statusCode else {
+                    let bodyStr = String(data: data, encoding: .utf8)?.prefix(200) ?? ""
+                    usedOpenAI = false
+                    lastReason = "HTTP \(http.statusCode) url=\(chatURL.absoluteString) body=\(bodyStr)"
+                    return nil
+                }
+                guard let result = parseOpenAIResponse(data: data) else {
+                    usedOpenAI = false; lastReason = "chat parse failure"; return nil
+                }
+                logTokenUsage(feature: "intent_infer_chat", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: true)
+                usedOpenAI = true
+                lastReason = "ok"
+                lastInferResponseId = nil  // Chat Completions has no response ID chain
+                return result
+            } catch {
+                usedOpenAI = false; lastReason = "network/error (chat)"; return nil
+            }
+        }
+
+        // ── Responses API path (previousResponseId is set) ───────────────────
         var bodyDict: [String: Any] = [
             "model": chosenModel,
             "temperature": 0,
             "instructions": systemPromptOverride ?? systemPrompt,
             "input": userMessageContent,
-            "text": ["format": ["type": "json_object"]]
+            "text": ["format": ["type": "json_object"]],
+            "previous_response_id": previousResponseId!
         ]
-        if let prevId = previousResponseId {
-            bodyDict["previous_response_id"] = prevId
-        }
         request.httpBody = try? JSONSerialization.data(withJSONObject: bodyDict)
-        let requestText = "\(systemPrompt)\n\nUser:\n\(text)\n\nHasImage:\(imageDataURL?.isEmpty == false)"
-        let provider = useAzure ? "azure-openai" : "openai"
 
         do {
             let (data, response) = try await session.data(for: request)
@@ -595,9 +676,10 @@ final class IntentService {
                 return nil
             }
             guard 200..<300 ~= http.statusCode else {
+                let bodyStr = String(data: data, encoding: .utf8)?.prefix(300) ?? ""
                 logTokenUsage(feature: "intent_infer", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: false, errorReason: "HTTP \(http.statusCode)")
                 usedOpenAI = false
-                lastReason = "HTTP \(http.statusCode)"
+                lastReason = "HTTP \(http.statusCode) url=\(endpointURL.absoluteString) body=\(bodyStr)"
                 return nil
             }
 
@@ -632,6 +714,7 @@ final class IntentService {
         userName: String?,
         agentName: String = "Nexa",
         appContext: String? = nil,
+        conversationHistory: [ChatMessage] = [],
         previousResponseId: String? = nil,
         onStreamEvent: (@MainActor () -> Void)? = nil,
         onDelta: @escaping @MainActor (String) -> Void
@@ -698,11 +781,28 @@ final class IntentService {
             "model": chosenModel,
             "temperature": 0.6,
             "stream": true,
-            "instructions": systemPrompt,
-            "input": userInput
+            "instructions": systemPrompt
         ]
         if let prevId = previousResponseId {
             bodyDict["previous_response_id"] = prevId
+            bodyDict["input"] = userInput
+        } else if !conversationHistory.isEmpty {
+            // Responses API does not accept [{role,content}] arrays — inject prior turns
+            // as a transcript block appended to the instructions instead.
+            let priorTurns = conversationHistory.dropLast()
+                .suffix(20)
+                .filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            if !priorTurns.isEmpty {
+                let transcript = priorTurns.map { msg -> String in
+                    let role = msg.isUser ? "User" : "Assistant"
+                    return "\(role): \(msg.text.trimmingCharacters(in: .whitespacesAndNewlines))"
+                }.joined(separator: "\n")
+                let historyBlock = "\n\nCONVERSATION HISTORY (continue from here, do not repeat or summarise unless asked):\n\(transcript)\n"
+                bodyDict["instructions"] = systemPrompt + historyBlock
+            }
+            bodyDict["input"] = userInput
+        } else {
+            bodyDict["input"] = userInput
         }
         request.httpBody = try? JSONSerialization.data(withJSONObject: bodyDict)
 
@@ -2043,11 +2143,35 @@ struct SavedAgentItem: Identifiable, Hashable, Codable {
     }
 }
 
-struct ChatSessionArchive: Codable {
+struct ChatSessionArchive: Codable, Identifiable {
     let id: UUID
     let createdAt: Date
     let endedAt: Date
     let records: [EmbeddedChatRecord]
+    let lastResponseId: String?
+
+    init(id: UUID, createdAt: Date, endedAt: Date, records: [EmbeddedChatRecord], lastResponseId: String? = nil) {
+        self.id = id
+        self.createdAt = createdAt
+        self.endedAt = endedAt
+        self.records = records
+        self.lastResponseId = lastResponseId
+    }
+
+    var displayTitle: String {
+        let firstUserText = records
+            .first(where: { $0.message.isUser })?
+            .message.text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let text = firstUserText, !text.isEmpty {
+            let truncated = String(text.prefix(60))
+            return text.count > 60 ? truncated + "…" : truncated
+        }
+        let fmt = DateFormatter()
+        fmt.dateStyle = .medium
+        fmt.timeStyle = .short
+        return fmt.string(from: createdAt)
+    }
 }
 
 @MainActor
@@ -2083,7 +2207,7 @@ final class ChatHistoryStore {
         persistMessages(trimmed)
     }
 
-    func archiveCurrentSession(_ messages: [ChatMessage]) {
+    func archiveCurrentSession(_ messages: [ChatMessage], lastResponseId: String? = nil) {
         let meaningful = messages.filter {
             !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
@@ -2094,7 +2218,7 @@ final class ChatHistoryStore {
 
         let createdAt = meaningful.first?.timestamp ?? Date()
         let endedAt = meaningful.last?.timestamp ?? Date()
-        let archive = ChatSessionArchive(id: UUID(), createdAt: createdAt, endedAt: endedAt, records: records)
+        let archive = ChatSessionArchive(id: UUID(), createdAt: createdAt, endedAt: endedAt, records: records, lastResponseId: lastResponseId)
 
         var sessions = loadSessionArchives()
         sessions.append(archive)
@@ -2107,6 +2231,20 @@ final class ChatHistoryStore {
     func clearCurrentSession() {
         saveTask?.cancel()
         persistRecords([])
+    }
+
+    func allSessions() -> [ChatSessionArchive] {
+        return loadSessionArchives().reversed()
+    }
+
+    func deleteSession(id: UUID) {
+        var sessions = loadSessionArchives()
+        sessions.removeAll { $0.id == id }
+        persistSessionArchives(sessions)
+    }
+
+    func messages(for archive: ChatSessionArchive) -> [ChatMessage] {
+        return archive.records.map(\.message)
     }
 
     func clearAllHistory() {
@@ -2270,7 +2408,7 @@ final class ChatHistoryStore {
         UserDefaults.standard.set(data, forKey: storageKey)
     }
 
-    private func loadSessionArchives() -> [ChatSessionArchive] {
+    func loadSessionArchives() -> [ChatSessionArchive] {
         guard let data = UserDefaults.standard.data(forKey: sessionsStorageKey),
               let decoded = try? JSONDecoder().decode([ChatSessionArchive].self, from: data)
         else {
@@ -3355,6 +3493,9 @@ struct ContentView: View {
     @State private var showNotificationList = false
     @State private var showSavedItemsSheet = false
     @State private var showSkillsSheet = false
+    @State private var showingHistory = false
+    @State private var selectedHistorySession: ChatSessionArchive? = nil
+    @State private var currentSessionID: UUID = UUID()
     @State private var showEmailInbox = false
     @State private var selectedTaskForDetail: TaskItem?
     @State private var pendingDetectedReceipts: [DetectedReceipt] = []
@@ -3576,6 +3717,15 @@ struct ContentView: View {
                         }
                     }
                 )
+            }
+            .sheet(isPresented: $showingHistory) {
+                ChatSessionListView(selectedSession: $selectedHistorySession)
+            }
+            .onChange(of: showingHistory) { _, isShowing in
+                if !isShowing, let archive = selectedHistorySession {
+                    loadHistorySession(archive)
+                    selectedHistorySession = nil
+                }
             }
             .sheet(isPresented: $showSavedItemsSheet) {
                 SavedItemsSheet(items: $savedAgentItems)
@@ -4135,6 +4285,13 @@ struct ContentView: View {
             .padding(.trailing, 8)
             .accessibilityLabel("Skills")
 
+            Button(action: { showingHistory = true }) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.title3)
+            }
+            .padding(.trailing, 8)
+            .accessibilityLabel("Chat history")
+
             Button(action: startNewChatSession) {
                 Image(systemName: "square.and.pencil")
                     .font(.title3)
@@ -4181,6 +4338,12 @@ struct ContentView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
+                    Text("Conversation ID: \(currentSessionID.uuidString.prefix(8).lowercased())")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 4)
+
                     ForEach(messages) { message in
                         messageBubble(for: message)
                             .id(message.id)
@@ -6744,10 +6907,32 @@ extension ContentView {
         return SavedAgentItem.titleFrom(content: replyText)
     }
 
+    private func loadHistorySession(_ archive: ChatSessionArchive) {
+        ChatHistoryStore.shared.archiveCurrentSession(messages, lastResponseId: lastResponseId)
+        ChatHistoryStore.shared.clearCurrentSession()
+        let loaded = ChatHistoryStore.shared.messages(for: archive)
+        messages = loaded
+        currentSessionID = archive.id
+        ChatHistoryStore.shared.saveMessages(messages)
+        lastResponseId = nil  // archived IDs expire server-side; context re-injected via conversationHistory
+        draft = ""
+        pendingMessage = .init()
+        pendingEmail = .init()
+        pendingCallRecipient = ""
+        pendingAgentTask = nil
+        showingAgentTaskAlert = false
+        showingOverdueSheet = false
+        overdueTasksToPresent = []
+        selectedOverdueIDs = []
+        isAgentThinking = false
+        interactionState = .idle
+    }
+
     private func startNewChatSession() {
-        ChatHistoryStore.shared.archiveCurrentSession(messages)
+        ChatHistoryStore.shared.archiveCurrentSession(messages, lastResponseId: lastResponseId)
         ChatHistoryStore.shared.clearCurrentSession()
         messages.removeAll()
+        currentSessionID = UUID()
         lastResponseId = nil
 
         let displayUser = userName.isEmpty ? "You" : userName
@@ -7673,6 +7858,7 @@ extension ContentView {
                 userName: userName,
                 agentName: agentName,
                 appContext: appCtx,
+                conversationHistory: messages,
                 previousResponseId: lastResponseId,
                 systemPromptOverride: skillPrompt
             )
@@ -7683,7 +7869,7 @@ extension ContentView {
             lastIntentReason = intentService.lastReason
         } else {
             withAnimation {
-                messages.append(.init(isUser: false, text: "LLM service is not available."))
+                messages.append(.init(isUser: false, text: "LLM service is not available (no subscription)."))
             }
             return
         }
@@ -7691,7 +7877,7 @@ extension ContentView {
 
         guard let inferred else {
             withAnimation {
-                messages.append(.init(isUser: false, text: "LLM service is not available."))
+                messages.append(.init(isUser: false, text: "LLM service is not available: \(intentService.lastReason)."))
             }
             return
         }
@@ -8031,6 +8217,7 @@ extension ContentView {
                         userName: userName,
                         agentName: agentName,
                         appContext: buildAIContextSnapshot(filteredSkillIds: draft.usedSkillIds),
+                        conversationHistory: messages,
                         previousResponseId: lastResponseId,
                         onStreamEvent: {
                             if !didReceiveStreamEvent {
@@ -10401,6 +10588,86 @@ struct EmailComposerView: View {
     }
 }
 #endif
+
+// MARK: - Chat Session History View
+
+struct ChatSessionListView: View {
+    @Binding var selectedSession: ChatSessionArchive?
+    @Environment(\.dismiss) private var dismiss
+    @State private var sessions: [ChatSessionArchive] = []
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if sessions.isEmpty {
+                    VStack(spacing: 16) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 48))
+                            .foregroundStyle(.secondary)
+                        Text("No conversation history yet.")
+                            .foregroundStyle(.secondary)
+                        Text("Start a new chat and tap \(Image(systemName: "square.and.pencil")) to archive it.")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List {
+                        ForEach(sessions) { session in
+                            Button {
+                                selectedSession = session
+                                dismiss()
+                            } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(session.displayTitle)
+                                        .lineLimit(2)
+                                        .font(.body)
+                                        .foregroundStyle(.primary)
+                                    HStack(spacing: 4) {
+                                        Text(session.createdAt, style: .date)
+                                        Text("·")
+                                        let userCount = session.records.filter { $0.message.isUser }.count
+                                        Text("\(userCount) message\(userCount == 1 ? "" : "s")")
+                                    }
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    Text("ID: \(session.id.uuidString.prefix(8).lowercased())")
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                }
+                                .padding(.vertical, 2)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .onDelete { indexSet in
+                            for index in indexSet {
+                                ChatHistoryStore.shared.deleteSession(id: sessions[index].id)
+                            }
+                            sessions.remove(atOffsets: indexSet)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("History")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+                if !sessions.isEmpty {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        EditButton()
+                    }
+                }
+            }
+        }
+        .onAppear {
+            sessions = ChatHistoryStore.shared.allSessions()
+        }
+    }
+}
 
 #Preview {
     ContentView()
