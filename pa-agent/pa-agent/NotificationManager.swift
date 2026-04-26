@@ -162,6 +162,49 @@ extension NotificationManager {
         }
     }
 
+    // MARK: - Daily Morning Briefing
+
+    static let dailySummaryIdentifier = "nexa_daily_summary"
+
+    /// Schedule (or reschedule) the repeating daily morning briefing notification.
+    /// - Parameters:
+    ///   - hour: Hour in local time (0–23). Default 8.
+    ///   - minute: Minute in local time (0–59). Default 0.
+    func scheduleDailySummary(hour: Int = 8, minute: Int = 0) {
+        let center = UNUserNotificationCenter.current()
+        center.removePendingNotificationRequests(withIdentifiers: [Self.dailySummaryIdentifier])
+
+        let agentName = UserDefaults.standard.string(forKey: AppConfig.Keys.agentName) ?? AppConfig.Defaults.agentName
+
+        let content = UNMutableNotificationContent()
+        content.title = "Good morning! ☀️"
+        content.body = "\(agentName) has your daily briefing ready — tasks, overdue items, and drafted messages."
+        content.sound = .default
+        content.userInfo = ["deepLink": "morningBriefing"]
+
+        var dateComponents = DateComponents()
+        dateComponents.hour = hour
+        dateComponents.minute = minute
+
+        let trigger = UNCalendarNotificationTrigger(dateMatching: dateComponents, repeats: true)
+        let request = UNNotificationRequest(identifier: Self.dailySummaryIdentifier, content: content, trigger: trigger)
+
+        center.getNotificationSettings { settings in
+            guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else { return }
+            center.add(request) { error in
+                if let error = error {
+                    print("Failed to schedule daily summary: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    /// Cancel the daily morning briefing notification.
+    func cancelDailySummary() {
+        UNUserNotificationCenter.current()
+            .removePendingNotificationRequests(withIdentifiers: [Self.dailySummaryIdentifier])
+    }
+
     func scheduleReceiptDetectedNotification(count: Int) {
         guard count > 0 else { return }
 

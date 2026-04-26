@@ -34,6 +34,10 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     }
     
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
+        let identifier = response.notification.request.identifier
+        if identifier == NotificationManager.dailySummaryIdentifier {
+            NotificationCenter.default.post(name: .nexaMorningBriefingTapped, object: nil)
+        }
         completionHandler()
     }
 

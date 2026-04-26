@@ -328,6 +328,8 @@ struct SettingsView: View {
                     }
                     .disabled(!isEditing)
 
+                    MorningBriefingSettingsSection()
+
                     if !isProductionBuild {
                         Section("OpenAI") {
                             HStack(spacing: 8) {
@@ -1207,5 +1209,60 @@ struct ChatHistoryBackupDocument: FileDocument {
 
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
         FileWrapper(regularFileWithContents: data)
+    }
+}
+
+// MARK: - Morning Briefing Settings Section
+
+struct MorningBriefingSettingsSection: View {
+
+    @AppStorage("morningBriefingEnabled") private var isEnabled: Bool = false
+    @AppStorage("morningBriefingHour")    private var hour: Int    = 8
+    @AppStorage("morningBriefingMinute")  private var minute: Int  = 0
+
+    // Bind hour/minute via a single Date for DatePicker
+    private var briefingTime: Binding<Date> {
+        Binding(
+            get: {
+                Calendar.current.date(
+                    bySettingHour: hour, minute: minute, second: 0, of: Date()
+                ) ?? Date()
+            },
+            set: { newDate in
+                let comps = Calendar.current.dateComponents([.hour, .minute], from: newDate)
+                hour   = comps.hour   ?? 8
+                minute = comps.minute ?? 0
+                if isEnabled { applySchedule() }
+            }
+        )
+    }
+
+    var body: some View {
+        Section("Morning Briefing") {
+            Toggle("Daily Summary Notification", isOn: $isEnabled)
+                .onChange(of: isEnabled) { enabled in
+                    if enabled {
+                        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+                            DispatchQueue.main.async {
+                                if granted { applySchedule() } else { isEnabled = false }
+                            }
+                        }
+                    } else {
+                        NotificationManager.shared.cancelDailySummary()
+                    }
+                }
+
+            if isEnabled {
+                DatePicker(
+                    "Delivery Time",
+                    selection: briefingTime,
+                    displayedComponents: .hourAndMinute
+                )
+            }
+        }
+    }
+
+    private func applySchedule() {
+        NotificationManager.shared.scheduleDailySummary(hour: hour, minute: minute)
     }
 }

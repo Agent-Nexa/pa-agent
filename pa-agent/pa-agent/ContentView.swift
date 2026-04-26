@@ -3521,6 +3521,7 @@ struct ContentView: View {
     @State private var showingOverdueSheet = false
     @State private var overdueTasksToPresent: [TaskItem] = []
     @State private var selectedOverdueIDs: Set<UUID> = []
+    @State private var showMorningBriefing = false
     @State private var isAgentThinking = false
     @State private var copiedAgentMessageID: UUID?
 
@@ -3626,6 +3627,9 @@ struct ContentView: View {
             }
             // Darwin bridge: fires when an extension writes to the App Group,
             // even if scenePhase doesn't transition (app already in foreground).
+            .onReceive(NotificationCenter.default.publisher(for: .nexaMorningBriefingTapped)) { _ in
+                showMorningBriefing = true
+            }
             .onReceive(NotificationCenter.default.publisher(for: .nexaSharedItemArrived)) { _ in
                 sharedContentProcessor.refreshPendingCount()
                 Task { await injectSharedItemsIntoChat() }
@@ -3882,6 +3886,9 @@ struct ContentView: View {
                     onDismiss: { showingOverdueSheet = false }
                 )
             }
+            .sheet(isPresented: $showMorningBriefing) {
+                MorningBriefingView(tasks: $tasks)
+            }
             .alert("Calendar access needed", isPresented: $showCalendarAlert, actions: {
                 Button("OK", role: .cancel) {}
             }, message: {
@@ -3917,6 +3924,12 @@ struct ContentView: View {
                 loadSavedAgentItems()
                 loadTasks()
                 Task { await refreshSystemTasks() }
+                // Schedule daily morning briefing if enabled
+                if UserDefaults.standard.bool(forKey: "morningBriefingEnabled") {
+                    let hour   = UserDefaults.standard.object(forKey: "morningBriefingHour")   as? Int ?? 8
+                    let minute = UserDefaults.standard.object(forKey: "morningBriefingMinute") as? Int ?? 0
+                    NotificationManager.shared.scheduleDailySummary(hour: hour, minute: minute)
+                }
                 // Start timer
                 timerCancellable = taskTimer.connect()
             }
