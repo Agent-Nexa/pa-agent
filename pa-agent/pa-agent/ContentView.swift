@@ -4198,15 +4198,18 @@ struct ContentView: View {
     // MARK: Header
 
     private var header: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(agentName)
-                    .font(.title.bold())
-                Text("Speak tasks, capture details, and keep priorities tight.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 6) {
+            // Row 1: name + description (full width)
+            Text(agentName)
+                .font(.title.bold())
+            Text("Speak tasks, capture details, and keep priorities tight.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
-                // Credits indicator pill — sits under the subtitle
+            // Row 2: credits pill + icons
+            HStack(alignment: .center, spacing: 0) {
+                // Credits indicator pill
                 Button(action: { showSettingsSheet = true }) {
                     HStack(spacing: 4) {
                         Image(systemName: creditManager.credits > 0 ? "sparkles" : "sparkles.slash")
@@ -4228,102 +4231,103 @@ struct ContentView: View {
                     .clipShape(Capsule())
                 }
                 .buttonStyle(.plain)
-            }
-            Spacer()
 
-            // Mail button — only visible when Email skill is enabled
-            if skillsManager.isEnabled(.email) {
-                Button(action: { showEmailInbox = true }) {
-                    ZStack(alignment: .topTrailing) {
-                        Image(systemName: "envelope")
-                            .font(.title3)
-                        let unread = emailStore.emails.filter { !$0.isRead }.count
-                        if unread > 0 {
-                            Text(unread > 99 ? "99+" : "\(unread)")
-                                .font(.system(size: 9, weight: .bold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 3)
-                                .background(Color.red)
-                                .clipShape(Capsule())
-                                .offset(x: 8, y: -6)
+                Spacer()
+
+                // Mail button — only visible when Email skill is enabled
+                if skillsManager.isEnabled(.email) {
+                    Button(action: { showEmailInbox = true }) {
+                        ZStack(alignment: .topTrailing) {
+                            Image(systemName: "envelope")
+                                .font(.title3)
+                            let unread = emailStore.emails.filter { !$0.isRead }.count
+                            if unread > 0 {
+                                Text(unread > 99 ? "99+" : "\(unread)")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 3)
+                                    .background(Color.red)
+                                    .clipShape(Capsule())
+                                    .offset(x: 8, y: -6)
+                            }
                         }
                     }
+                    .padding(.trailing, 8)
+                    .accessibilityLabel("Email inbox")
+                }
+
+                // Shared inbox badge — only visible when Messaging skill is enabled and items are pending
+                if skillsManager.isEnabled(.messaging) && sharedContentProcessor.pendingCount > 0 {
+                    Text(sharedContentProcessor.pendingCount > 99 ? "99+" : "\(sharedContentProcessor.pendingCount) shared")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.purple)
+                        .clipShape(Capsule())
+                        .padding(.trailing, 4)
+                }
+
+                Button(action: { showTasksList = true }) {
+                    Image(systemName: "checklist")
+                        .font(.title3)
                 }
                 .padding(.trailing, 8)
-                .accessibilityLabel("Email inbox")
-            }
 
-            // Shared inbox badge — only visible when Messaging skill is enabled and items are pending
-            if skillsManager.isEnabled(.messaging) && sharedContentProcessor.pendingCount > 0 {
-                Text(sharedContentProcessor.pendingCount > 99 ? "99+" : "\(sharedContentProcessor.pendingCount) shared")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Color.purple)
-                    .clipShape(Capsule())
-                    .padding(.trailing, 4)
-            }
+                Button(action: { showSavedItemsSheet = true }) {
+                    Image(systemName: "bookmark")
+                        .font(.title3)
+                }
+                .padding(.trailing, 8)
+                .accessibilityLabel("Saved items")
 
-            Button(action: { showTasksList = true }) {
-                Image(systemName: "checklist")
-                    .font(.title3)
-            }
-            .padding(.trailing, 8)
+                Button(action: { showSkillsSheet = true }) {
+                    Image(systemName: "sparkles")
+                        .font(.title3)
+                }
+                .padding(.trailing, 8)
+                .accessibilityLabel("Skills")
 
-            Button(action: { showSavedItemsSheet = true }) {
-                Image(systemName: "bookmark")
-                    .font(.title3)
-            }
-            .padding(.trailing, 8)
-            .accessibilityLabel("Saved items")
+                Button(action: { showingHistory = true }) {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.title3)
+                }
+                .padding(.trailing, 8)
+                .accessibilityLabel("Chat history")
 
-            Button(action: { showSkillsSheet = true }) {
-                Image(systemName: "sparkles")
-                    .font(.title3)
-            }
-            .padding(.trailing, 8)
-            .accessibilityLabel("Skills")
+                Button(action: startNewChatSession) {
+                    Image(systemName: "square.and.pencil")
+                        .font(.title3)
+                }
+                .padding(.trailing, 8)
+                .accessibilityLabel("New chat")
 
-            Button(action: { showingHistory = true }) {
-                Image(systemName: "clock.arrow.circlepath")
-                    .font(.title3)
+                Menu {
+                    Button(action: { showNotificationList = true }) {
+                        Label("Notifications", systemImage: "bell")
+                    }
+                    Button(action: { showTrackingSheet = true }) {
+                        Label("Tracking", systemImage: "list.clipboard")
+                    }
+                    Button(action: { showAIUsageSheet = true }) {
+                        Label("AI usage", systemImage: "chart.bar")
+                    }
+                    Button(action: { showSettingsSheet = true }) {
+                        Label("Settings", systemImage: "gearshape")
+                    }
+                    Button(action: { showHelpSheet = true }) {
+                        Label("Help", systemImage: "questionmark.circle")
+                    }
+                    Divider()
+                    Button(action: { showAboutSheet = true }) {
+                        Label("About Us", systemImage: "info.circle")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.title3)
+                }
+                .accessibilityLabel("More actions")
             }
-            .padding(.trailing, 8)
-            .accessibilityLabel("Chat history")
-
-            Button(action: startNewChatSession) {
-                Image(systemName: "square.and.pencil")
-                    .font(.title3)
-            }
-            .padding(.trailing, 8)
-            .accessibilityLabel("New chat")
-            
-            Menu {
-                Button(action: { showNotificationList = true }) {
-                    Label("Notifications", systemImage: "bell")
-                }
-                Button(action: { showTrackingSheet = true }) {
-                    Label("Tracking", systemImage: "list.clipboard")
-                }
-                Button(action: { showAIUsageSheet = true }) {
-                    Label("AI usage", systemImage: "chart.bar")
-                }
-                Button(action: { showSettingsSheet = true }) {
-                    Label("Settings", systemImage: "gearshape")
-                }
-                Button(action: { showHelpSheet = true }) {
-                    Label("Help", systemImage: "questionmark.circle")
-                }
-                Divider()
-                Button(action: { showAboutSheet = true }) {
-                    Label("About Us", systemImage: "info.circle")
-                }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-                    .font(.title3)
-            }
-            .accessibilityLabel("More actions")
         }
         .padding(.horizontal)
         .padding(.vertical, 12)
