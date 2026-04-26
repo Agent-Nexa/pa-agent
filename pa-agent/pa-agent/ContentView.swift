@@ -3599,6 +3599,7 @@ struct ContentView: View {
                         importSelectedReceiptsToSpending()
                     },
                     onCancel: {
+                        markReceiptsAsSeen(pendingDetectedReceipts.map(\.assetIdentifier))
                         pendingDetectedReceipts = []
                         selectedReceiptIDs = []
                         showReceiptImportReviewSheet = false
@@ -9584,7 +9585,7 @@ extension ContentView {
             importedCount += 1
         }
 
-        markReceiptsAsSeen(selectedReceipts.map(\.assetIdentifier))
+        markReceiptsAsSeen(pendingDetectedReceipts.map(\.assetIdentifier))
         pendingDetectedReceipts = []
         selectedReceiptIDs = []
         showReceiptImportReviewSheet = false
