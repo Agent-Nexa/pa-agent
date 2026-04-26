@@ -76,8 +76,21 @@ struct IntentResult: Codable {
     // Multi-tracking
     var trackings: [TrackingIntent]? = nil
 
+    // Multi-task
+    var tasks: [TaskIntent]? = nil
+
     // Skill routing — IDs the LLM selected as relevant to this query
     var usedSkillIds: [String]? = nil
+}
+
+struct TaskIntent: Codable {
+    var title: String?
+    var startDate: Date?
+    var dueDate: Date?
+    var priority: Int?
+    var tag: String?
+    var performer: String?
+    var isScheduled: Bool?
 }
 
 struct TrackingIntent: Codable {
@@ -380,12 +393,19 @@ final class IntentService {
     /// Entra access token forwarded as X-User-Token for APIM user identification.
     var accessToken: String = ""
 
-    func infer(from text: String, imageDataURL: String? = nil, apiKey: String?, model: String?, useAzure: Bool, azureEndpoint: String?, userName: String?, agentName: String = "Nexa", appContext: String? = nil, conversationHistory: [ChatMessage] = []) async -> IntentResult? {
+    /// Response ID returned by the last successful Responses API infer() call.
+    /// Pass this back as previousResponseId to continue the same conversation thread server-side.
+    var lastInferResponseId: String? = nil
+
+    /// Human-readable reason for the last streamAnswer failure (HTTP status or network error).
+    var lastStreamError: String? = nil
+
+    func infer(from text: String, imageDataURL: String? = nil, apiKey: String?, model: String?, useAzure: Bool, azureEndpoint: String?, userName: String?, agentName: String = "Nexa", appContext: String? = nil, conversationHistory: [ChatMessage] = [], previousResponseId: String? = nil, systemPromptOverride: String? = nil) async -> IntentResult? {
         let rawKey = apiKey ?? ""
         guard (!rawKey.isEmpty || useAzure) else {
             usedOpenAI = false
             lastReason = "missing API key"
-            return fallback.infer(from: text, agentName: agentName)
+            return nil
         }
         let apiKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
         
@@ -394,25 +414,22 @@ final class IntentService {
         let chosenModel = model?.isEmpty == false ? model! : "gpt-4o"
         
         if useAzure {
-            guard var azureString = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+            guard let azureString = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  let azureBaseURL = URL(string: azureString),
+                  let host = azureBaseURL.host else {
                 usedOpenAI = false
                 lastReason = "invalid Azure URL"
-                return fallback.infer(from: text, agentName: agentName)
+                return nil
             }
-            
-            // If the URL contains "deployments/...", we try to replace the deployment name with the chosen model
-            if let range = azureString.range(of: "/deployments/[^/]+/", options: .regularExpression) {
-                azureString.replaceSubrange(range, with: "/deployments/\(chosenModel)/")
-            }
-            
-            guard let scriptUrl = URL(string: azureString) else {
+            let scheme = azureBaseURL.scheme ?? "https"
+            guard let url = URL(string: "\(scheme)://\(host)/openai/v1/responses") else {
                 usedOpenAI = false
                 lastReason = "invalid Azure URL"
-                return fallback.infer(from: text, agentName: agentName)
+                return nil
             }
-            endpointURL = scriptUrl
+            endpointURL = url
         } else {
-            endpointURL = URL(string: "https://api.openai.com/v1/chat/completions")!
+            endpointURL = URL(string: "https://api.openai.com/v1/responses")!
         }
 
         var request = URLRequest(url: endpointURL)
@@ -483,12 +500,15 @@ final class IntentService {
            - If the user explicitly asks to "remind" them or "add task" (e.g. "remind me to message X"): Return action='task', performer='user'.
            - IMPORTANT: For "remind me to call", set action='task' and performer='user' (unless they explicitly say "you call X tomorrow").
            - When calculating future dates (tomorrow, next week), use the current time (\(nowString) \(weekdayStr)) as the anchor.
+           - IF there are multiple tasks/reminders in the same message (e.g. "remind me to play badminton Saturday 9am and go swimming Sunday 10am", or "add two reminders, one today 5pm for badminton and one tomorrow 5pm"), extract ALL of them into the 'tasks' array. Each task item needs its own 'title', 'startDate' (YYYY-MM-DD HH:mm), 'dueDate', 'priority', 'tag', and 'performer'. When the user says "one is [time] for [activity] and one is [time]" where the second item has no explicit title, carry the activity name from the first item. Keep the top-level single-task fields for single-task requests (backward compatibility).
+           - CRITICAL: If the user says "two reminders", "multiple reminders", "add N reminders", or uses the pattern "one is … and one is …", you MUST return a 'tasks' array — never collapse them into a single top-level task.
         
         4. INQUIRIES / GREETINGS:
            - If the user greets you or asks a question: Return action='answer' with the response in 'answer'.
               - For action='answer', set 'title' to a short meaningful label (3-8 words) that summarizes the response topic.
               - If the user asks for summaries/status (e.g. "summarize today's tasks", "how busy am I next week", "what did I do today", "what notifications do I have"), use APP CONTEXT to answer concretely.
               - If the user asks about their schedule, calendar, conflicts, busyness or "how busy am I": you MUST return action='answer'. Do not create tasks or events from their inquiry. Look at UPCOMING tasks in APP CONTEXT to determine how busy they are, summarize those tasks, mention any conflicts naturally, and respond conversationally.
+              - IMPORTANT: If you are returning action='answer' AND your response describes or lists 2 or more specific scheduled events or appointments (each with a concrete date and time — e.g. extracted from an image, document, or schedule), you MUST ALSO populate the 'tasks' array with ALL of those events so they can be added to the calendar. Each task entry must include: title (event name + location if available), startDate (YYYY-MM-DD HH:mm), dueDate (YYYY-MM-DD HH:mm, use end time if given, otherwise startDate + 1 hour), priority (default 2), tag (default 'General'), performer 'user'. This allows the user to say 'yes/add them' to bulk-add all events.
            - CRITICAL: Do NOT spontaneously bring up, ask about, or mention ANY uncompleted/overdue tasks, unread notifications, reminders, or any other items from APP CONTEXT unless the user explicitly asks about them.
               - Never say you cannot access the data if APP CONTEXT is provided.
                   - Do NOT simulate in-app control flow in plain text (no “reply yes to open mail app” instructions). Use 'sendEmail' instead whenever email drafting + confirmation is needed.
@@ -506,6 +526,7 @@ final class IntentService {
            - Propose a relevant tracking action instead of saying you don't know what to do. Estimate the value of the item in the photo (e.g., estimating calories for food, guessing typical price). Return action='answer' with your clarifying question asking the user if they want to track it and suggest your estimated value (e.g. "This looks like an apple. Would you like me to track 95 calories for it?"). Do NOT return action='track' just because you see an image. You MUST ask first.
            - When the user replies with a simple "yes", "sure", "do it", or confirms one of your options (e.g., "calories"), read the `CHAT_RECENT` in APP CONTEXT to understand what they are confirming.
            - If the Agent recently asked "Would you like me to track/record this expense?" or proposed a tracking category, and the user said "yes" or chose an option, you MUST return action='track' and extract the value and category mentioned in the `CHAT_RECENT`. Do NOT return action='task'. You MUST also set "actionConfirmed": true.
+           - MULTI-TASK CONFIRMATION: If the Agent's most recent message in CHAT_RECENT listed multiple scheduled events/tasks/reminders (e.g. from reading an image or a schedule) and offered to add them, and the user now says "yes", "add them", "yes please", "add all", or similar affirmation: you MUST return action='task', populate the 'tasks' array with ALL items the agent listed (each with correct title, startDate YYYY-MM-DD HH:mm, dueDate, priority, tag), and set "actionConfirmed": true. Do NOT return a single generic task.
 
         JSON OUTPUT FORMAT:
         {
@@ -532,6 +553,9 @@ final class IntentService {
              { "trackingCategoryId": "...",
           "trackingUnit": "...", "trackingValue": 123.45, "trackingNote": "...", "trackingDate": "YYYY-MM-DD HH:mm" }
           ],
+          "tasks": [
+             { "title": "...", "startDate": "YYYY-MM-DD HH:mm", "dueDate": "YYYY-MM-DD HH:mm", "priority": 1-3, "tag": "...", "performer": "user" | "agent", "isScheduled": true | false }
+          ],
           "usedSkillIds": ["<skill_id>"]  // IDs from USER SKILL CATALOG relevant to this query; [] if none
         }
         \(skillCatalogBlock)
@@ -541,25 +565,24 @@ final class IntentService {
         let userMessageContent: Any
         if let imageDataURL, !imageDataURL.isEmpty {
             userMessageContent = [
-                ["type": "text", "text": text.isEmpty ? "Please analyze this image, intelligently deduce the true intent, estimate relevant metric values (like calories or cost) from the subject, and if applicable, formulate a question to ask the user if they'd like to track that specific estimated value." : text],
+                ["type": "text", "text": text.isEmpty ? "Please analyze this screenshot. Identify any tasks, action items, or to-do items visible AND any spending or receipt information. List what you found in a clear numbered list and ask me to confirm before adding anything." : text],
                 ["type": "image_url", "image_url": ["url": imageDataURL]]
             ]
         } else {
             userMessageContent = text
         }
 
-        var apiMessages: [[String: Any]] = [["role": "system", "content": systemPrompt]]
-        for msg in conversationHistory.suffix(20) {
-            apiMessages.append(["role": msg.isUser ? "user" : "assistant", "content": msg.text])
-        }
-        apiMessages.append(["role": "user", "content": userMessageContent])
-        let body: [String: Any] = [
+        var bodyDict: [String: Any] = [
             "model": chosenModel,
             "temperature": 0,
-            "response_format": ["type": "json_object"],
-            "messages": apiMessages
+            "instructions": systemPromptOverride ?? systemPrompt,
+            "input": userMessageContent,
+            "text": ["format": ["type": "json_object"]]
         ]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        if let prevId = previousResponseId {
+            bodyDict["previous_response_id"] = prevId
+        }
+        request.httpBody = try? JSONSerialization.data(withJSONObject: bodyDict)
         let requestText = "\(systemPrompt)\n\nUser:\n\(text)\n\nHasImage:\(imageDataURL?.isEmpty == false)"
         let provider = useAzure ? "azure-openai" : "openai"
 
@@ -569,31 +592,33 @@ final class IntentService {
                 logTokenUsage(feature: "intent_infer", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: false, errorReason: "no http response")
                 usedOpenAI = false
                 lastReason = "no http response"
-                return fallback.infer(from: text, agentName: agentName)
+                return nil
             }
             guard 200..<300 ~= http.statusCode else {
                 logTokenUsage(feature: "intent_infer", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: false, errorReason: "HTTP \(http.statusCode)")
                 usedOpenAI = false
                 lastReason = "HTTP \(http.statusCode)"
-                return fallback.infer(from: text, agentName: agentName)
+                return nil
             }
 
-            if let result = parseOpenAIResponse(data: data) {
+            if let (result, responseId) = parseResponsesAPIResult(data: data) {
                 logTokenUsage(feature: "intent_infer", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: true)
                 usedOpenAI = true
                 lastReason = "ok"
+                lastInferResponseId = responseId
                 return result
             } else {
                 logTokenUsage(feature: "intent_infer", provider: provider, model: chosenModel, requestText: requestText, responseData: data, success: false, errorReason: "parse failure")
                 usedOpenAI = false
                 lastReason = "parse failure"
-                return fallback.infer(from: text, agentName: agentName)
+                lastInferResponseId = nil
+                return nil
             }
         } catch {
             logTokenUsage(feature: "intent_infer", provider: provider, model: chosenModel, requestText: requestText, responseData: nil, success: false, errorReason: "network/error")
             usedOpenAI = false
             lastReason = "network/error"
-            return fallback.infer(from: text, agentName: agentName)
+            return nil
         }
     }
 
@@ -655,14 +680,14 @@ final class IntentService {
         CRITICAL: Do NOT spontaneously bring up, ask about, or mention ANY uncompleted/overdue tasks, unread notifications, reminders, or any other items from APP CONTEXT unless the user explicitly asks about them. Answer ONLY what the user asked.
         Use APP CONTEXT when provided and do not claim you cannot access it.
         If the user sends an image or a message and there is no explicit command but it relates to a topic in TRACKING_CATEGORIES, use AI reasoning to ONLY suggest categories logically relevant to the item's real-world context (e.g., food usually maps to Calories or Expense). Do NOT list out irrelevant categories or say why they don't fit. Just act naturally.
-        CRITICAL: If you identify a relevant tracking category for the image/message, you MUST estimate the value from the picture logically (e.g., estimating calories for food, extracting the total cost from an invoice) and explicitly ask the user for confirmation using that estimated value (e.g., "This looks like an invoice for $241.50. Would you like me to log this expense?"). If NO tracking category matches naturally, just answer the prompt normally without mentioning tracking.
+        CRITICAL: If the screenshot contains tasks, action items, to-do items, or reminders, enumerate every one in a numbered list and ask the user which ones they’d like to add to their task list. If the screenshot contains spending, a receipt, or any money amount, extract the total and ask the user to confirm adding it as an expense. If you identify a relevant tracking category for the image/message, you MUST estimate the value from the picture logically (e.g., estimating calories for food, extracting the total cost from an invoice) and explicitly ask the user for confirmation using that estimated value (e.g., "This looks like an invoice for $241.50. Would you like me to log this expense?"). If NO tracking category and no tasks are found, just answer the prompt normally without mentioning tracking.
         \(contextBlock)
         """
 
         let userInput: Any
         if let imageDataURL, !imageDataURL.isEmpty {
             userInput = [
-                ["type": "input_text", "text": text.isEmpty ? "Please analyze this image, intelligently deduce the true intent, logically estimate the subject's metric value (e.g. calories, price), and explicitly ask the user if they'd like to track that specific estimated value." : text],
+                ["type": "input_text", "text": text.isEmpty ? "Please analyze this screenshot. Identify any tasks, action items, or to-do items visible AND any spending or receipt information. List what you found in a clear numbered list and ask me to confirm before adding anything." : text],
                 ["type": "input_image", "image_url": imageDataURL]
             ]
         } else {
@@ -700,6 +725,10 @@ final class IntentService {
                 return nil
             }
             guard 200..<300 ~= http.statusCode else {
+                // Attempt to read the error body for diagnostics
+                var errorBody = ""
+                do { for try await errorLine in bytes.lines { errorBody += errorLine } } catch {}
+                lastStreamError = "HTTP \(http.statusCode)" + (errorBody.isEmpty ? "" : ": \(errorBody.prefix(200))")
                 tokenUsageManager.addEntry(
                     feature: "answer_stream",
                     provider: provider,
@@ -771,6 +800,7 @@ final class IntentService {
 
             return success ? (text: finalText, responseId: capturedResponseId) : nil
         } catch {
+            lastStreamError = "Network error: \(error.localizedDescription)"
             tokenUsageManager.addEntry(
                 feature: "answer_stream",
                 provider: provider,
@@ -783,6 +813,137 @@ final class IntentService {
             )
             return nil
         }
+    }
+
+    // MARK: – Intent Router
+    /// Fast first-pass classification via a direct Chat Completions call (does NOT touch lastInferResponseId).
+    /// Returns one of: "task", "track", "message", "email", "answer".
+    func routeIntent(
+        text: String,
+        apiKey: String?,
+        model: String?,
+        useAzure: Bool,
+        azureEndpoint: String?,
+        agentName: String = "Nexa"
+    ) async -> String {
+        let rawKey = apiKey ?? ""
+        guard (!rawKey.isEmpty || useAzure) else { return "answer" }
+        let cleanKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let chosenModel = model?.isEmpty == false ? model! : "gpt-4o"
+
+        let endpointURL: URL
+        if useAzure {
+            guard let azureBase = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  let azureBaseURL = URL(string: azureBase), let host = azureBaseURL.host,
+                  let url = URL(string: "\(azureBaseURL.scheme ?? "https")://\(host)/openai/models/chat/completions?api-version=2024-05-01-preview")
+            else { return "answer" }
+            endpointURL = url
+        } else {
+            endpointURL = URL(string: "https://api.openai.com/v1/chat/completions")!
+        }
+
+        var request = URLRequest(url: endpointURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if useAzure { request.setValue(cleanKey, forHTTPHeaderField: "api-key") }
+        else { request.setValue("Bearer \(cleanKey)", forHTTPHeaderField: "Authorization") }
+        if !accessToken.isEmpty { request.setValue(accessToken, forHTTPHeaderField: "X-User-Token") }
+
+        let systemPrompt = """
+        Classify the user message into exactly one skill. Reply with ONLY valid JSON, no other text.
+
+        Skills:
+        - task    → add/schedule reminders, calendar events, to-do items
+        - track   → log expenses, spending, income, health metrics
+        - message → send a text/SMS/iMessage
+        - email   → compose or send an email
+        - answer  → questions, chat, general help, everything else
+
+        Format: {"skill":"<one of: task|track|message|email|answer>"}
+        """
+
+        let body: [String: Any] = [
+            "model": chosenModel,
+            "temperature": 0,
+            "response_format": ["type": "json_object"],
+            "messages": [
+                ["role": "system", "content": systemPrompt],
+                ["role": "user", "content": text]
+            ]
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        guard let (data, response) = try? await session.data(for: request),
+              let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode,
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = root["choices"] as? [[String: Any]],
+              let content = (choices.first?["message"] as? [String: Any])?["content"] as? String,
+              let contentData = content.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: contentData) as? [String: Any],
+              let skill = json["skill"] as? String
+        else { return "answer" }
+
+        let valid: Set<String> = ["task", "track", "message", "email", "answer"]
+        return valid.contains(skill) ? skill : "answer"
+    }
+
+    // MARK: – Chat Completions inference (stateless, no conversation session needed)
+    /// Like infer() but uses the Chat Completions endpoint instead of the Responses API.
+    /// Reliable for one-shot extraction calls that have no previous_response_id.
+    func inferViaChatCompletions(
+        from text: String,
+        systemPrompt: String,
+        apiKey: String?,
+        model: String?,
+        useAzure: Bool,
+        azureEndpoint: String?
+    ) async -> IntentResult? {
+        let rawKey = apiKey ?? ""
+        guard (!rawKey.isEmpty || useAzure) else { return nil }
+        let cleanKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let chosenModel = model?.isEmpty == false ? model! : "gpt-4o"
+
+        let endpointURL: URL
+        if useAzure {
+            guard let azureBase = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  let azureBaseURL = URL(string: azureBase), let host = azureBaseURL.host,
+                  let url = URL(string: "\(azureBaseURL.scheme ?? "https")://\(host)/openai/models/chat/completions?api-version=2024-05-01-preview")
+            else { return nil }
+            endpointURL = url
+        } else {
+            endpointURL = URL(string: "https://api.openai.com/v1/chat/completions")!
+        }
+
+        var request = URLRequest(url: endpointURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if useAzure { if !cleanKey.isEmpty { request.setValue(cleanKey, forHTTPHeaderField: "api-key") } }
+        else { request.setValue("Bearer \(cleanKey)", forHTTPHeaderField: "Authorization") }
+        if !accessToken.isEmpty { request.setValue(accessToken, forHTTPHeaderField: "X-User-Token") }
+
+        let body: [String: Any] = [
+            "model": chosenModel,
+            "temperature": 0,
+            "response_format": ["type": "json_object"],
+            "messages": [
+                ["role": "system", "content": systemPrompt],
+                ["role": "user", "content": text]
+            ]
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        guard let (data, response) = try? await session.data(for: request),
+              let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode
+        else {
+            lastReason = "chat-completions request failed"
+            return nil
+        }
+        guard let result = parseOpenAIResponse(data: data) else {
+            lastReason = "chat-completions parse failure"
+            return nil
+        }
+        lastReason = "ok"
+        return result
     }
 
     func classifyTaskTag(
@@ -802,11 +963,10 @@ final class IntentService {
         let endpointURL: URL
 
         if useAzure {
-            guard var azureString = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
-            if let range = azureString.range(of: "/deployments/[^/]+/", options: .regularExpression) {
-                azureString.replaceSubrange(range, with: "/deployments/\(chosenModel)/")
-            }
-            guard let scriptUrl = URL(string: azureString) else { return nil }
+            guard let azureBase = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  let azureBaseURL = URL(string: azureBase), let host = azureBaseURL.host,
+                  let scriptUrl = URL(string: "\(azureBaseURL.scheme ?? "https")://\(host)/openai/models/chat/completions?api-version=2024-05-01-preview")
+            else { return nil }
             endpointURL = scriptUrl
         } else {
             endpointURL = URL(string: "https://api.openai.com/v1/chat/completions")!
@@ -900,11 +1060,10 @@ final class IntentService {
         let endpointURL: URL
 
         if useAzure {
-            guard var azureString = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
-            if let range = azureString.range(of: "/deployments/[^/]+/", options: .regularExpression) {
-                azureString.replaceSubrange(range, with: "/deployments/\(chosenModel)/")
-            }
-            guard let scriptUrl = URL(string: azureString) else { return nil }
+            guard let azureBase = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  let azureBaseURL = URL(string: azureBase), let host = azureBaseURL.host,
+                  let scriptUrl = URL(string: "\(azureBaseURL.scheme ?? "https")://\(host)/openai/models/chat/completions?api-version=2024-05-01-preview")
+            else { return nil }
             endpointURL = scriptUrl
         } else {
             endpointURL = URL(string: "https://api.openai.com/v1/chat/completions")!
@@ -990,11 +1149,10 @@ final class IntentService {
         
         let endpointURL: URL
         if useAzure {
-            guard var azureString = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
-            if let range = azureString.range(of: "/deployments/[^/]+/", options: .regularExpression) {
-                azureString.replaceSubrange(range, with: "/deployments/\(chosenModel)/")
-            }
-            guard let scriptUrl = URL(string: azureString) else { return nil }
+            guard let azureBase = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  let azureBaseURL = URL(string: azureBase), let host = azureBaseURL.host,
+                  let scriptUrl = URL(string: "\(azureBaseURL.scheme ?? "https")://\(host)/openai/models/chat/completions?api-version=2024-05-01-preview")
+            else { return nil }
             endpointURL = scriptUrl
         } else {
             endpointURL = URL(string: "https://api.openai.com/v1/chat/completions")!
@@ -1074,11 +1232,10 @@ final class IntentService {
         
         let endpointURL: URL
         if useAzure {
-            guard var azureString = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
-            if let range = azureString.range(of: "/deployments/[^/]+/", options: .regularExpression) {
-                azureString.replaceSubrange(range, with: "/deployments/\(chosenModel)/")
-            }
-            guard let scriptUrl = URL(string: azureString) else { return nil }
+            guard let azureBase = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  let azureBaseURL = URL(string: azureBase), let host = azureBaseURL.host,
+                  let scriptUrl = URL(string: "\(azureBaseURL.scheme ?? "https")://\(host)/openai/models/chat/completions?api-version=2024-05-01-preview")
+            else { return nil }
             endpointURL = scriptUrl
         } else {
             endpointURL = URL(string: "https://api.openai.com/v1/chat/completions")!
@@ -1180,11 +1337,10 @@ final class IntentService {
          
          let endpointURL: URL
          if useAzure {
-             guard var azureString = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines) else { return (true, nil) }
-              if let range = azureString.range(of: "/deployments/[^/]+/", options: .regularExpression) {
-                 azureString.replaceSubrange(range, with: "/deployments/\(chosenModel)/")
-             }
-             guard let scriptUrl = URL(string: azureString) else { return (true, nil) }
+             guard let azureBase = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   let azureBaseURL = URL(string: azureBase), let host = azureBaseURL.host,
+                   let scriptUrl = URL(string: "\(azureBaseURL.scheme ?? "https")://\(host)/openai/models/chat/completions?api-version=2024-05-01-preview")
+             else { return (true, nil) }
              endpointURL = scriptUrl
          } else {
              endpointURL = URL(string: "https://api.openai.com/v1/chat/completions")!
@@ -1272,23 +1428,13 @@ final class IntentService {
         
         let endpointURL: URL
         if useAzure {
-            guard var azureString = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines) else {
-                 return "Invalid Azure URL"
-            }
-            
-            // If the URL contains "deployments/...", we try to replace the deployment name with the chosen model
-            // Pattern: .../deployments/{deployment-name}/...
-            // We'll use a simple regex or string replacement if it matches the standard pattern
-            if let range = azureString.range(of: "/deployments/[^/]+/", options: .regularExpression) {
-                azureString.replaceSubrange(range, with: "/deployments/\(chosenModel)/")
-            }
-            
-            guard let scriptUrl = URL(string: azureString) else {
-                return "Invalid Azure URL"
-            }
+            guard let azureBase = azureEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  let azureBaseURL = URL(string: azureBase), let host = azureBaseURL.host,
+                  let scriptUrl = URL(string: "\(azureBaseURL.scheme ?? "https")://\(host)/openai/models/chat/completions?api-version=2024-05-01-preview")
+            else { return "Invalid Azure URL" }
             endpointURL = scriptUrl
         } else {
-             endpointURL = URL(string: "https://api.openai.com/v1/chat/completions")!
+            endpointURL = URL(string: "https://api.openai.com/v1/chat/completions")!
         }
         
         print("Test Connection: \(endpointURL.absoluteString)")
@@ -1460,6 +1606,20 @@ final class IntentService {
         return stripCodeFences(content)
     }
 
+    /// Parses an OpenAI Responses API response, returning the IntentResult and the response ID.
+    private func parseResponsesAPIResult(data: Data) -> (IntentResult, String?)? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        let responseId = root["id"] as? String
+        // Extract text from output[0].content[0].text
+        guard let output = root["output"] as? [[String: Any]],
+              let firstOutput = output.first(where: { ($0["type"] as? String) == "message" }),
+              let content = firstOutput["content"] as? [[String: Any]],
+              let contentRaw = content.first(where: { ($0["type"] as? String) == "output_text" })?["text"] as? String
+        else { return nil }
+        guard let result = parseIntentJSON(contentRaw) else { return nil }
+        return (result, responseId)
+    }
+
     private func parseOpenAIResponse(data: Data) -> IntentResult? {
         struct Choice: Decodable {
             struct Message: Decodable { let content: String? }
@@ -1470,6 +1630,10 @@ final class IntentService {
         guard let root = try? JSONDecoder().decode(Root.self, from: data),
               let contentRaw = root.choices.first?.message.content
         else { return nil }
+        return parseIntentJSON(contentRaw)
+    }
+
+    private func parseIntentJSON(_ contentRaw: String) -> IntentResult? {
 
         let content = stripCodeFences(contentRaw)
         guard let jsonData = content.data(using: .utf8),
@@ -1565,6 +1729,24 @@ final class IntentService {
             }
         }
 
+        // Parse tasks array
+        var parsedTasks: [TaskIntent]? = nil
+        if let tasksArr = dict["tasks"] as? [[String: Any]] {
+            parsedTasks = tasksArr.compactMap { tDict -> TaskIntent? in
+                guard let tTitle = tDict["title"] as? String else { return nil }
+                return TaskIntent(
+                    title: tTitle,
+                    startDate: parseDate(tDict["startDate"]),
+                    dueDate: parseDate(tDict["dueDate"]),
+                    priority: tDict["priority"] as? Int,
+                    tag: tDict["tag"] as? String,
+                    performer: tDict["performer"] as? String,
+                    isScheduled: tDict["isScheduled"] as? Bool
+                )
+            }
+            if parsedTasks?.isEmpty == true { parsedTasks = nil }
+        }
+
         let start = parseDate(dict["startDate"]) ?? Calendar.current.startOfDay(for: Date()).addingTimeInterval(9*3600)
         let due = parseDate(dict["dueDate"]) ?? Calendar.current.startOfDay(for: Date().addingTimeInterval(86400)).addingTimeInterval(17*3600)
         
@@ -1600,6 +1782,7 @@ final class IntentService {
             trackingNote: trackingNote,
             trackingDate: trackingDate,
             trackings: parsedTrackings,
+            tasks: parsedTasks,
             usedSkillIds: usedSkillIds
         )
     }
@@ -2298,6 +2481,17 @@ enum InteractionState: Equatable {
     case collectingScheduledActionContent(draft: TaskDraft, actionType: String, recipient: String, promptLabel: String)
     case confirmingTrackingRequest(categoryId: UUID, categoryName: String, value: Double, note: String?, rawText: String?, recordDate: Date)
     case confirmingMultipleTrackingRequests(trackings: [TrackingConfirmationItem], rawText: String?, recordDate: Date)
+    case confirmingMultipleTaskRequests(tasks: [TaskConfirmationItem])
+    case pendingProposedTasks(tasks: [TaskConfirmationItem])
+}
+
+struct TaskConfirmationItem: Identifiable, Equatable {
+    var id = UUID()
+    var title: String
+    var startDate: Date
+    var dueDate: Date
+    var priority: Int
+    var tag: String
 }
 
 struct TrackingConfirmationItem: Equatable {
@@ -3114,6 +3308,7 @@ struct ContentView: View {
     @State private var pendingCallRecipient: String = ""
     @State private var pendingScheduledActionPayload: TaskItem.AgentAction? = nil
     @State private var interactionState: InteractionState = .idle
+    @State private var lastProposedTaskItems: [TaskConfirmationItem] = []
     @State private var showTaskDetailSheet = false
     @State private var showNotificationAlert = false
     @State private var showCalendarAlert = false
@@ -3166,6 +3361,7 @@ struct ContentView: View {
     @State private var showReceiptImportReviewSheet = false
     @State private var selectedReceiptIDs: Set<String> = []
     @State private var isCheckingReceipts = false
+    @State private var showProposedEventSheet = false
     @AppStorage("PERMISSION_SETUP_SHOWN") private var permissionSetupShown: Bool = false
     @State private var showPermissionSetupSheet = false
     @State private var showBuyCredits = false
@@ -3406,6 +3602,38 @@ struct ContentView: View {
                         pendingDetectedReceipts = []
                         selectedReceiptIDs = []
                         showReceiptImportReviewSheet = false
+                    }
+                )
+            }
+            .sheet(isPresented: $showProposedEventSheet) {
+                ProposedEventReviewSheet(
+                    items: lastProposedTaskItems,
+                    onConfirm: { selected in
+                        let df = DateFormatter()
+                        df.dateStyle = .short
+                        df.timeStyle = .short
+                        for item in selected {
+                            let newTask = TaskItem(
+                                title: item.title,
+                                tag: item.tag,
+                                startDate: item.startDate,
+                                dueDate: item.dueDate,
+                                priority: item.priority,
+                                executor: .user
+                            )
+                            insertTask(newTask, announce: false)
+                        }
+                        lastProposedTaskItems = []
+                        let summary = selected.map { "'\($0.title)'" }.joined(separator: ", ")
+                        withAnimation {
+                            messages.append(.init(isUser: false, text: "Done! Added \(selected.count) event\(selected.count == 1 ? "" : "s") to your calendar: \(summary)."))
+                        }
+                    },
+                    onCancel: {
+                        lastProposedTaskItems = []
+                        withAnimation {
+                            messages.append(.init(isUser: false, text: "No events added."))
+                        }
                     }
                 )
             }
@@ -4948,8 +5176,103 @@ struct ReceiptImportReviewSheet: View {
     }
 }
 
-struct SavedItemsSheet: View {
-    @Binding var items: [SavedAgentItem]
+struct ProposedEventReviewSheet: View {
+    let items: [TaskConfirmationItem]
+    let onConfirm: ([TaskConfirmationItem]) -> Void
+    let onCancel: () -> Void
+    @State private var selectedIDs: Set<UUID> = []
+    @Environment(\.dismiss) private var dismiss
+
+    private var selectedItems: [TaskConfirmationItem] {
+        items.filter { selectedIDs.contains($0.id) }
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                List(items) { item in
+                    HStack(alignment: .center, spacing: 12) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color.accentColor.opacity(0.12))
+                                .frame(width: 44, height: 44)
+                            Image(systemName: "calendar")
+                                .font(.title3)
+                                .foregroundStyle(Color.accentColor)
+                        }
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(item.title)
+                                .font(.subheadline.weight(.semibold))
+                                .lineLimit(2)
+                            Text(item.startDate, style: .date)
+                                + Text(" · ")
+                                + Text(item.startDate, style: .time)
+                                + Text(" – ")
+                                + Text(item.dueDate, style: .time)
+                            Text(item.tag)
+                                .font(.caption2.weight(.medium))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.accentColor.opacity(0.12))
+                                .clipShape(Capsule())
+                                .foregroundStyle(Color.accentColor)
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                        Spacer(minLength: 8)
+
+                        Toggle("", isOn: Binding(
+                            get: { selectedIDs.contains(item.id) },
+                            set: { on in
+                                if on { selectedIDs.insert(item.id) }
+                                else { selectedIDs.remove(item.id) }
+                            }
+                        ))
+                        .labelsHidden()
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                HStack(spacing: 12) {
+                    Button("Cancel") {
+                        onCancel()
+                        dismiss()
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button("Add \(selectedIDs.count == items.count ? "All" : "\(selectedIDs.count)") to Calendar") {
+                        onConfirm(selectedItems)
+                        dismiss()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(selectedIDs.isEmpty)
+                }
+                .padding()
+            }
+            .navigationTitle("Add to Calendar")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(selectedIDs.count == items.count ? "Deselect All" : "Select All") {
+                        if selectedIDs.count == items.count {
+                            selectedIDs = []
+                        } else {
+                            selectedIDs = Set(items.map(\.id))
+                        }
+                    }
+                    .font(.subheadline)
+                }
+            }
+        }
+        .onAppear {
+            selectedIDs = Set(items.map(\.id))
+        }
+    }
+}
+
+struct SavedItemsSheet: View {    @Binding var items: [SavedAgentItem]
     @Environment(\.openURL) private var openURL
     @State private var editingItem: SavedAgentItem?
     @State private var emailingItem: SavedAgentItem?
@@ -5974,6 +6297,212 @@ extension ContentView {
         return lines.joined(separator: "\n")
     }
 
+    /// Analyses a screenshot: runs on-device OCR then sends extracted text to infer().
+    private func autoAnalyzeAttachment(_ attachment: PendingAttachment) {
+        guard !creditManager.outOfCredits else { return }
+        guard let dataURL = attachment.visionImageDataURL,
+              dataURL.hasPrefix("data:image/jpeg;base64,"),
+              let base64Part = dataURL.split(separator: ",", maxSplits: 1).last,
+              let imageData = Data(base64Encoded: String(base64Part)) else {
+            messages.append(.init(isUser: false, text: "I couldn’t read the image data. Please try again."))
+            return
+        }
+
+        let userMessage = ChatMessage(isUser: true, text: "🖼️ \(attachment.fileName)")
+        messages.append(userMessage)
+        pendingAttachment = nil
+
+        let activeKey = storedApiKey.isEmpty ? ProcessInfo.processInfo.environment["OPENAI_API_KEY"] ?? "" : storedApiKey
+        intentService.accessToken = authManager.accessToken
+        let tokensBefore = TokenUsageManager.shared.entries.reduce(0) { $0 + $1.totalTokens }
+
+        Task {
+            let placeholderId = UUID()
+            await MainActor.run {
+                withAnimation {
+                    isAgentThinking = true
+                    messages.append(.init(id: placeholderId, isUser: false, text: ""))
+                }
+            }
+
+            let ocrText = (await recognizedText(from: imageData) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+            guard !ocrText.isEmpty else {
+                await MainActor.run {
+                    withAnimation { isAgentThinking = false }
+                    if let index = messages.firstIndex(where: { $0.id == placeholderId }) {
+                        let existing = messages[index]
+                        messages[index] = .init(id: existing.id, isUser: existing.isUser, text: "I couldn’t extract any text from the screenshot. Please try a clearer image.", timestamp: existing.timestamp, taskStatusSnapshot: existing.taskStatusSnapshot, responseTitle: existing.responseTitle, usedSkillNames: existing.usedSkillNames)
+                    }
+                }
+                return
+            }
+
+            // Let the LLM freely infer intent from the OCR text — no hardcoded assumptions.
+            // Could be a receipt, food label, schedule, notification, article, anything.
+            let prompt = """
+            The user attached a screenshot. Here is the text extracted from it via OCR:
+
+            \(ocrText)
+
+            Your job is to understand what this screenshot is about and what the user most likely wants to do with it. Do NOT assume it is always a payment or a schedule — infer intent from the actual content.
+
+            Possible intents (not exhaustive):
+            - Payment or expense found → populate trackingValue and/or trackings array
+            - Scheduled sessions, appointments, or events found → populate the tasks array (each with title, startDate, dueDate)
+            - Health or fitness data (food label, calories, weight, steps, nutrition) → populate trackingValue/trackings with the relevant metric and category
+            - Content to summarise or answer a question about → populate the answer field with a clear summary
+            - Unclear intent → populate the answer field describing what you see and ask the user what they would like to do with it
+
+            Rules:
+            - Populate MULTIPLE intent fields if the screenshot genuinely contains multiple types (e.g. both a payment total and session dates).
+            - Only populate fields with data that is actually present in the OCR text — do not fabricate or guess values.
+            - If you cannot confidently determine intent, set action to "answer" and ask the user in the answer field.
+            """
+
+            let result = await intentService.infer(
+                from: prompt,
+                imageDataURL: nil,
+                apiKey: activeKey,
+                model: storedModel,
+                useAzure: useAzure,
+                azureEndpoint: azureEndpoint,
+                userName: userName,
+                agentName: agentName,
+                appContext: nil,
+                previousResponseId: nil
+            )
+            let apiWasUsed = intentService.usedOpenAI
+
+            await MainActor.run {
+                withAnimation { isAgentThinking = false }
+
+                if !apiWasUsed || result == nil {
+                    let (localAmount, localSessions) = parseScreenshotLocally(from: ocrText)
+                    presentScreenshotIntents(
+                        placeholderId: placeholderId,
+                        amount: localAmount,
+                        amountNote: receiptTitleHint(from: ocrText),
+                        sessions: localSessions.map { (title: $0.title, start: $0.date, end: $0.date.addingTimeInterval(75 * 60)) },
+                        answerText: localAmount == nil && localSessions.isEmpty
+                            ? "I read your screenshot but the AI service is temporarily unavailable. Please try again in a moment."
+                            : nil
+                    )
+                    return
+                }
+
+                guard let result else { return }
+
+                // Check BOTH tracking and tasks independently — both can be present together
+                let trackingAmount: Double? = result.trackingValue ?? result.trackings?.compactMap(\.trackingValue).first
+                let trackingNote: String? = result.trackingNote
+                    ?? result.trackings?.compactMap(\.trackingNote).first
+                    ?? result.trackings?.compactMap(\.trackingCategoryId).first
+
+                let taskIntents = result.tasks ?? []
+
+                presentScreenshotIntents(
+                    placeholderId: placeholderId,
+                    amount: trackingAmount,
+                    amountNote: trackingNote,
+                    sessions: taskIntents.map { t in
+                        (title: t.title ?? "Session",
+                         start: t.startDate ?? Date(),
+                         end: t.dueDate ?? (t.startDate ?? Date()).addingTimeInterval(3600))
+                    },
+                    answerText: (taskIntents.isEmpty && trackingAmount == nil)
+                        ? (result.answer?.isEmpty == false ? result.answer : "I've read your screenshot. What would you like me to do with it?")
+                        : nil
+                )
+            }
+
+            let tokensAfter = TokenUsageManager.shared.entries.reduce(0) { $0 + $1.totalTokens }
+            let tokensUsed = tokensAfter - tokensBefore
+            if tokensUsed > 0 {
+                let creditsToDeduct = max(1, tokensUsed / 5000)
+                await creditManager.deductOnServer(userId: authManager.email, amount: creditsToDeduct)
+            }
+        }
+    }
+
+    /// Renders extracted screenshot intents into the chat and sets the appropriate interaction state.
+    /// Handles tracking (expense) and sessions/events independently — both can appear together.
+    @MainActor
+    private func presentScreenshotIntents(
+        placeholderId: UUID,
+        amount: Double?,
+        amountNote: String?,
+        sessions: [(title: String, start: Date, end: Date)],
+        answerText: String?
+    ) {
+        var parts: [String] = []
+
+        // ── Tracking / expense ────────────────────────────────────────────────
+        if let amount {
+            let noteStr = amountNote.map { " (\($0))" } ?? ""
+            parts.append("💳 **Payment found\(noteStr): $\(String(format: "%.2f", amount))**\nWould you like me to log this as an expense? Reply **yes** to confirm or **no** to skip.")
+
+            // Resolve tracking category: find existing "expense" category or create one.
+            let expenseCategoryName = amountNote ?? "Expense"
+            let expenseCategoryId: UUID
+            if let existing = trackingManager.categories.first(where: {
+                $0.name.localizedCaseInsensitiveContains("expense") ||
+                $0.name.localizedCaseInsensitiveContains(expenseCategoryName)
+            }) {
+                expenseCategoryId = existing.id
+            } else {
+                trackingManager.addCategory(name: expenseCategoryName, unit: nil)
+                expenseCategoryId = trackingManager.categories.first(where: { $0.name == expenseCategoryName })?.id ?? UUID()
+            }
+
+            // Set interaction state so "no"/"cancel" dismisses cleanly without re-triggering.
+            interactionState = .confirmingTrackingRequest(
+                categoryId: expenseCategoryId,
+                categoryName: expenseCategoryName,
+                value: amount,
+                note: amountNote,
+                rawText: nil,
+                recordDate: Date()
+            )
+        }
+
+        // ── Sessions / events ─────────────────────────────────────────────────
+        if !sessions.isEmpty {
+            let df = DateFormatter()
+            df.dateStyle = .medium
+            df.timeStyle = .short
+            let numbered = sessions.enumerated().map { i, s in
+                "\(i + 1). \(s.title) — \(df.string(from: s.start))"
+            }.joined(separator: "\n")
+            parts.append("📅 **\(sessions.count) session\(sessions.count == 1 ? "" : "s") found:**\n\(numbered)\n\nWould you like me to add them to your calendar? Reply \"yes\" to confirm all.")
+
+            let confirmItems = sessions.map {
+                TaskConfirmationItem(
+                    title: $0.title,
+                    startDate: $0.start,
+                    dueDate: $0.end,
+                    priority: 2,
+                    tag: "General"
+                )
+            }
+            lastProposedTaskItems = confirmItems
+            interactionState = .pendingProposedTasks(tasks: confirmItems)
+        }
+
+        // ── Fallback ──────────────────────────────────────────────────────────
+        if parts.isEmpty {
+            parts.append(answerText ?? "I've read your screenshot. What would you like me to do with it?")
+        }
+
+        let reply = parts.joined(separator: "\n\n")
+        if let index = messages.firstIndex(where: { $0.id == placeholderId }) {
+            let existing = messages[index]
+            messages[index] = .init(id: existing.id, isUser: existing.isUser, text: reply,
+                timestamp: existing.timestamp, taskStatusSnapshot: existing.taskStatusSnapshot,
+                responseTitle: existing.responseTitle, usedSkillNames: existing.usedSkillNames)
+        }
+    }
+
     private func composeIntentInput(text: String, attachment: PendingAttachment?) -> String {
         guard let attachment else {
             return text
@@ -6016,8 +6545,7 @@ extension ContentView {
 
             await MainActor.run {
                 if let attachment {
-                    pendingAttachment = attachment
-                    messages.append(.init(isUser: false, text: "Attached image: \(attachment.fileName)."))
+                    autoAnalyzeAttachment(attachment)
                 } else {
                     messages.append(.init(isUser: false, text: "I couldn’t read that image. Try another one."))
                 }
@@ -6052,8 +6580,7 @@ extension ContentView {
 
         await MainActor.run {
             if let attachment {
-                pendingAttachment = attachment
-                messages.append(.init(isUser: false, text: "Attached image: \(attachment.fileName)."))
+                autoAnalyzeAttachment(attachment)
             } else {
                 messages.append(.init(isUser: false, text: "Couldn’t read captured image. Try again."))
             }
@@ -6623,6 +7150,104 @@ extension ContentView {
         }
     }
 
+    // MARK: – Skill Prompts
+    private func buildSkillPrompt(skill: String, nowString: String, weekdayStr: String, contextBlock: String) -> String {
+        switch skill {
+        case "task":
+            return """
+            You are a task-scheduling assistant. The current time is \(nowString) (\(weekdayStr)).
+            \(contextBlock)
+
+            The user wants to add one or more tasks/reminders. Extract EVERY time reference into a separate entry.
+
+            Rules:
+            - Count every distinct time reference → one tasks[] entry per reference.
+            - If the user says "two reminders", "N tasks", or uses "one is … and another is …", you MUST return a tasks[] array with that many items.
+            - For a single task, populate both the top-level fields AND a tasks[] array with one entry (backward compatibility).
+            - startDate and dueDate format: YYYY-MM-DD HH:mm. Use the current time anchor above.
+            - priority: 1=high, 2=medium, 3=low. Default 2.
+            - performer: "user" unless user says "you" or "agent".
+
+            Reply ONLY with valid JSON:
+            {
+              "action": "task",
+              "title": "<first task title>",
+              "startDate": "YYYY-MM-DD HH:mm",
+              "dueDate": "YYYY-MM-DD HH:mm",
+              "priority": 2,
+              "tag": "General",
+              "performer": "user",
+              "tasks": [
+                { "title": "...", "startDate": "YYYY-MM-DD HH:mm", "dueDate": "YYYY-MM-DD HH:mm", "priority": 2, "tag": "General", "performer": "user" }
+              ]
+            }
+            """
+
+        case "track":
+            return """
+            You are a tracking/expense logger. The current time is \(nowString) (\(weekdayStr)).
+            \(contextBlock)
+
+            The user wants to log a value (expense, health metric, etc.).
+            Extract ALL tracking items. For each: trackingValue (number), trackingUnit (string or null), trackingNote (context), trackingCategoryId (match from TRACKING_CATEGORIES above or invent a short plain name), trackingDate (YYYY-MM-DD HH:mm if mentioned, otherwise omit).
+
+            Reply ONLY with valid JSON:
+            {
+              "action": "track",
+              "trackingCategoryId": "...",
+              "trackingValue": 0.0,
+              "trackingUnit": null,
+              "trackingNote": "...",
+              "trackingDate": "YYYY-MM-DD HH:mm",
+              "trackings": [ { "trackingCategoryId": "...", "trackingValue": 0.0, "trackingUnit": null, "trackingNote": "...", "trackingDate": "YYYY-MM-DD HH:mm" } ]
+            }
+            """
+
+        case "message":
+            return """
+            You are a messaging assistant. The user wants to send a text/SMS/iMessage.
+            Extract the recipient name and compose the message body. If they say "send a joke", generate the actual joke.
+
+            Reply ONLY with valid JSON:
+            {
+              "action": "sendMessage",
+              "recipient": "...",
+              "messageBody": "..."
+            }
+            """
+
+        case "email":
+            return """
+            You are an email drafting assistant. The user wants to compose or send an email.
+            Extract the recipient, subject, and write a complete email body. Generate actual content—never use placeholders.
+
+            Reply ONLY with valid JSON:
+            {
+              "action": "sendEmail",
+              "recipient": "...",
+              "subject": "...",
+              "messageBody": "..."
+            }
+            """
+
+        default: // "answer" and fallback
+            return """
+            You are a helpful personal assistant named Nexa. The current time is \(nowString) (\(weekdayStr)).
+            \(contextBlock)
+
+            Answer the user's question conversationally. If the user asks about their schedule, tasks, notifications, or app data, use the APP CONTEXT above to answer concretely.
+
+            Reply ONLY with valid JSON:
+            {
+              "action": "answer",
+              "title": "<3-8 word topic label>",
+              "answer": "<your response>",
+              "tasks": []
+            }
+            """
+        }
+    }
+
     private func handleIntent(for text: String, attachedImageDataURL: String? = nil) async {
         // Global cancel check
         let lower = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -6881,6 +7506,72 @@ extension ContentView {
             return
         }
 
+        if case .confirmingMultipleTaskRequests(let taskItems) = interactionState {
+            if isAffirmativeReply(lower) || isAddToCalendarReply(lower) {
+                lastProposedTaskItems = taskItems
+                interactionState = .idle
+                showProposedEventSheet = true
+            } else {
+                interactionState = .idle
+                withAnimation {
+                    messages.append(.init(isUser: false, text: "Okay, I've cancelled those tasks."))
+                }
+            }
+            return
+        }
+
+        if case .pendingProposedTasks(let taskItems) = interactionState {
+            if isAffirmativeReply(lower) || isAddToCalendarReply(lower) {
+                lastProposedTaskItems = taskItems
+                interactionState = .idle
+                showProposedEventSheet = true
+                return
+            } else if lower.contains("no") || lower.contains("cancel") || lower.contains("skip") {
+                interactionState = .idle
+                lastProposedTaskItems = []
+                withAnimation {
+                    messages.append(.init(isUser: false, text: "Okay, I won't add those."))
+                }
+                return
+            }
+            interactionState = .idle
+        }
+
+        // Fallback: even if interactionState is idle, if the user is clearly asking to add
+        // previously proposed tasks (e.g. "add them into calendar"), use the saved list directly.
+        if isAddToCalendarReply(lower) {
+            if !lastProposedTaskItems.isEmpty {
+                let taskItems = lastProposedTaskItems
+                for item in taskItems {
+                    let newTask = TaskItem(
+                        title: item.title,
+                        tag: item.tag,
+                        startDate: item.startDate,
+                        dueDate: item.dueDate,
+                        priority: item.priority,
+                        executor: .user
+                    )
+                    insertTask(newTask, announce: false)
+                }
+                lastProposedTaskItems = []
+                let dateFormatter = DateFormatter()
+                dateFormatter.dateStyle = .short
+                dateFormatter.timeStyle = .short
+                let summary = taskItems.map { "'\($0.title)' (\(dateFormatter.string(from: $0.startDate)))" }.joined(separator: ", ")
+                withAnimation {
+                    messages.append(.init(isUser: false, text: "Done! Added \(taskItems.count) tasks: \(summary)."))
+                }
+                return
+            } else {
+                // No saved proposed tasks — do a targeted extraction call using the last agent message
+                let lastAgentText = messages.last(where: { !$0.isUser })?.text ?? ""
+                if !lastAgentText.isEmpty {
+                    await extractAndAddTasksFromText(lastAgentText, userRequest: text)
+                    return
+                }
+            }
+        }
+
         if !isAIFeatureEnabled && isWeatherInquiry(text) {
             let weatherReply = await weatherService.response(for: text)
             withAnimation {
@@ -6906,28 +7597,105 @@ extension ContentView {
         let activeKey = storedApiKey.isEmpty ? ProcessInfo.processInfo.environment["OPENAI_API_KEY"] : storedApiKey
         // Forward the Entra access token so APIM can identify the user
         intentService.accessToken = authManager.accessToken
+
+        // ── Direct Task Shortcut ──────────────────────────────────────────────
+        // For clear scheduling/reminder language, skip the router entirely and go
+        // straight to the proven multi-task extraction path.  This avoids router
+        // failure modes (wrong endpoint, network timeout, parse error) that would
+        // silently fall back to the heuristic analyser with the raw text as title.
+        let taskKeywords = ["remind me", "set a reminder", "add reminder", "add a reminder",
+                            "add task", "add a task", "set an alarm", "create a reminder",
+                            "reminder for", "schedule a", "schedule an", "remind me to",
+                            "add an event", "add event", "put on my calendar"]
+        if taskKeywords.contains(where: { lower.contains($0) }) {
+            if isAIFeatureEnabled {
+                await MainActor.run { withAnimation { isAgentThinking = true } }
+                await extractAndAddTasksFromText(text, userRequest: text)
+                await MainActor.run { withAnimation { isAgentThinking = false } }
+            } else {
+                promptForTaskDetails(from: text)
+            }
+            return
+        }
+        // ─────────────────────────────────────────────────────────────────────
+
+        // ── Intent Router → Skill Specialist ────────────────────────────────
+        // Step 1: fast classification (router prompt). Step 2: focused skill prompt.
         let inferred: IntentResult?
         if isAIFeatureEnabled {
-            await MainActor.run {
-                withAnimation {
-                    isAgentThinking = true
-                }
+            await MainActor.run { withAnimation { isAgentThinking = true } }
+
+            // Build context block for skill prompts (same format as infer() uses internally)
+            let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd HH:mm"
+            let nowStr = df.string(from: Date())
+            let weekdayIdx = Calendar.current.component(.weekday, from: Date())
+            let wdayStr = Calendar.current.weekdaySymbols[weekdayIdx - 1]
+            let appCtx = buildAIContextSnapshot()
+            let ctxBlock = appCtx.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? ""
+                : "\nAPP CONTEXT (from local app state):\n\(appCtx)\n"
+
+            // Route to the best skill
+            let skill = await intentService.routeIntent(
+                text: text,
+                apiKey: activeKey,
+                model: storedModel,
+                useAzure: useAzure,
+                azureEndpoint: azureEndpoint,
+                agentName: agentName
+            )
+
+            // Task skill: go straight to the proven multi-task extraction path.
+            // This correctly handles both single and multi-task requests and shows
+            // the review sheet with one entry per detected time reference.
+            if skill == "task" {
+                await MainActor.run { withAnimation { isAgentThinking = false } }
+                await extractAndAddTasksFromText(text, userRequest: text)
+                return
             }
-            inferred = await intentService.infer(from: text, imageDataURL: attachedImageDataURL, apiKey: activeKey, model: storedModel, useAzure: useAzure, azureEndpoint: azureEndpoint, userName: userName, agentName: agentName, appContext: buildAIContextSnapshot(), conversationHistory: Array(messages.dropLast())) ?? intentAnalyzer.infer(from: text, agentName: agentName)
-            await MainActor.run {
-                withAnimation {
-                    isAgentThinking = false
-                }
-            }
+
+            // Build focused system prompt for the identified skill
+            let skillPrompt = buildSkillPrompt(
+                skill: skill,
+                nowString: nowStr,
+                weekdayStr: wdayStr,
+                contextBlock: ctxBlock
+            )
+
+            inferred = await intentService.infer(
+                from: text,
+                imageDataURL: attachedImageDataURL,
+                apiKey: activeKey,
+                model: storedModel,
+                useAzure: useAzure,
+                azureEndpoint: azureEndpoint,
+                userName: userName,
+                agentName: agentName,
+                appContext: appCtx,
+                previousResponseId: lastResponseId,
+                systemPromptOverride: skillPrompt
+            )
+
+            if let newId = intentService.lastInferResponseId { lastResponseId = newId }
+            await MainActor.run { withAnimation { isAgentThinking = false } }
             lastIntentSource = intentService.usedOpenAI ? "openai" : "fallback"
             lastIntentReason = intentService.lastReason
         } else {
-            inferred = intentAnalyzer.infer(from: text, agentName: agentName)
-            lastIntentSource = "fallback"
-            lastIntentReason = "subscription-required"
+            withAnimation {
+                messages.append(.init(isUser: false, text: "LLM service is not available."))
+            }
+            return
+        }
+        // ─────────────────────────────────────────────────────────────────────
+
+        guard let inferred else {
+            withAnimation {
+                messages.append(.init(isUser: false, text: "LLM service is not available."))
+            }
+            return
         }
 
-        if var draft = inferred {
+        var draft = inferred
             if draft.action == "answer", isWeatherInquiry(text) {
                 let weatherReply = await weatherService.response(for: text)
                 let weatherTitle = resolveResponseTitle(userText: text, modelTitle: draft.title, replyText: weatherReply)
@@ -7313,6 +8081,22 @@ extension ContentView {
                     pendingEmail = recoveredDraft
                     interactionState = .confirmingEmail(recoveredDraft)
                 }
+
+                // If the AI also returned a tasks array alongside the answer (e.g. events extracted from image),
+                // store them so the user can confirm with a simple "yes" / "add them".
+                if let proposedTasks = draft.tasks, proposedTasks.count > 1 {
+                    let proposedItems: [TaskConfirmationItem] = proposedTasks.map { item in
+                        TaskConfirmationItem(
+                            title: item.title ?? "Event",
+                            startDate: item.startDate ?? Date(),
+                            dueDate: item.dueDate ?? (item.startDate ?? Date()).addingTimeInterval(3600),
+                            priority: item.priority ?? 2,
+                            tag: item.tag ?? "General"
+                        )
+                    }
+                    interactionState = .pendingProposedTasks(tasks: proposedItems)
+                    lastProposedTaskItems = proposedItems
+                }
                 return
             }
 
@@ -7322,6 +8106,25 @@ extension ContentView {
 
             if draft.action == "task" {
                 draft.tag = await inferTaskTag(from: text, modelTag: draft.tag, title: draft.title)
+            }
+
+            // Multi-task: if LLM returned a tasks array with more than one item, show review sheet
+            if draft.action == "task", let multiTasks = draft.tasks, multiTasks.count > 1 {
+                let confirmItems: [TaskConfirmationItem] = multiTasks.map { item in
+                    TaskConfirmationItem(
+                        title: item.title ?? "Event",
+                        startDate: item.startDate ?? Date(),
+                        dueDate: item.dueDate ?? (item.startDate ?? Date()).addingTimeInterval(3600),
+                        priority: item.priority ?? 2,
+                        tag: item.tag ?? draft.tag ?? "General"
+                    )
+                }
+                lastProposedTaskItems = confirmItems
+                withAnimation {
+                    messages.append(.init(isUser: false, text: "Found \(confirmItems.count) events. Review them below to add to your calendar."))
+                }
+                showProposedEventSheet = true
+                return
             }
 
             if draft.action == "task", draftTitleLower.hasPrefix("call ") || draftTitleLower.contains(" call ") {
@@ -7374,11 +8177,6 @@ extension ContentView {
                 priority: draft.priority ?? 1,
                 tag: draft.tag ?? "Inbox"
             ), actionPayload: nil)
-        } else {
-            lastIntentSource = intentService.usedOpenAI ? "openai" : "fallback"
-            lastIntentReason = intentService.lastReason
-            promptForTaskDetails(from: text)
-        }
     }
 
     private func finalizeMessage() async {
@@ -7668,8 +8466,84 @@ extension ContentView {
         )
     }
 
-    private func beginTaskConfirmationFlow(draft: TaskDraft, actionPayload: TaskItem.AgentAction?) {
-        let candidateTask = TaskItem(
+    /// Makes a targeted AI call to extract all scheduled events from `sourceText` and shows the review sheet.
+    private func extractAndAddTasksFromText(_ sourceText: String, userRequest: String) async {
+        let activeKey = storedApiKey.isEmpty ? ProcessInfo.processInfo.environment["OPENAI_API_KEY"] : storedApiKey
+        withAnimation { isAgentThinking = true }
+        let nowString: String = {
+            let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd HH:mm"
+            return df.string(from: Date())
+        }()
+        let weekdayStr = Calendar.current.weekdaySymbols[Calendar.current.component(.weekday, from: Date()) - 1]
+        let extractionSystemPrompt = """
+        You are a task extraction assistant. The current date/time is \(nowString) (\(weekdayStr)).
+        Your ONLY job: count every distinct time reference in the user's message and create one task entry per time reference.
+
+        RULES (follow strictly):
+        1. Scan the message for ALL time references (e.g. "tonight 8pm", "tomorrow 5pm", "Monday 3pm", "next Friday"). Each one becomes its own task.
+        2. If the user says "two events/reminders/tasks", there must be EXACTLY two entries in the tasks array — never fewer.
+        3. Title: use the activity name if given. If a time slot has no explicit activity name (e.g. "8am tomorrow badminton and 5pm next tuesday" — "5pm" has no second activity), CARRY FORWARD the activity name from the preceding slot (so both would be "Badminton").
+        4. Date math: today = \(nowString.prefix(10)), "tonight" = today at the given time, "tomorrow" = the next calendar day, "next <weekday>" = the upcoming occurrence of that weekday.
+        5. dueDate = startDate + 1 hour unless stated otherwise.
+        6. Do NOT merge or drop any time slot. Every time reference → one tasks[] entry.
+        7. Respond ONLY with valid JSON: {"action":"task","actionConfirmed":true,"tasks":[{"title":"...","startDate":"YYYY-MM-DD HH:mm","dueDate":"YYYY-MM-DD HH:mm","priority":2,"tag":"General","performer":"user"}, ...]}
+        """
+        let extractionPrompt = sourceText
+        let result = await intentService.inferViaChatCompletions(
+            from: extractionPrompt,
+            systemPrompt: extractionSystemPrompt,
+            apiKey: activeKey,
+            model: storedModel,
+            useAzure: useAzure,
+            azureEndpoint: azureEndpoint
+        )
+        withAnimation { isAgentThinking = false }
+
+        guard let draft = result else {
+            withAnimation {
+                messages.append(.init(isUser: false, text: "LLM service is not available (\(intentService.lastReason))."))
+            }
+            return
+        }
+
+        // Prefer tasks[] array; fall back to top-level fields if the LLM returned a single task.
+        var rawItems: [TaskIntent] = draft.tasks ?? []
+        if rawItems.isEmpty, let title = draft.title, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            rawItems.append(TaskIntent(
+                title: title,
+                startDate: draft.startDate,
+                dueDate: draft.dueDate,
+                priority: draft.priority,
+                tag: draft.tag,
+                performer: draft.performer,
+                isScheduled: draft.isScheduled
+            ))
+        }
+
+        guard !rawItems.isEmpty else {
+            withAnimation {
+                messages.append(.init(isUser: false, text: "I couldn't extract the events automatically. Please try again or specify the tasks one at a time."))
+            }
+            return
+        }
+
+        let confirmItems: [TaskConfirmationItem] = rawItems.map { item in
+            TaskConfirmationItem(
+                title: item.title ?? "Event",
+                startDate: item.startDate ?? Date(),
+                dueDate: item.dueDate ?? (item.startDate ?? Date()).addingTimeInterval(3600),
+                priority: item.priority ?? 2,
+                tag: item.tag ?? "General"
+            )
+        }
+        lastProposedTaskItems = confirmItems
+        withAnimation {
+            messages.append(.init(isUser: false, text: "Found \(confirmItems.count) event\(confirmItems.count == 1 ? "" : "s"). Review them below to add to your calendar."))
+        }
+        showProposedEventSheet = true
+    }
+
+    private func beginTaskConfirmationFlow(draft: TaskDraft, actionPayload: TaskItem.AgentAction?) {        let candidateTask = TaskItem(
             title: draft.title.trimmingCharacters(in: .whitespacesAndNewlines),
             tag: draft.tag,
             startDate: draft.startDate,
@@ -7686,8 +8560,16 @@ extension ContentView {
     }
 
     private func isAffirmativeReply(_ lowerText: String) -> Bool {
-        let affirmatives = ["yes", "y", "ok", "okay", "sure", "go ahead", "proceed", "confirm", "continue"]
+        let affirmatives = ["yes", "y", "ok", "okay", "sure", "go ahead", "proceed", "confirm", "continue",
+                            "yes please", "please do", "do it", "sounds good", "great", "perfect", "absolutely", "correct"]
         return affirmatives.contains { lowerText.contains($0) }
+    }
+
+    private func isAddToCalendarReply(_ lowerText: String) -> Bool {
+        let addPhrases = ["add them", "add all", "add it", "add these", "add those", "add to calendar",
+                         "add to my calendar", "put them", "put it", "put these", "schedule them",
+                         "schedule all", "create them", "save them", "yes add", "add reminder"]
+        return addPhrases.contains { lowerText.contains($0) }
     }
 
     private func commitPendingTask() {
@@ -8911,6 +9793,52 @@ extension ContentView {
             return best
         }
         return lines.first
+    }
+
+    /// Parses a payment amount and any dated sessions from raw OCR text without using the API.
+    private func parseScreenshotLocally(from text: String) -> (amount: Double?, sessions: [(title: String, date: Date)]) {
+        let amount = parseReceiptAmount(from: text)
+        var sessions: [(title: String, date: Date)] = []
+        let lines = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
+
+        // Match dd/MM/yyyy h:mm a  or  MM/dd/yyyy h:mm a
+        let slashPattern = try? NSRegularExpression(
+            pattern: #"\b(\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}\s*[APap][Mm])"#
+        )
+        // Match "Jan 12, 2025" style
+        let wordPattern = try? NSRegularExpression(
+            pattern: #"\b((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4})"#,
+            options: .caseInsensitive
+        )
+        let dfSlash: [DateFormatter] = [
+            { let d = DateFormatter(); d.dateFormat = "dd/MM/yyyy h:mm a"; d.locale = Locale(identifier: "en_US_POSIX"); return d }(),
+            { let d = DateFormatter(); d.dateFormat = "MM/dd/yyyy h:mm a"; d.locale = Locale(identifier: "en_US_POSIX"); return d }()
+        ]
+        let dfWord: DateFormatter = { let d = DateFormatter(); d.dateFormat = "MMM d, yyyy"; d.locale = Locale(identifier: "en_US_POSIX"); return d }()
+
+        for (i, line) in lines.enumerated() {
+            let range = NSRange(line.startIndex..., in: line)
+            var matchedDate: Date?
+
+            if let m = slashPattern?.firstMatch(in: line, range: range),
+               let r = Range(m.range, in: line) {
+                let ds = String(line[r])
+                for df in dfSlash { if let d = df.date(from: ds) { matchedDate = d; break } }
+            }
+            if matchedDate == nil,
+               let m = wordPattern?.firstMatch(in: line, range: range),
+               let r = Range(m.range(at: 1), in: line) {
+                let ds = String(line[r]).replacingOccurrences(of: ",", with: "").trimmingCharacters(in: .whitespaces)
+                matchedDate = dfWord.date(from: ds)
+            }
+
+            if let date = matchedDate {
+                let prevLine = i > 0 ? lines[i - 1] : ""
+                let title = prevLine.isEmpty ? "Session \(sessions.count + 1)" : prevLine
+                sessions.append((title: title, date: date))
+            }
+        }
+        return (amount, sessions)
     }
 
     private func receiptThumbnailData(from imageData: Data) -> Data? {
