@@ -54,6 +54,7 @@ enum AppConfig {
         static let preferredTaskCalendarID  = "PREFERRED_TASK_CALENDAR_ID"
         static let lastTipDate              = "lastTipDate"
         static let lastTipIndex             = "lastTipIndex"
+        static let lastSeenAppVersion       = "lastSeenAppVersion"
     }
 
     // MARK: - Default Values

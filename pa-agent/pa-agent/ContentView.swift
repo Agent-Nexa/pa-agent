@@ -3522,6 +3522,8 @@ struct ContentView: View {
     @State private var overdueTasksToPresent: [TaskItem] = []
     @State private var selectedOverdueIDs: Set<UUID> = []
     @State private var showMorningBriefing = false
+    @State private var showWhatsNew = false
+    @AppStorage(AppConfig.Keys.lastSeenAppVersion) private var lastSeenAppVersion: String = ""
     @State private var isAgentThinking = false
     @State private var copiedAgentMessageID: UUID?
 
@@ -3619,6 +3621,14 @@ struct ContentView: View {
                 Task { await subscriptionManager.refreshSubscriptionStatus() }
                 #endif
                 Task { await checkForNewPhotoReceipts() }
+
+                // Show What's New sheet when the app version changes
+                let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+                if !currentVersion.isEmpty && currentVersion != lastSeenAppVersion {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                        showWhatsNew = true
+                    }
+                }
             }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
                 checkAgentTasks(at: Date())
@@ -3888,6 +3898,10 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showMorningBriefing) {
                 MorningBriefingView(tasks: $tasks)
+            }
+            .sheet(isPresented: $showWhatsNew) {
+                WhatsNewView()
+                    .interactiveDismissDisabled(false)
             }
             .alert("Calendar access needed", isPresented: $showCalendarAlert, actions: {
                 Button("OK", role: .cancel) {}

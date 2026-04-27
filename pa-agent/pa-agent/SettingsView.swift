@@ -1216,7 +1216,7 @@ struct ChatHistoryBackupDocument: FileDocument {
 
 struct MorningBriefingSettingsSection: View {
 
-    @AppStorage("morningBriefingEnabled") private var isEnabled: Bool = false
+    @AppStorage("morningBriefingEnabled") private var isEnabled: Bool = true
     @AppStorage("morningBriefingHour")    private var hour: Int    = 8
     @AppStorage("morningBriefingMinute")  private var minute: Int  = 0
 
