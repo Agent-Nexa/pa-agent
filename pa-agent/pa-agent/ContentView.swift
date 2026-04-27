@@ -3649,9 +3649,8 @@ struct ContentView: View {
                      checkAgentTasks(at: Date())
                      Task { await refreshSystemTasks() }
                      Task { await checkForNewPhotoReceipts() }
-                     // Restore email sessions
-                     Task { await GmailService.shared.restoreSession() }
-                     Task { await OutlookService.shared.restoreSession() }
+                     // Email accounts are managed by EmailAccountsManager (loaded on init, tokens lazy-refreshed)
+                     _ = EmailAccountsManager.shared
                      // Inject any items forwarded via the Share Extension into chat.
                      // No skill gate — the user explicitly chose to share to Nexa.
                      sharedContentProcessor.refreshPendingCount()

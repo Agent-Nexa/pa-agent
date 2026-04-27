@@ -58,6 +58,7 @@ enum EmailPriority: String, Codable, Comparable, Hashable {
 struct UnifiedEmail: Identifiable, Codable, Hashable {
     var id: String                    // provider-scoped message/thread ID
     var provider: EmailProvider
+    var accountId: UUID? = nil        // which EmailAccount fetched this (nil = legacy)
     var threadId: String
     var from: String                  // "Display Name <addr@example.com>" or just addr
     var fromName: String              // extracted display name
@@ -93,6 +94,21 @@ struct UnifiedEmail: Identifiable, Codable, Hashable {
             let fmt = DateFormatter(); fmt.dateFormat = "MMM d"
             return fmt.string(from: date)
         }
+    }
+}
+
+// MARK: - EmailAccount
+
+/// Represents a single connected email account (one per provider sign-in).
+struct EmailAccount: Identifiable, Codable, Hashable {
+    let id: UUID
+    var provider: EmailProvider
+    var email: String
+
+    init(id: UUID = UUID(), provider: EmailProvider, email: String) {
+        self.id = id
+        self.provider = provider
+        self.email = email
     }
 }
 

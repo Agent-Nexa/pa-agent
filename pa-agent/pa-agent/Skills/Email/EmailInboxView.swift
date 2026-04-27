@@ -10,9 +10,8 @@ import Combine
 
 struct EmailInboxView: View {
 
-    @StateObject private var emailStore     = EmailStore.shared
-    @StateObject private var gmailService   = GmailService.shared
-    @StateObject private var outlookService = OutlookService.shared
+    @StateObject private var emailStore      = EmailStore.shared
+    @StateObject private var accountsManager = EmailAccountsManager.shared
 
     @State private var selectedEmail:     UnifiedEmail?
     @State private var showThread:        Bool = false
@@ -20,6 +19,7 @@ struct EmailInboxView: View {
     @State private var showDraft:         Bool = false
     @State private var taskFromEmail:     UnifiedEmail?
     @State private var filterPriority:    EmailPriority? = nil
+    @State private var showAccounts:      Bool = false
 
     // Passed in from ContentView for AI triage calls
     var intentService:  IntentService
@@ -33,7 +33,7 @@ struct EmailInboxView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if !gmailService.isSignedIn && !outlookService.isSignedIn {
+                if !accountsManager.hasAnyAccount {
                     noAccountView
                 } else if emailStore.emails.isEmpty && !emailStore.isRefreshing {
                     emptyView
@@ -80,6 +80,13 @@ struct EmailInboxView: View {
                         agentName:     agentName,
                         userName:      userName
                     )
+                }
+            }
+            .sheet(isPresented: $showAccounts) {
+                NavigationStack {
+                    AccountsListView(showDoneButton: true)
+                        .navigationTitle("Email Accounts")
+                        .navigationBarTitleDisplayMode(.inline)
                 }
             }
             .task {
@@ -246,6 +253,14 @@ struct EmailInboxView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) {
+            Button {
+                showAccounts = true
+            } label: {
+                Image(systemName: "person.crop.circle.badge.plus")
+            }
+            .help("Manage Accounts")
+        }
         ToolbarItem(placement: .topBarTrailing) {
             Button {
                 Task {

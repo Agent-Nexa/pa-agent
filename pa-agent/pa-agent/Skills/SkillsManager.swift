@@ -115,10 +115,8 @@ final class SkillsManager: ObservableObject {
         var parts: [String] = []
 
         if isEnabled(.email) {
-            let gmailConnected  = GmailService.shared.isSignedIn
-            let outlookConnected = OutlookService.shared.isSignedIn
-            let providers = [gmailConnected ? "Gmail" : nil, outlookConnected ? "Outlook" : nil]
-                .compactMap { $0 }.joined(separator: ", ")
+            let accts = EmailAccountsManager.shared.accounts
+            let providers = accts.map { $0.email }.joined(separator: ", ")
             let unread = emailStore.emails.filter { !$0.isRead }.count
             let highPriority = emailStore.priorityQueue.prefix(5)
             var emailCtx = "EMAIL_SKILL: connected=[\(providers.isEmpty ? "none" : providers)], unread=\(unread)"

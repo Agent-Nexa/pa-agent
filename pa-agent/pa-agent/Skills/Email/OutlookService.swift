@@ -3,12 +3,18 @@
 //  pa-agent
 //
 //  Microsoft Graph / Outlook integration using OAuth 2.0 via ASWebAuthenticationSession.
-//  Uses a separate OAuth client from the CIAM auth (which is for user identity only).
 //
-//  Setup required:
-//  1. Register an app in Azure portal (accounts in any org + personal MS accounts).
-//  2. Set OutlookService.clientID to the new app's Application (client) ID.
-//  3. Add "msauth.z.Nexa.outlook://auth" as a redirect URI (mobile/desktop platform).
+//  Azure app registration (one-time setup — you do this, not the user):
+//  1. portal.azure.com → Azure Active Directory → App registrations → New registration.
+//  2. Supported account types: choose the THIRD option:
+//     "Accounts in any organizational directory (Multitenant) AND personal Microsoft accounts"
+//     This lets ANY user sign in (Outlook.com, Hotmail, Live, M365) with no per-customer setup.
+//  3. Redirect URI platform: "Mobile and desktop applications"
+//     URI value: msauth.z.Nexa.outlook://auth
+//  4. After creation, copy the Application (client) ID and paste it as clientID below.
+//  5. API Permissions → Add → Microsoft Graph → Delegated:
+//     Mail.Read, Mail.Send, Mail.ReadWrite, offline_access, User.Read
+//     Then click "Grant admin consent".
 //
 
 import Foundation
@@ -23,11 +29,12 @@ final class OutlookService: NSObject, ObservableObject, ASWebAuthenticationPrese
     private override init() { super.init() }
 
     // ── Configuration ──────────────────────────────────────────────────
-    static let clientID      = "YOUR_OUTLOOK_AZURE_APP_CLIENT_ID"
+    // Paste your Azure Application (client) ID here after completing the registration above.
+    static let clientID      = "ed4f25c3-a864-4d4b-ad7b-c2910225532d"
     static let redirectURI   = "msauth.z.Nexa.outlook://auth"
     static let authority     = "https://login.microsoftonline.com/common"
 
-    private let scopes = "offline_access Mail.Read Mail.Send Mail.ReadWrite"
+    private let scopes = "offline_access User.Read Mail.Read Mail.Send Mail.ReadWrite"
     private let keychainService = "com.nexa.outlook"
 
     // ── Published state ────────────────────────────────────────────────

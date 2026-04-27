@@ -104,8 +104,8 @@ struct EmailThreadView: View {
     // MARK: - Message card
 
     private func messageCard(_ message: UnifiedEmail) -> some View {
-        let isSelf = message.from.localizedCaseInsensitiveContains(GmailService.shared.connectedEmail) ||
-                     message.from.localizedCaseInsensitiveContains(OutlookService.shared.connectedEmail)
+        let myEmails = EmailAccountsManager.shared.accounts.map { $0.email.lowercased() }
+        let isSelf = myEmails.contains(where: { message.from.lowercased().contains($0) })
         return VStack(alignment: isSelf ? .trailing : .leading, spacing: 4) {
             HStack {
                 if isSelf { Spacer() }

@@ -38,37 +38,38 @@ final class EmailStore: ObservableObject {
         lastError = nil
         defer { isRefreshing = false; lastRefreshed = Date() }
 
+        let mgr = EmailAccountsManager.shared
         var combined: [UnifiedEmail] = []
+        var errors: [String] = []
 
-        if GmailService.shared.isSignedIn {
+        for account in mgr.accounts {
             do {
-                let (threadIds, _) = try await GmailService.shared.fetchThreadList(maxResults: 20)
-                for tid in threadIds.prefix(20) {
-                    let msgs = try await GmailService.shared.fetchThread(id: tid)
+                switch account.provider {
+                case .gmail:
+                    let threadIds = try await mgr.gmailFetchThreadList(account: account, maxResults: 20)
+                    for tid in threadIds.prefix(20) {
+                        let msgs = try await mgr.gmailFetchThread(account: account, threadId: tid)
+                        combined.append(contentsOf: msgs)
+                    }
+                case .outlook:
+                    let msgs = try await mgr.outlookFetchInbox(account: account, maxResults: 20)
                     combined.append(contentsOf: msgs)
                 }
             } catch {
-                lastError = "Gmail: \(error.localizedDescription)"
+                errors.append("\(account.email): \(error.localizedDescription)")
             }
         }
 
-        if OutlookService.shared.isSignedIn {
-            do {
-                let (msgs, _) = try await OutlookService.shared.fetchInbox(maxResults: 20)
-                combined.append(contentsOf: msgs)
-            } catch {
-                lastError = (lastError.map { $0 + " | " } ?? "") + "Outlook: \(error.localizedDescription)"
-            }
-        }
+        if !errors.isEmpty { lastError = errors.joined(separator: " | ") }
 
         if !combined.isEmpty {
             // Merge with existing — preserve AI fields already set
             var existing = Dictionary(uniqueKeysWithValues: emails.map { ($0.id, $0) })
             for var e in combined {
                 if let prev = existing[e.id] {
-                    e.aiSummary          = prev.aiSummary
-                    e.aiPriorityReason   = prev.aiPriorityReason
-                    e.priority           = prev.priority
+                    e.aiSummary        = prev.aiSummary
+                    e.aiPriorityReason = prev.aiPriorityReason
+                    e.priority         = prev.priority
                 }
                 existing[e.id] = e
             }
@@ -86,12 +87,24 @@ final class EmailStore: ObservableObject {
         guard let idx = emails.firstIndex(where: { $0.id == id }) else { return }
         emails[idx].isRead = true
         save()
+        let email = emails[idx]
         Task {
-            let email = emails[idx]
-            if email.provider == .gmail {
-                try? await GmailService.shared.modifyLabels(messageId: id, remove: ["UNREAD"])
+            let mgr = EmailAccountsManager.shared
+            // Prefer account-scoped routing via accountId
+            if let accountId = email.accountId,
+               let account = mgr.accounts.first(where: { $0.id == accountId }) {
+                if email.provider == .gmail {
+                    try? await mgr.gmailModifyLabels(account: account, messageId: id, remove: ["UNREAD"])
+                } else {
+                    try? await mgr.outlookMarkRead(account: account, messageId: id)
+                }
             } else {
-                try? await OutlookService.shared.markRead(messageId: id)
+                // Legacy fallback to singletons
+                if email.provider == .gmail {
+                    try? await GmailService.shared.modifyLabels(messageId: id, remove: ["UNREAD"])
+                } else {
+                    try? await OutlookService.shared.markRead(messageId: id)
+                }
             }
         }
     }

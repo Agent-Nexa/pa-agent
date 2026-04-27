@@ -187,10 +187,21 @@ struct EmailDraftSheet: View {
             provider: initialDraft.provider, isReply: initialDraft.isReply
         )
         do {
-            if draft.provider == .gmail {
-                try await GmailService.shared.sendEmail(draft: draft)
+            let mgr = EmailAccountsManager.shared
+            // Find first account for the draft's provider
+            if let account = mgr.accounts(for: draft.provider).first {
+                if draft.provider == .gmail {
+                    try await mgr.gmailSend(account: account, draft: draft)
+                } else {
+                    try await mgr.outlookSend(account: account, draft: draft)
+                }
             } else {
-                try await OutlookService.shared.sendEmail(draft: draft)
+                // Legacy fallback to singletons
+                if draft.provider == .gmail {
+                    try await GmailService.shared.sendEmail(draft: draft)
+                } else {
+                    try await OutlookService.shared.sendEmail(draft: draft)
+                }
             }
             sendResult = .success
         } catch {

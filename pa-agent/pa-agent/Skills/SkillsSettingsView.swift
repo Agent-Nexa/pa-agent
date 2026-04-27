@@ -18,8 +18,10 @@ struct SkillsSettingsView: View {
 
     @StateObject private var skillsManager  = SkillsManager.shared
     @StateObject private var skillsStore    = SkillsStore.shared
-    @StateObject private var gmailService   = GmailService.shared
-    @StateObject private var outlookService = OutlookService.shared
+    @StateObject private var accountsManager = EmailAccountsManager.shared
+
+    @State private var showAddAccount = false
+    @State private var showAccountsList = false
 
     var body: some View {
         Group {
@@ -28,6 +30,13 @@ struct SkillsSettingsView: View {
             deviceSkillsSection
         }
         .task { await skillsStore.fetch(userID: userID) }
+        .sheet(isPresented: $showAccountsList) {
+            NavigationStack {
+                AccountsListView(showDoneButton: true)
+                    .navigationTitle("Email Accounts")
+                    .navigationBarTitleDisplayMode(.inline)
+            }
+        }
     }
 
     // ── Pre-built skills ─────────────────────────────────────────────────
@@ -192,38 +201,33 @@ struct SkillsSettingsView: View {
     private func skillDetail(_ skill: AgentSkill) -> some View {
         switch skill {
         case .email:
-            // Gmail row
-            HStack {
-                Image(systemName: "envelope.fill").foregroundStyle(.red).frame(width: 20)
-                Text("Gmail")
-                Spacer()
-                if gmailService.isSignedIn {
-                    Text(gmailService.connectedEmail)
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    Button("Disconnect") { gmailService.signOut() }
-                        .font(.caption).foregroundStyle(.red).buttonStyle(.plain)
-                } else {
-                    Button("Connect") { Task { try? await GmailService.shared.signIn() } }
+            if accountsManager.accounts.isEmpty {
+                HStack {
+                    Image(systemName: "person.crop.circle.badge.xmark").foregroundStyle(.secondary).frame(width: 20)
+                    Text("No accounts connected").font(.subheadline).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Add Account") { showAccountsList = true }
                         .font(.caption).foregroundStyle(.blue).buttonStyle(.plain)
                 }
-            }
-
-            // Outlook row
-            HStack {
-                Image(systemName: "envelope.badge.fill").foregroundStyle(.blue).frame(width: 20)
-                Text("Outlook")
-                Spacer()
-                if outlookService.isSignedIn {
-                    Text(outlookService.connectedEmail)
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    Button("Disconnect") { outlookService.signOut() }
-                        .font(.caption).foregroundStyle(.red).buttonStyle(.plain)
-                } else {
-                    Button("Connect") { Task { try? await OutlookService.shared.signIn() } }
-                        .font(.caption).foregroundStyle(.blue).buttonStyle(.plain)
+            } else {
+                ForEach(accountsManager.accounts) { account in
+                    HStack {
+                        Image(systemName: account.provider == .gmail ? "envelope.fill" : "envelope.badge.fill")
+                            .foregroundStyle(account.provider == .gmail ? .red : .blue)
+                            .frame(width: 20)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(account.email).font(.caption).lineLimit(1)
+                            Text(account.provider.displayName).font(.caption2).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Remove") { accountsManager.removeAccount(account) }
+                            .font(.caption).foregroundStyle(.red).buttonStyle(.plain)
+                    }
                 }
+                Button("Add Another Account") { showAccountsList = true }
+                    .font(.caption).foregroundStyle(.blue)
             }
-
+            
         case .messaging:
             HStack {
                 Image(systemName: "square.and.arrow.up").foregroundStyle(.green).frame(width: 20)
