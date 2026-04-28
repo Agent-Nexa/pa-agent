@@ -325,7 +325,8 @@ final class GmailService: NSObject, ObservableObject, ASWebAuthenticationPresent
 
     private func buildRFC2822(draft: EmailDraft) -> String {
         let cc = draft.cc.isEmpty ? "" : "Cc: \(draft.cc)\r\n"
-        return "From: \(connectedEmail)\r\nTo: \(draft.to)\r\n\(cc)Subject: \(draft.subject)\r\nContent-Type: text/plain; charset=utf-8\r\nMIME-Version: 1.0\r\n\r\n\(draft.body)"
+        let inReplyTo = draft.replyToMessageId.map { "In-Reply-To: <\($0)>\r\nReferences: <\($0)>\r\n" } ?? ""
+        return "From: \(connectedEmail)\r\nTo: \(draft.to)\r\n\(cc)Subject: \(draft.subject)\r\n\(inReplyTo)Content-Type: text/plain; charset=utf-8\r\nMIME-Version: 1.0\r\n\r\n\(draft.body)"
     }
 
     // ── ASWebAuthenticationPresentationContextProviding ────────────────

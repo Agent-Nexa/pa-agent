@@ -195,6 +195,30 @@ final class EmailStore: ObservableObject {
         save()
     }
 
+    // MARK: - Scheduled-events (inline Schedule chip)
+
+    /// Append newly scheduled events to an email (keeps existing events).
+    func addScheduledEvents(id: String, events: [ScheduledEmailEvent]) {
+        guard !events.isEmpty,
+              let idx = emails.firstIndex(where: { $0.id == id }) else { return }
+        emails[idx].scheduledEvents.append(contentsOf: events)
+        save()
+    }
+
+    /// Remove a single scheduled event badge (and its corresponding task was already deleted).
+    func removeScheduledEvent(emailId: String, taskId: UUID) {
+        guard let idx = emails.firstIndex(where: { $0.id == emailId }) else { return }
+        emails[idx].scheduledEvents.removeAll { $0.taskId == taskId }
+        save()
+    }
+
+    /// Remove all scheduled event badges from an email (e.g. before re-scheduling).
+    func clearScheduledEvents(id: String) {
+        guard let idx = emails.firstIndex(where: { $0.id == id }) else { return }
+        emails[idx].scheduledEvents.removeAll()
+        save()
+    }
+
     var actionRequiredEmails: [UnifiedEmail] {
         emails.filter { $0.isActionRequired }.sorted { $0.date > $1.date }
     }

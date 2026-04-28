@@ -22,7 +22,6 @@ struct EmailThreadView: View {
     @StateObject private var emailStore = EmailStore.shared
     @Environment(\.dismiss) private var dismiss
 
-    @State private var showDraft    = false
     @State private var draftEmail: EmailDraft?
     @State private var summary:     String?
     @State private var showSummary  = false
@@ -78,20 +77,18 @@ struct EmailThreadView: View {
                     Button("Close") { dismiss() }
                 }
             }
-            .sheet(isPresented: $showDraft) {
-                if let d = draftEmail {
-                    EmailDraftSheet(
-                        initialDraft:  d,
-                        thread:        thread,
-                        intentService: intentService,
-                        apiKey:        apiKey,
-                        model:         model,
-                        useAzure:      useAzure,
-                        azureEndpoint: azureEndpoint,
-                        agentName:     agentName,
-                        userName:      userName
-                    )
-                }
+            .sheet(item: $draftEmail) { d in
+                EmailDraftSheet(
+                    initialDraft:  d,
+                    thread:        thread,
+                    intentService: intentService,
+                    apiKey:        apiKey,
+                    model:         model,
+                    useAzure:      useAzure,
+                    azureEndpoint: azureEndpoint,
+                    agentName:     agentName,
+                    userName:      userName
+                )
             }
             .alert("Summary", isPresented: $showSummary, presenting: summary) { _ in
                 Button("OK", role: .cancel) {}
@@ -211,9 +208,9 @@ struct EmailThreadView: View {
             subject:             rootEmail.subject.hasPrefix("Re:") ? rootEmail.subject : "Re: \(rootEmail.subject)",
             body:                result?.answer ?? result?.messageBody ?? "",
             inReplyToThreadId:   rootEmail.threadId,
+            replyToMessageId:    (thread.last?.id ?? rootEmail.id),
             provider:            rootEmail.provider,
             isReply:             true
         )
-        showDraft = true
     }
 }

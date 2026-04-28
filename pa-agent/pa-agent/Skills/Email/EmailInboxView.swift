@@ -20,7 +20,6 @@ struct EmailInboxView: View {
     @State private var selectedEmail:  UnifiedEmail?
     @State private var showThread:     Bool = false
     @State private var draftForEmail:  UnifiedEmail?
-    @State private var showDraft:      Bool = false
 
     // Passed in from ContentView for AI triage calls
     var intentService:  IntentService
@@ -70,30 +69,28 @@ struct EmailInboxView: View {
                     }
                 }
             }
-            .sheet(isPresented: $showDraft) {
-                if let email = draftForEmail {
-                    EmailDraftSheet(
-                        initialDraft: EmailDraft(
-                            to: email.from,
-                            cc: "",
-                            subject: email.subject.hasPrefix("Re:") ? email.subject : "Re: \(email.subject)",
-                            body: email.aiDraftBody ?? "",
-                            inReplyToThreadId: email.threadId,
-                            replyToMessageId: email.id,
-                            provider: email.provider,
-                            isReply: true
-                        ),
-                        thread: emailStore.thread(for: email),
-                        intentService: intentService,
-                        apiKey: apiKey,
-                        model: model,
-                        useAzure: useAzure,
-                        azureEndpoint: azureEndpoint,
-                        agentName: agentName,
-                        userName: userName,
-                        onSent: { emailStore.markReplied(id: email.id) }
-                    )
-                }
+            .sheet(item: $draftForEmail) { email in
+                EmailDraftSheet(
+                    initialDraft: EmailDraft(
+                        to: email.from,
+                        cc: "",
+                        subject: email.subject.hasPrefix("Re:") ? email.subject : "Re: \(email.subject)",
+                        body: email.aiDraftBody ?? "",
+                        inReplyToThreadId: email.threadId,
+                        replyToMessageId: email.id,
+                        provider: email.provider,
+                        isReply: true
+                    ),
+                    thread: emailStore.thread(for: email),
+                    intentService: intentService,
+                    apiKey: apiKey,
+                    model: model,
+                    useAzure: useAzure,
+                    azureEndpoint: azureEndpoint,
+                    agentName: agentName,
+                    userName: userName,
+                    onSent: { emailStore.markReplied(id: email.id) }
+                )
             }
             // No auto-triage on view appear — the background monitor handles it hourly.
             // Pull-to-refresh and the toolbar button still allow manual on-demand triage.
@@ -131,7 +128,6 @@ struct EmailInboxView: View {
                 },
                 onReply: { email in
                     draftForEmail = email
-                    showDraft = true
                 }
             )
         }

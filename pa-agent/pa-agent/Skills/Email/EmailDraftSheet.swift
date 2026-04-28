@@ -187,6 +187,7 @@ struct EmailDraftSheet: View {
         let draft = EmailDraft(
             to: to, cc: cc, subject: subject, body: messageBody,
             inReplyToThreadId: initialDraft.inReplyToThreadId,
+            replyToMessageId: initialDraft.replyToMessageId,
             provider: initialDraft.provider, isReply: initialDraft.isReply
         )
         do {

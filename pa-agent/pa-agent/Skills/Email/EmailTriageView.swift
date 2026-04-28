@@ -29,8 +29,9 @@ struct EmailTriageView: View {
     var onReply:      (UnifiedEmail) -> Void = { _ in }
 
     // Local state
-    @State private var summaryLoading: Set<String> = []
-    @State private var errorMessage:   String?
+    @State private var summaryLoading:      Set<String> = []
+    @State private var schedulingInProgress: Set<String> = []
+    @State private var errorMessage:        String?
 
     var body: some View {
         let actionEmails = emailStore.actionRequiredEmails
@@ -127,12 +128,21 @@ struct EmailTriageView: View {
                     }
                 }
 
-                actionChip(
-                    icon: "calendar.badge.plus",
-                    label: "Schedule",
-                    tint: .purple
-                ) {
-                    scheduleMeeting(for: email)
+                // Schedule chip — shows spinner while loading, per-event badges after
+                if schedulingInProgress.contains(email.id) {
+                    ProgressView()
+                        .scaleEffect(0.75)
+                        .padding(.horizontal, 4)
+                } else if !email.scheduledEvents.isEmpty {
+                    scheduledBadges(for: email)
+                } else {
+                    actionChip(
+                        icon: "calendar.badge.plus",
+                        label: "Schedule",
+                        tint: .purple
+                    ) {
+                        Task { await scheduleMeeting(for: email) }
+                    }
                 }
 
                 if summaryLoading.contains(email.id) {
@@ -163,6 +173,43 @@ struct EmailTriageView: View {
         .padding(.vertical, 6)
     }
 
+    // MARK: - Scheduled badges
+
+    private func scheduledBadges(for email: UnifiedEmail) -> some View {
+        let fmt: DateFormatter = {
+            let f = DateFormatter()
+            f.dateFormat = "MMM d"
+            return f
+        }()
+        return ForEach(email.scheduledEvents) { event in
+            HStack(spacing: 3) {
+                Text("\u{1F4C5} \(fmt.string(from: event.date))")  // 📅
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.purple)
+                    .lineLimit(1)
+                Button {
+                    // Delete task from ContentView
+                    NotificationCenter.default.post(
+                        name: .nexaDeleteTask,
+                        object: nil,
+                        userInfo: ["taskId": event.taskId.uuidString]
+                    )
+                    // Remove badge from email
+                    emailStore.removeScheduledEvent(emailId: email.id, taskId: event.taskId)
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.purple.opacity(0.7))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(Color.purple.opacity(0.10))
+            .clipShape(Capsule())
+        }
+    }
+
     // MARK: - Action chip
 
     private func actionChip(icon: String, label: String, tint: Color, action: @escaping () -> Void) -> some View {
@@ -184,64 +231,129 @@ struct EmailTriageView: View {
         onReply(email)
     }
 
-    private func scheduleMeeting(for email: UnifiedEmail) {
-        Task {
-            let azure = useAzure || UserDefaults.standard.bool(forKey: AppConfig.Keys.useAzure)
-            let key   = apiKey ?? UserDefaults.standard.string(forKey: AppConfig.Keys.apiKey) ?? ""
-            guard azure || !key.isEmpty else { return }
+    private func scheduleMeeting(for email: UnifiedEmail) async {
+        guard !schedulingInProgress.contains(email.id) else { return }
+        schedulingInProgress.insert(email.id)
+        defer { schedulingInProgress.remove(email.id) }
 
-            let prompt = """
-            Extract the event or deadline date from this email and return JSON:
-            {"title": "short task title", "date": "YYYY-MM-DD (the actual event/deadline date, not today)", "time": "HH:MM 24h or empty string if unknown", "replyBody": "short reply confirming attendance or acceptance"}
+        let azure = useAzure || UserDefaults.standard.bool(forKey: AppConfig.Keys.useAzure)
+        let key   = apiKey ?? UserDefaults.standard.string(forKey: AppConfig.Keys.apiKey) ?? ""
+        guard azure || !key.isEmpty else { return }
 
-            IMPORTANT: "date" must be the date of the event or deadline mentioned in the email, NOT today's date.
-            If no specific date is mentioned, use an empty string for "date".
-
-            Email from: \(email.from)
-            Subject: \(email.subject)
-            Body: \(email.fullBody.prefix(500))
-
-            Respond ONLY with JSON.
-            """
-
-            do {
-                let result = try await callAI(prompt: prompt)
-                // Extract JSON — may be wrapped in markdown code fences
-                let jsonString: String
-                if let start = result.range(of: "{"),
-                   let end   = result.range(of: "}", options: .backwards),
-                   start.lowerBound <= end.lowerBound {
-                    jsonString = String(result[start.lowerBound...end.lowerBound])
-                } else {
-                    jsonString = result
-                }
-                guard let data = jsonString.data(using: .utf8),
-                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
-
-                let title     = json["title"] as? String ?? "Meeting re: \(email.subject)"
-                let dateStr   = json["date"] as? String ?? ""
-                let replyBody = json["replyBody"] as? String ?? ""
-
-                // Post task-creation notification to ContentView
-                NotificationCenter.default.post(
-                    name: .nexaAddTaskFromEmail,
-                    object: nil,
-                    userInfo: [
-                        "title": title,
-                        "dateString": dateStr,
-                        "emailId": email.id,
-                        "replyBody": replyBody,
-                        "replyTo": email.from,
-                        "replySubject": "Re: \(email.subject)",
-                        "provider": email.provider.rawValue,
-                        "threadId": email.threadId
-                    ]
-                )
-                emailStore.markTriaged(id: email.id, isActionRequired: false)
-            } catch {
-                print("[EmailTriageView] Schedule error: \(error)")
-            }
+        let todayISO = ISO8601DateFormatter().string(from: Date())
+        let prompt = """
+        Extract ALL distinct events, meetings, and deadlines from this email.
+        Return JSON:
+        {
+          "events": [
+            {"title": "short event title", "date": "YYYY-MM-DD (the actual event date, NOT today \(todayISO))", "time": "HH:MM 24h or empty string"}
+          ],
+          "replyBody": "one short reply acknowledging all events/deadlines, or empty string if none"
         }
+        Rules:
+        - Include every distinct event or deadline mentioned.
+        - "date" must be the event date from the email, NOT today.
+        - If no date is mentioned for an event, use an empty string for "date".
+        - If no events are found, return {"events": [], "replyBody": ""}.
+
+        Email from: \(email.from)
+        Subject: \(email.subject)
+        Body: \(email.fullBody.prefix(800))
+
+        Respond ONLY with valid JSON.
+        """
+
+        do {
+            let result = try await callAI(prompt: prompt)
+
+            // Extract outermost JSON object (strip markdown fences if present)
+            let jsonString: String
+            if let start = result.range(of: "{"),
+               let end   = result.range(of: "}", options: .backwards),
+               start.lowerBound <= end.lowerBound {
+                jsonString = String(result[start.lowerBound...end.upperBound])
+            } else {
+                jsonString = result
+            }
+            guard let jsonData = jsonString.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else { return }
+
+            let rawEvents = json["events"]    as? [[String: Any]] ?? []
+            let replyBody = json["replyBody"] as? String ?? ""
+
+            var scheduledEvents: [ScheduledEmailEvent] = []
+
+            for rawEvent in rawEvents {
+                let title     = rawEvent["title"] as? String ?? "Meeting re: \(email.subject)"
+                let dateStr   = rawEvent["date"]  as? String ?? ""
+                let eventDate = parseEmailTaskDate(dateStr) ?? Date().addingTimeInterval(60 * 60 * 24)
+
+                let task = TaskItem(
+                    title:     title,
+                    tag:       "Email",
+                    startDate: eventDate,
+                    dueDate:   eventDate,
+                    priority:  1
+                )
+
+                // Silently add to ContentView's task list — no confirmation alert
+                if let taskData = try? JSONEncoder().encode(task) {
+                    NotificationCenter.default.post(
+                        name: .nexaAddTaskSilent,
+                        object: nil,
+                        userInfo: ["taskData": taskData]
+                    )
+                }
+
+                scheduledEvents.append(ScheduledEmailEvent(taskId: task.id, title: title, date: eventDate))
+            }
+
+            // Attach badges to the email row (email stays in triage list)
+            if !scheduledEvents.isEmpty {
+                emailStore.addScheduledEvents(id: email.id, events: scheduledEvents)
+            }
+
+            // Open a reply draft if the AI generated one
+            if !replyBody.isEmpty {
+                let draft = EmailDraft(
+                    to: email.from,
+                    cc: "",
+                    subject: "Re: \(email.subject)",
+                    body: replyBody,
+                    inReplyToThreadId: email.threadId,
+                    replyToMessageId: email.id,
+                    provider: email.provider,
+                    isReply: true
+                )
+                NotificationCenter.default.post(
+                    name: .nexaOpenEmailDraft,
+                    object: nil,
+                    userInfo: ["draft": draft]
+                )
+            }
+        } catch {
+            print("[EmailTriageView] Schedule error: \(error)")
+        }
+    }
+
+    /// Parse a date string returned by the schedule AI into a concrete Date.
+    private func parseEmailTaskDate(_ raw: String) -> Date? {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !s.isEmpty else { return nil }
+        let cal = Calendar.current
+        let now = Date()
+        if s == "today"    { return now }
+        if s == "tomorrow" { return cal.date(byAdding: .day, value: 1, to: now) }
+        let fmts = ["yyyy-MM-dd", "MM/dd/yyyy", "dd MMM yyyy", "MMM dd, yyyy",
+                    "MMMM dd, yyyy", "MMMM d, yyyy", "MMM d yyyy"]
+        let df = DateFormatter()
+        df.locale   = Locale(identifier: "en_US_POSIX")
+        df.timeZone = TimeZone.current
+        for fmt in fmts {
+            df.dateFormat = fmt
+            if let d = df.date(from: raw.trimmingCharacters(in: .whitespacesAndNewlines)) { return d }
+        }
+        return nil
     }
 
     private func fetchSummary(for email: UnifiedEmail) async {

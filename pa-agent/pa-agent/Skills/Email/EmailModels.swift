@@ -53,6 +53,23 @@ enum EmailPriority: String, Codable, Comparable, Hashable {
     }
 }
 
+// MARK: - ScheduledEmailEvent
+
+/// Represents one task/event that was scheduled from an email's Schedule chip.
+struct ScheduledEmailEvent: Codable, Hashable, Identifiable {
+    var id: UUID
+    var taskId: UUID      // matches TaskItem.id in ContentView so we can delete it
+    var title: String
+    var date: Date
+
+    init(taskId: UUID, title: String, date: Date) {
+        self.id     = UUID()
+        self.taskId = taskId
+        self.title  = title
+        self.date   = date
+    }
+}
+
 // MARK: - UnifiedEmail
 
 struct UnifiedEmail: Identifiable, Codable, Hashable {
@@ -78,6 +95,7 @@ struct UnifiedEmail: Identifiable, Codable, Hashable {
     var requiresReply: Bool = false      // action needs a reply; false = action-only (no reply chip)
     var aiDraftBody: String?             // AI pre-generated reply draft body
     var isReplied: Bool = false          // user has sent a reply via the app
+    var scheduledEvents: [ScheduledEmailEvent] = []  // tasks scheduled from this email's Schedule chip
 
     // Convenience
     var fromInitials: String {
@@ -119,7 +137,8 @@ struct EmailAccount: Identifiable, Codable, Hashable {
 
 // MARK: - EmailDraft
 
-struct EmailDraft: Codable {
+struct EmailDraft: Codable, Identifiable {
+    var id: String = UUID().uuidString
     var to: String
     var cc: String
     var subject: String

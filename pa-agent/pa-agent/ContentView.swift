@@ -2043,7 +2043,13 @@ struct TaskStatusSnapshot: Hashable, Codable {
 extension ChatMessage: Codable {}
 
 extension Notification.Name {
-    static let chatHistoryDidImport = Notification.Name("chatHistoryDidImport")
+    static let chatHistoryDidImport  = Notification.Name("chatHistoryDidImport")
+    /// EmailTriageView → ContentView: silently add a TaskItem (no confirmation alert).
+    /// userInfo: ["taskData": Data]  where Data is JSONEncoder output of TaskItem.
+    static let nexaAddTaskSilent    = Notification.Name("nexaAddTaskSilent")
+    /// EmailTriageView → ContentView: delete a task by UUID string.
+    /// userInfo: ["taskId": String]
+    static let nexaDeleteTask       = Notification.Name("nexaDeleteTask")
 }
 
 struct ChatHistoryBackupPayload: Codable {
@@ -3600,16 +3606,15 @@ struct ContentView: View {
         }
     }
 
-    private var mainContent: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                header
-                Divider()
-                DailyTipBanner()
-                chatArea
-                Divider()
-                inputBar
-            }
+    private var mainStackContent: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            DailyTipBanner()
+            chatArea
+            Divider()
+            inputBar
+        }
             .background(Color(.systemGroupedBackground))
             .onAppear {
                 setupNotifications()
@@ -3665,6 +3670,12 @@ struct ContentView: View {
             .onReceive(NotificationCenter.default.publisher(for: .nexaAddTaskFromEmail)) { note in
                 handleAddTaskFromEmail(userInfo: note.userInfo)
             }
+            .onReceive(NotificationCenter.default.publisher(for: .nexaAddTaskSilent)) { note in
+                handleAddTaskSilent(userInfo: note.userInfo)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .nexaDeleteTask)) { note in
+                handleDeleteTask(userInfo: note.userInfo)
+            }
             .onChange(of: scenePhase) { newPhase in
                 if newPhase == .active {
                      checkAgentTasks(at: Date())
@@ -3697,6 +3708,11 @@ struct ContentView: View {
                 }
             }
             .navigationBarHidden(true)
+    }
+
+    private var mainContent: some View {
+        NavigationStack {
+            mainStackContent
             .sheet(isPresented: $showTaskDetailSheet) {
                 taskDetailSheet
             }
@@ -6497,6 +6513,22 @@ extension ContentView {
         let fmt = DateFormatter()
         fmt.dateStyle = .long; fmt.timeStyle = .none
         return "\"\(t.title)\"\nDate: \(fmt.string(from: t.dueDate))"
+    }
+
+    /// Silently add a TaskItem encoded in userInfo["taskData"] — no confirmation alert.
+    private func handleAddTaskSilent(userInfo: [AnyHashable: Any]?) {
+        guard let data = userInfo?["taskData"] as? Data,
+              let task = try? JSONDecoder().decode(TaskItem.self, from: data) else { return }
+        tasks.append(task)
+        reprioritize()
+    }
+
+    /// Delete a task whose UUID string is in userInfo["taskId"].
+    private func handleDeleteTask(userInfo: [AnyHashable: Any]?) {
+        guard let idString = userInfo?["taskId"] as? String,
+              let uuid = UUID(uuidString: idString) else { return }
+        tasks.removeAll { $0.id == uuid }
+        reprioritize()
     }
 
     /// Handles the nexaAddTaskFromEmail notification posted by EmailTriageView's Schedule action.

@@ -222,14 +222,26 @@ final class OutlookService: NSObject, ObservableObject, ASWebAuthenticationPrese
             ] as [String: Any],
             "saveToSentItems": true
         ]
-        if let tid = draft.inReplyToThreadId {
-            // replies require a different endpoint
-            var req = URLRequest(url: URL(string: "https://graph.microsoft.com/v1.0/me/messages/\(tid)/reply")!)
+        if let msgId = draft.replyToMessageId ?? draft.inReplyToThreadId {
+            // replies require a different endpoint (individual message ID)
+            // Outlook IDs are base64 strings that may contain '/', '+', '='.
+            // These characters must be percent-encoded when used as a URL path segment.
+            // .urlPathAllowed leaves '/' unencoded (it's a valid path separator),
+            // so we explicitly remove '/', '+', and '=' from the allowed set.
+            var segmentAllowed = CharacterSet.urlPathAllowed
+            segmentAllowed.remove(charactersIn: "/+=")
+            let encodedId = msgId.addingPercentEncoding(withAllowedCharacters: segmentAllowed) ?? msgId
+            var req = URLRequest(url: URL(string: "https://graph.microsoft.com/v1.0/me/messages/\(encodedId)/reply")!)
             req.httpMethod = "POST"
             req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try JSONSerialization.data(withJSONObject: ["comment": draft.body])
-            _ = try await URLSession.shared.data(for: req)
+            let (replyData, replyResp) = try await URLSession.shared.data(for: req)
+            if let http = replyResp as? HTTPURLResponse, !(200..<300 ~= http.statusCode) {
+                let detail = String(data: replyData, encoding: .utf8) ?? "no body"
+                throw NSError(domain: "OutlookService", code: http.statusCode,
+                              userInfo: [NSLocalizedDescriptionKey: "Reply failed HTTP \(http.statusCode): \(detail)"])
+            }
             return
         }
         var req = URLRequest(url: URL(string: "https://graph.microsoft.com/v1.0/me/sendMail")!)
