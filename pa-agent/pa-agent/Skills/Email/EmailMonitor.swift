@@ -100,6 +100,7 @@ final class EmailMonitor: ObservableObject {
                 object: nil,
                 userInfo: ["count": fresh.count, "ids": Array(fresh)]
             )
+            NotificationManager.shared.scheduleActionRequiredEmailNotification(count: fresh.count)
             var known = self.notifiedIds
             known.formUnion(fresh)
             if known.count > 500 { known = Set(known.sorted().suffix(300)) }

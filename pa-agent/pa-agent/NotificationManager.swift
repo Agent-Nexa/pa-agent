@@ -205,6 +205,32 @@ extension NotificationManager {
             .removePendingNotificationRequests(withIdentifiers: [Self.dailySummaryIdentifier])
     }
 
+    func scheduleActionRequiredEmailNotification(count: Int) {
+        guard count > 0 else { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = "Action Required"
+        content.body = count == 1
+            ? "You have 1 email that needs your attention."
+            : "You have \(count) emails that need your attention."
+        content.sound = .default
+
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
+        let request = UNNotificationRequest(
+            identifier: "nexa_email_action_required",
+            content: content,
+            trigger: trigger
+        )
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else { return }
+            UNUserNotificationCenter.current().add(request) { error in
+                if let error = error {
+                    print("Failed to schedule action-required email notification: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
     func scheduleReceiptDetectedNotification(count: Int) {
         guard count > 0 else { return }
 

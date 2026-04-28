@@ -4327,9 +4327,9 @@ struct ContentView: View {
                         ZStack(alignment: .topTrailing) {
                             Image(systemName: "envelope")
                                 .font(.title3)
-                            let unread = emailStore.emails.filter { !$0.isRead }.count
-                            if unread > 0 {
-                                Text(unread > 99 ? "99+" : "\(unread)")
+                            let actionRequired = emailStore.emails.filter { $0.isActionRequired && !$0.isReplied }.count
+                            if actionRequired > 0 {
+                                Text(actionRequired > 99 ? "99+" : "\(actionRequired)")
                                     .font(.system(size: 9, weight: .bold))
                                     .foregroundStyle(.white)
                                     .padding(.horizontal, 3)
