@@ -82,7 +82,8 @@ final class EmailMonitor: ObservableObject {
             let prev       = self.seenUnreadIds
             let diff       = currentIds.subtracting(prev)
             self.seenUnreadIds = currentIds
-            let cands = EmailStore.shared.emails.filter { diff.contains($0.id) }
+            // Exclude emails already triaged (e.g. previously archived by user)
+            let cands = EmailStore.shared.emails.filter { diff.contains($0.id) && !$0.isTriaged }
             return (diff, cands)
         }
         guard !newIds.isEmpty else { return }
@@ -121,7 +122,7 @@ final class EmailMonitor: ObservableObject {
         // Value-type snapshot — safe to cross actor boundary
         let emails = candidates
 
-        typealias TResult = (id: String, actionable: Bool, requiresReply: Bool, draftBody: String?)
+        typealias TResult = (id: String, actionable: Bool, requiresReply: Bool, requiresMeeting: Bool, draftBody: String?)
 
         let results: [TResult] = await Task.detached(priority: .utility) {
             var out: [TResult] = []
@@ -138,10 +139,13 @@ final class EmailMonitor: ObservableObject {
 
                 If requiresReply is true, also write a concise professional reply draft. Plain text body only \u{2014} no salutation, no signature.
 
+                Also set "requiresMeeting" true if the email mentions a meeting, call, event, deadline, or any time-sensitive commitment that should be scheduled.
+
                 Respond ONLY with valid JSON in one of these exact formats:
-                {"actionable": true, "requiresReply": true, "draftReply": "draft body here"}
-                {"actionable": true, "requiresReply": false, "draftReply": ""}
-                {"actionable": false, "requiresReply": false, "draftReply": ""}
+                {"actionable": true, "requiresReply": true, "requiresMeeting": true, "draftReply": "draft body here"}
+                {"actionable": true, "requiresReply": true, "requiresMeeting": false, "draftReply": "draft body here"}
+                {"actionable": true, "requiresReply": false, "requiresMeeting": false, "draftReply": ""}
+                {"actionable": false, "requiresReply": false, "requiresMeeting": false, "draftReply": ""}
 
                 Email:
                 From: \(email.from)
@@ -153,26 +157,28 @@ final class EmailMonitor: ObservableObject {
                         prompt: prompt, apiKey: apiKey, model: model,
                         useAzure: useAzure, azureEndpoint: azureEp
                     ) else {
-                        out.append((email.id, false, false, nil))
+                        out.append((email.id, false, false, false, nil))
                         continue
                     }
-                    var actionable    = false
-                    var requiresReply = false
-                    var draftBody:    String? = nil
+                    var actionable      = false
+                    var requiresReply   = false
+                    var requiresMeeting = false
+                    var draftBody:      String? = nil
                     if let jStart = raw.range(of: "{"),
                        let jEnd   = raw.range(of: "}", options: .backwards),
                        jStart.lowerBound <= jEnd.lowerBound,
                        let data = String(raw[jStart.lowerBound...jEnd.lowerBound]).data(using: .utf8),
                        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                        actionable    = (json["actionable"]    as? Bool) ?? false
-                        requiresReply = (json["requiresReply"] as? Bool) ?? false
+                        actionable      = (json["actionable"]      as? Bool) ?? false
+                        requiresReply   = (json["requiresReply"]   as? Bool) ?? false
+                        requiresMeeting = (json["requiresMeeting"] as? Bool) ?? false
                         let d = (json["draftReply"] as? String) ?? ""
                         if requiresReply && !d.isEmpty { draftBody = d }
                     }
-                    out.append((email.id, actionable, requiresReply, draftBody))
+                    out.append((email.id, actionable, requiresReply, requiresMeeting, draftBody))
                 } catch {
                     print("[EmailMonitor] triage error for \(email.id): \(error)")
-                    out.append((email.id, false, false, nil))
+                    out.append((email.id, false, false, false, nil))
                 }
             }
             return out

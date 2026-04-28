@@ -84,8 +84,15 @@ final class EmailStore: ObservableObject {
                     e.isTriaged        = prev.isTriaged
                     e.isActionRequired = prev.isActionRequired
                     e.requiresReply    = prev.requiresReply
+                    e.requiresMeeting  = prev.requiresMeeting
                     e.aiDraftBody      = prev.aiDraftBody
                     e.isReplied        = prev.isReplied
+                    e.scheduledEvents  = prev.scheduledEvents
+                    // Once replied, never revert reply-related flags on refresh
+                    if prev.isReplied {
+                        e.requiresReply    = false
+                        e.isActionRequired = false
+                    }
                 }
                 dict[e.id] = e
             }
@@ -169,29 +176,40 @@ final class EmailStore: ObservableObject {
         emails[idx].isActionRequired = isActionRequired
         emails[idx].requiresReply = requiresReply
         if let d = draftBody { emails[idx].aiDraftBody = d }
+        // Archiving (isActionRequired = false) must also clear isReplied so the
+        // email is removed from actionRequiredEmails (which includes isReplied emails)
+        if !isActionRequired { emails[idx].isReplied = false }
         save()
     }
 
     /// Silent batch-apply triage results — used by the background monitor.
     /// Never touches isTriaging / triageProgress, so the UI is not disturbed.
-    func applyTriageResults(_ results: [(id: String, actionable: Bool, requiresReply: Bool, draftBody: String?)]) {
+    func applyTriageResults(_ results: [(id: String, actionable: Bool, requiresReply: Bool, requiresMeeting: Bool, draftBody: String?)]) {
         guard !results.isEmpty else { return }
         for r in results {
             guard let idx = emails.firstIndex(where: { $0.id == r.id }) else { continue }
+            // Don't override emails the user has already explicitly triaged/archived
+            guard !emails[idx].isTriaged else { continue }
             emails[idx].isTriaged        = true
             emails[idx].isActionRequired = r.actionable
             emails[idx].requiresReply    = r.requiresReply
+            emails[idx].requiresMeeting  = r.requiresMeeting
             if let d = r.draftBody { emails[idx].aiDraftBody = d }
         }
         save()
     }
 
     /// Mark an email as replied — removes it from the triage action queue.
-    func markReplied(id: String) {
+    func markReplied(id: String, sentBody: String? = nil) {
         guard let idx = emails.firstIndex(where: { $0.id == id }) else { return }
-        emails[idx].isReplied = true
+        emails[idx].isReplied        = true
         emails[idx].isActionRequired = false
-        emails[idx].isTriaged = true
+        emails[idx].requiresReply    = false   // prevent stale "Review Reply" chip after refresh
+        emails[idx].isTriaged        = true
+        // Persist the actual sent body so EmailThreadView can show what was replied
+        if let body = sentBody, !body.isEmpty {
+            emails[idx].aiDraftBody = body
+        }
         save()
     }
 
@@ -220,7 +238,8 @@ final class EmailStore: ObservableObject {
     }
 
     var actionRequiredEmails: [UnifiedEmail] {
-        emails.filter { $0.isActionRequired }.sorted { $0.date > $1.date }
+        // Keep replied emails visible so the user can review what was sent
+        emails.filter { $0.isActionRequired || $0.isReplied }.sorted { $0.date > $1.date }
     }
 
     func thread(for email: UnifiedEmail) -> [UnifiedEmail] {
@@ -234,6 +253,7 @@ final class EmailStore: ObservableObject {
         let id: String
         let actionable: Bool
         let requiresReply: Bool
+        let requiresMeeting: Bool
         let draftBody: String?
     }
 
@@ -271,10 +291,13 @@ final class EmailStore: ObservableObject {
 
                 If requiresReply is true, also write a concise professional reply draft. Plain text body only \u{2014} no salutation, no signature.
 
+                Also set "requiresMeeting" true if the email mentions a meeting, call, event, deadline, or any time-sensitive commitment that should be scheduled.
+
                 Respond ONLY with valid JSON in one of these exact formats:
-                {"actionable": true, "requiresReply": true, "draftReply": "draft body here"}
-                {"actionable": true, "requiresReply": false, "draftReply": ""}
-                {"actionable": false, "requiresReply": false, "draftReply": ""}
+                {"actionable": true, "requiresReply": true, "requiresMeeting": true, "draftReply": "draft body here"}
+                {"actionable": true, "requiresReply": true, "requiresMeeting": false, "draftReply": "draft body here"}
+                {"actionable": true, "requiresReply": false, "requiresMeeting": false, "draftReply": ""}
+                {"actionable": false, "requiresReply": false, "requiresMeeting": false, "draftReply": ""}
 
                 Email:
                 From: \(email.from)
@@ -287,25 +310,28 @@ final class EmailStore: ObservableObject {
                         prompt: prompt, ep: ep, key: key, mdl: mdl, azure: azure, token: token
                     ) else {
                         out.append(TriageResult(id: email.id, actionable: false,
-                                                requiresReply: false, draftBody: nil))
+                                                requiresReply: false, requiresMeeting: false, draftBody: nil))
                         continue
                     }
 
-                    var actionable    = false
-                    var requiresReply = false
-                    var draftBody:    String? = nil
+                    var actionable      = false
+                    var requiresReply   = false
+                    var requiresMeeting = false
+                    var draftBody:      String? = nil
                     if let jStart = raw.range(of: "{"),
                        let jEnd   = raw.range(of: "}", options: .backwards),
                        jStart.lowerBound <= jEnd.lowerBound,
                        let data = String(raw[jStart.lowerBound...jEnd.lowerBound]).data(using: .utf8),
                        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                        actionable    = (json["actionable"]    as? Bool) ?? false
-                        requiresReply = (json["requiresReply"] as? Bool) ?? false
+                        actionable      = (json["actionable"]      as? Bool) ?? false
+                        requiresReply   = (json["requiresReply"]   as? Bool) ?? false
+                        requiresMeeting = (json["requiresMeeting"] as? Bool) ?? false
                         let d = (json["draftReply"] as? String) ?? ""
                         if requiresReply && !d.isEmpty { draftBody = d }
                     }
                     out.append(TriageResult(id: email.id, actionable: actionable,
-                                            requiresReply: requiresReply, draftBody: draftBody))
+                                            requiresReply: requiresReply,
+                                            requiresMeeting: requiresMeeting, draftBody: draftBody))
                 } catch {
                     await MainActor.run { self?.triageError = "Triage stopped: \(error.localizedDescription)" }
                     return out
@@ -320,6 +346,7 @@ final class EmailStore: ObservableObject {
             emails[idx].isTriaged        = true
             emails[idx].isActionRequired = result.actionable
             emails[idx].requiresReply    = result.requiresReply
+            emails[idx].requiresMeeting  = result.requiresMeeting
             if let d = result.draftBody  { emails[idx].aiDraftBody = d }
         }
         if !results.isEmpty { save() }

@@ -29,16 +29,25 @@ struct EmailTriageView: View {
     var onReply:      (UnifiedEmail) -> Void = { _ in }
 
     // Local state
-    @State private var summaryLoading:      Set<String> = []
     @State private var schedulingInProgress: Set<String> = []
     @State private var errorMessage:        String?
 
     var body: some View {
         let actionEmails = emailStore.actionRequiredEmails
-        if actionEmails.isEmpty {
-            allClearView
-        } else {
-            triageList(actionEmails)
+        Group {
+            if actionEmails.isEmpty {
+                allClearView
+            } else {
+                triageList(actionEmails)
+            }
+        }
+        .alert(errorMessage?.hasPrefix("Scheduled") == true ? "Meeting Scheduled" : "Schedule Meeting", isPresented: Binding(
+            get: { errorMessage != nil },
+            set: { if !$0 { errorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { errorMessage = nil }
+        } message: {
+            Text(errorMessage ?? "")
         }
     }
 
@@ -118,7 +127,19 @@ struct EmailTriageView: View {
 
             // Action chips
             HStack(spacing: 8) {
-                if email.requiresReply {
+                if email.isReplied {
+                    // Replied — show a green badge; tapping opens thread for review
+                    Button { onOpenThread(email) } label: {
+                        Label("Replied", systemImage: "checkmark.circle.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Color.green.opacity(0.12))
+                            .foregroundStyle(.green)
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                } else if email.requiresReply {
                     actionChip(
                         icon: "arrowshape.turn.up.left.fill",
                         label: email.aiDraftBody != nil ? "Review Reply" : "AI Reply",
@@ -128,46 +149,38 @@ struct EmailTriageView: View {
                     }
                 }
 
-                // Schedule chip — shows spinner while loading, per-event badges after
+                // Schedule chip — only shown for emails that mention meetings/events/deadlines
                 if schedulingInProgress.contains(email.id) {
                     ProgressView()
                         .scaleEffect(0.75)
                         .padding(.horizontal, 4)
-                } else if !email.scheduledEvents.isEmpty {
-                    scheduledBadges(for: email)
                 } else {
-                    actionChip(
-                        icon: "calendar.badge.plus",
-                        label: "Schedule",
-                        tint: .purple
-                    ) {
-                        Task { await scheduleMeeting(for: email) }
+                    // Show existing scheduled event badges
+                    if !email.scheduledEvents.isEmpty {
+                        scheduledBadges(for: email)
                     }
-                }
-
-                if summaryLoading.contains(email.id) {
-                    ProgressView().scaleEffect(0.7)
-                } else {
-                    actionChip(
-                        icon: "sparkles",
-                        label: "Summarise",
-                        tint: .orange
-                    ) {
-                        Task { await fetchSummary(for: email) }
+                    // Keep Schedule button visible so user can always see/add
+                    if email.requiresMeeting {
+                        actionChip(
+                            icon: "calendar.badge.plus",
+                            label: email.scheduledEvents.isEmpty ? "Schedule" : "Add More",
+                            tint: .purple
+                        ) {
+                            Task { await scheduleMeeting(for: email) }
+                        }
                     }
                 }
 
                 Spacer()
 
-                // Dismiss chip
-                Button {
+                // Archive chip
+                actionChip(
+                    icon: "archivebox",
+                    label: "Archive",
+                    tint: .secondary
+                ) {
                     emailStore.markTriaged(id: email.id, isActionRequired: false)
-                } label: {
-                    Image(systemName: "xmark.circle")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.plain)
             }
         }
         .padding(.vertical, 6)
@@ -183,10 +196,18 @@ struct EmailTriageView: View {
         }()
         return ForEach(email.scheduledEvents) { event in
             HStack(spacing: 3) {
-                Text("\u{1F4C5} \(fmt.string(from: event.date))")  // 📅
+                Image(systemName: "calendar.badge.checkmark")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.purple)
-                    .lineLimit(1)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(event.title)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.purple)
+                        .lineLimit(1)
+                    Text(fmt.string(from: event.date))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.purple.opacity(0.8))
+                }
                 Button {
                     // Delete task from ContentView
                     NotificationCenter.default.post(
@@ -238,7 +259,10 @@ struct EmailTriageView: View {
 
         let azure = useAzure || UserDefaults.standard.bool(forKey: AppConfig.Keys.useAzure)
         let key   = apiKey ?? UserDefaults.standard.string(forKey: AppConfig.Keys.apiKey) ?? ""
-        guard azure || !key.isEmpty else { return }
+        guard azure || !key.isEmpty else {
+            errorMessage = "No API key configured. Please add your API key in Settings."
+            return
+        }
 
         let todayISO = ISO8601DateFormatter().string(from: Date())
         let prompt = """
@@ -267,16 +291,20 @@ struct EmailTriageView: View {
             let result = try await callAI(prompt: prompt)
 
             // Extract outermost JSON object (strip markdown fences if present)
+            // Use end.upperBound with closed-range replacement: include the closing '}'
             let jsonString: String
             if let start = result.range(of: "{"),
                let end   = result.range(of: "}", options: .backwards),
                start.lowerBound <= end.lowerBound {
-                jsonString = String(result[start.lowerBound...end.upperBound])
+                jsonString = String(result[start.lowerBound...end.lowerBound])
             } else {
                 jsonString = result
             }
             guard let jsonData = jsonString.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else { return }
+                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+                errorMessage = "Could not parse AI response. Raw: \(result.prefix(200))"
+                return
+            }
 
             let rawEvents = json["events"]    as? [[String: Any]] ?? []
             let replyBody = json["replyBody"] as? String ?? ""
@@ -311,6 +339,10 @@ struct EmailTriageView: View {
             // Attach badges to the email row (email stays in triage list)
             if !scheduledEvents.isEmpty {
                 emailStore.addScheduledEvents(id: email.id, events: scheduledEvents)
+                let titles = scheduledEvents.map { "• \($0.title)" }.joined(separator: "\n")
+                errorMessage = "Scheduled \(scheduledEvents.count) task(s):\n\(titles)"
+            } else {
+                errorMessage = "No events or deadlines found in this email."
             }
 
             // Open a reply draft if the AI generated one
@@ -333,6 +365,7 @@ struct EmailTriageView: View {
             }
         } catch {
             print("[EmailTriageView] Schedule error: \(error)")
+            errorMessage = "Could not schedule meeting: \(error.localizedDescription)"
         }
     }
 
@@ -354,27 +387,6 @@ struct EmailTriageView: View {
             if let d = df.date(from: raw.trimmingCharacters(in: .whitespacesAndNewlines)) { return d }
         }
         return nil
-    }
-
-    private func fetchSummary(for email: UnifiedEmail) async {
-        guard !summaryLoading.contains(email.id) else { return }
-        summaryLoading.insert(email.id)
-        defer { summaryLoading.remove(email.id) }
-
-        let body = email.fullBody.isEmpty ? email.bodyPreview : email.fullBody
-        let prompt = """
-        Summarise this email in one clear sentence. Be specific about what is being asked or shared.
-
-        From: \(email.from)
-        Subject: \(email.subject)
-        Body: \(body.prefix(800))
-        """
-
-        if let summary = try? await callAI(prompt: prompt) {
-            let cleaned = summary.trimmingCharacters(in: .whitespacesAndNewlines)
-                .replacingOccurrences(of: "\"", with: "")
-            emailStore.updatePriority(id: email.id, priority: email.priority, summary: cleaned)
-        }
     }
 
     // MARK: - Direct chat completions helper
@@ -401,11 +413,11 @@ struct EmailTriageView: View {
             headers["Authorization"] = "Bearer \(key)"
         }
 
+        // Azure APIM gateway routes via the "model" field in the body.
         let body: [String: Any] = [
-            "model":           mdl,
-            "messages":        [["role": "user", "content": prompt]],
-            "temperature":     0
-            // max_tokens omitted — gpt-5.2/o1 on Azure do not support it
+            "model":       mdl,
+            "messages":    [["role": "user", "content": prompt]],
+            "temperature": 0
         ]
 
         var req = URLRequest(url: url)
@@ -413,12 +425,27 @@ struct EmailTriageView: View {
         req.httpBody   = try JSONSerialization.data(withJSONObject: body)
         headers.forEach { req.setValue($1, forHTTPHeaderField: $0) }
 
-        let (data, _) = try await URLSession.shared.data(for: req)
+        let (data, response) = try await URLSession.shared.data(for: req)
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+
+        // Surface API error messages (4xx/5xx) instead of a generic -1011
+        if statusCode != 200 {
+            let serverMsg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
+                .flatMap { $0["error"] as? [String: Any] }
+                .flatMap { $0["message"] as? String }
+                ?? String(data: data, encoding: .utf8)
+                ?? "HTTP \(statusCode)"
+            throw NSError(domain: "AIError", code: statusCode,
+                          userInfo: [NSLocalizedDescriptionKey: serverMsg])
+        }
+
         guard let json    = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let choices = json["choices"] as? [[String: Any]],
               let message = choices.first?["message"] as? [String: Any],
               let content = message["content"] as? String else {
-            throw URLError(.badServerResponse)
+            let raw = String(data: data, encoding: .utf8) ?? "<unreadable response>"
+            throw NSError(domain: "AIError", code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "Unexpected response: \(raw.prefix(200))"])
         }
         return content
     }

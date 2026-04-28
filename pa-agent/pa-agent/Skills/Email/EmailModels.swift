@@ -93,6 +93,7 @@ struct UnifiedEmail: Identifiable, Codable, Hashable {
     var isActionRequired: Bool = false   // AI flagged as needing user action
     var isTriaged: Bool = false          // triage AI has already evaluated this email
     var requiresReply: Bool = false      // action needs a reply; false = action-only (no reply chip)
+    var requiresMeeting: Bool = false    // email mentions a meeting, event, or deadline to schedule
     var aiDraftBody: String?             // AI pre-generated reply draft body
     var isReplied: Bool = false          // user has sent a reply via the app
     var scheduledEvents: [ScheduledEmailEvent] = []  // tasks scheduled from this email's Schedule chip

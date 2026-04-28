@@ -89,7 +89,7 @@ struct EmailInboxView: View {
                     azureEndpoint: azureEndpoint,
                     agentName: agentName,
                     userName: userName,
-                    onSent: { emailStore.markReplied(id: email.id) }
+                    onSent: { sentBody in emailStore.markReplied(id: email.id, sentBody: sentBody) }
                 )
             }
             // No auto-triage on view appear — the background monitor handles it hourly.

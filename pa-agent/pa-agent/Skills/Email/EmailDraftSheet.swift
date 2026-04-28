@@ -20,7 +20,7 @@ struct EmailDraftSheet: View {
     let azureEndpoint: String?
     let agentName:     String
     let userName:      String?
-    var onSent:        () -> Void = {}
+    var onSent: (String) -> Void = { _ in }
 
     @Environment(\.dismiss) private var dismiss
 
@@ -39,7 +39,7 @@ struct EmailDraftSheet: View {
     init(initialDraft: EmailDraft, thread: [UnifiedEmail],
          intentService: IntentService, apiKey: String?, model: String?,
          useAzure: Bool, azureEndpoint: String?, agentName: String, userName: String?,
-         onSent: @escaping () -> Void = {}) {
+         onSent: @escaping (String) -> Void = { _ in }) {
         self.initialDraft  = initialDraft
         self.thread        = thread
         self.intentService = intentService
@@ -207,7 +207,7 @@ struct EmailDraftSheet: View {
                     try await OutlookService.shared.sendEmail(draft: draft)
                 }
             }
-            onSent()
+            onSent(messageBody)
             sendResult = .success
         } catch {
             sendResult = .failure(error.localizedDescription)

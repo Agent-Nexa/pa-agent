@@ -33,7 +33,9 @@ struct EmailThreadView: View {
     var onSaveAsTask: ((String) -> Void)? = nil
 
     private var thread: [UnifiedEmail] {
-        emailStore.thread(for: rootEmail)
+        let stored = emailStore.thread(for: rootEmail)
+        // Always show at least the root email if the store thread is empty
+        return stored.isEmpty ? [rootEmail] : stored
     }
 
     var body: some View {
@@ -59,6 +61,11 @@ struct EmailThreadView: View {
                     LazyVStack(spacing: 12) {
                         ForEach(thread) { message in
                             messageCard(message)
+                        }
+                        // Show the sent reply body inline if user replied via the app
+                        let replied = emailStore.emails.first(where: { $0.id == rootEmail.id }) ?? rootEmail
+                        if replied.isReplied, let sentBody = replied.aiDraftBody, !sentBody.isEmpty {
+                            sentReplyCard(sentBody)
                         }
                     }
                     .padding()
@@ -123,6 +130,26 @@ struct EmailThreadView: View {
                 .frame(maxWidth: UIScreen.main.bounds.width * 0.78, alignment: isSelf ? .trailing : .leading)
         }
         .frame(maxWidth: .infinity, alignment: isSelf ? .trailing : .leading)
+    }
+
+    // MARK: - Sent reply card
+
+    private func sentReplyCard(_ body: String) -> some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            HStack {
+                Spacer()
+                Label("You · Sent via Nexa", systemImage: "checkmark.circle.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.green)
+            }
+            Text(body)
+                .font(.subheadline)
+                .padding(12)
+                .background(Color.blue.opacity(0.15))
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+                .frame(maxWidth: UIScreen.main.bounds.width * 0.78, alignment: .trailing)
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
     }
 
     // MARK: - Action bar
