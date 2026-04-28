@@ -20,6 +20,14 @@ import AuthenticationServices
 import SwiftUI
 import Combine
 
+// ── Off-main token cache — its own actor executor, never needs the main actor ──
+private actor TokenCache {
+    private var entries: [UUID: (token: String, expiry: Date)] = [:]
+    func get(_ id: UUID) -> (token: String, expiry: Date)? { entries[id] }
+    func set(_ id: UUID, token: String, expiry: Date) { entries[id] = (token, expiry) }
+    func remove(_ id: UUID) { entries.removeValue(forKey: id) }
+}
+
 @MainActor
 final class EmailAccountsManager: NSObject, ObservableObject, ASWebAuthenticationPresentationContextProviding {
 
@@ -41,8 +49,8 @@ final class EmailAccountsManager: NSObject, ObservableObject, ASWebAuthenticatio
 
     private let udKey = "nexaEmailAccounts"
 
-    // In-memory token cache: [accountId: (accessToken, expiry)]
-    private var tokenCache: [UUID: (token: String, expiry: Date)] = [:]
+    // In-memory token cache lives in a dedicated actor — no main-actor hops needed
+    private let tokenStore = TokenCache()
 
     // ── Persistence ────────────────────────────────────────────────────
 
@@ -93,7 +101,7 @@ final class EmailAccountsManager: NSObject, ObservableObject, ASWebAuthenticatio
 
     func removeAccount(_ account: EmailAccount) {
         accounts.removeAll { $0.id == account.id }
-        tokenCache.removeValue(forKey: account.id)
+        Task { await self.tokenStore.remove(account.id) }
         deleteKeychain(accountId: account.id)
         saveAccounts()
     }
@@ -104,9 +112,9 @@ final class EmailAccountsManager: NSObject, ObservableObject, ASWebAuthenticatio
 
     // ── Access token ───────────────────────────────────────────────────
 
-    func accessToken(for account: EmailAccount) async throws -> String {
+    nonisolated func accessToken(for account: EmailAccount) async throws -> String {
         // Use cache if still valid (60-second buffer)
-        if let cached = tokenCache[account.id], Date() < cached.expiry.addingTimeInterval(-60) {
+        if let cached = await tokenStore.get(account.id), Date() < cached.expiry.addingTimeInterval(-60) {
             return cached.token
         }
         // Refresh
@@ -151,13 +159,13 @@ final class EmailAccountsManager: NSObject, ObservableObject, ASWebAuthenticatio
         // Avoid duplicates — update existing if same email
         if let idx = accounts.firstIndex(where: { $0.provider == .gmail && $0.email == email }) {
             let acct = accounts[idx]
-            tokenCache[acct.id] = (accessToken, expiry)
+            await tokenStore.set(acct.id, token: accessToken, expiry: expiry)
             if let rt = refreshToken { saveToKeychain(accountId: acct.id, key: "refreshToken", value: rt) }
             return
         }
 
         let acct = EmailAccount(provider: .gmail, email: email)
-        tokenCache[acct.id] = (accessToken, expiry)
+        await tokenStore.set(acct.id, token: accessToken, expiry: expiry)
         if let rt = refreshToken { saveToKeychain(accountId: acct.id, key: "refreshToken", value: rt) }
         accounts.append(acct)
         saveAccounts()
@@ -180,7 +188,7 @@ final class EmailAccountsManager: NSObject, ObservableObject, ASWebAuthenticatio
         return (json.access_token, json.refresh_token, expiry)
     }
 
-    private func refreshGmailToken(account: EmailAccount, refreshToken: String) async throws -> String {
+    nonisolated private func refreshGmailToken(account: EmailAccount, refreshToken: String) async throws -> String {
         var req = URLRequest(url: URL(string: "https://oauth2.googleapis.com/token")!)
         req.httpMethod = "POST"
         let body: [String: String] = [
@@ -193,7 +201,7 @@ final class EmailAccountsManager: NSObject, ObservableObject, ASWebAuthenticatio
         let (data, _) = try await URLSession.shared.data(for: req)
         let json = try JSONDecoder().decode(TokenResponse.self, from: data)
         let expiry = Date().addingTimeInterval(TimeInterval(json.expires_in ?? 3600))
-        tokenCache[account.id] = (json.access_token, expiry)
+        await tokenStore.set(account.id, token: json.access_token, expiry: expiry)
         return json.access_token
     }
 
@@ -242,13 +250,13 @@ final class EmailAccountsManager: NSObject, ObservableObject, ASWebAuthenticatio
         // Avoid duplicates
         if let idx = accounts.firstIndex(where: { $0.provider == .outlook && $0.email == email }) {
             let acct = accounts[idx]
-            tokenCache[acct.id] = (accessToken, expiry)
+            await tokenStore.set(acct.id, token: accessToken, expiry: expiry)
             if let rt = refreshToken { saveToKeychain(accountId: acct.id, key: "refreshToken", value: rt) }
             return
         }
 
         let acct = EmailAccount(provider: .outlook, email: email)
-        tokenCache[acct.id] = (accessToken, expiry)
+        await tokenStore.set(acct.id, token: accessToken, expiry: expiry)
         if let rt = refreshToken { saveToKeychain(accountId: acct.id, key: "refreshToken", value: rt) }
         accounts.append(acct)
         saveAccounts()
@@ -272,7 +280,7 @@ final class EmailAccountsManager: NSObject, ObservableObject, ASWebAuthenticatio
         return (json.access_token, json.refresh_token, expiry)
     }
 
-    private func refreshOutlookToken(account: EmailAccount, refreshToken: String) async throws -> String {
+    nonisolated private func refreshOutlookToken(account: EmailAccount, refreshToken: String) async throws -> String {
         var req = URLRequest(url: URL(string: "\(OutlookService.authority)/oauth2/v2.0/token")!)
         req.httpMethod = "POST"
         let body: [String: String] = [
@@ -286,7 +294,7 @@ final class EmailAccountsManager: NSObject, ObservableObject, ASWebAuthenticatio
         let (data, _) = try await URLSession.shared.data(for: req)
         let json = try JSONDecoder().decode(TokenResponse.self, from: data)
         let expiry = Date().addingTimeInterval(TimeInterval(json.expires_in ?? 3600))
-        tokenCache[account.id] = (json.access_token, expiry)
+        await tokenStore.set(account.id, token: json.access_token, expiry: expiry)
         return json.access_token
     }
 
@@ -313,7 +321,7 @@ final class EmailAccountsManager: NSObject, ObservableObject, ASWebAuthenticatio
 
     // ── Gmail API helpers (token-based, account-scoped) ────────────────
 
-    func gmailFetchThreadList(account: EmailAccount, maxResults: Int = 20) async throws -> [String] {
+    nonisolated func gmailFetchThreadList(account: EmailAccount, maxResults: Int = 20) async throws -> [String] {
         let token = try await accessToken(for: account)
         var comps = URLComponents(string: "https://gmail.googleapis.com/gmail/v1/users/me/threads")!
         comps.queryItems = [
@@ -327,7 +335,7 @@ final class EmailAccountsManager: NSObject, ObservableObject, ASWebAuthenticatio
         return (json["threads"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String }
     }
 
-    func gmailFetchThread(account: EmailAccount, threadId: String) async throws -> [UnifiedEmail] {
+    nonisolated func gmailFetchThread(account: EmailAccount, threadId: String) async throws -> [UnifiedEmail] {
         let token = try await accessToken(for: account)
         var req = URLRequest(url: URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/threads/\(threadId)?format=full")!)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -370,7 +378,7 @@ final class EmailAccountsManager: NSObject, ObservableObject, ASWebAuthenticatio
 
     // ── Outlook API helpers ────────────────────────────────────────────
 
-    func outlookFetchInbox(account: EmailAccount, maxResults: Int = 20) async throws -> [UnifiedEmail] {
+    nonisolated func outlookFetchInbox(account: EmailAccount, maxResults: Int = 20) async throws -> [UnifiedEmail] {
         let token = try await accessToken(for: account)
         var comps = URLComponents(string: "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages")!
         comps.queryItems = [
@@ -397,13 +405,17 @@ final class EmailAccountsManager: NSObject, ObservableObject, ASWebAuthenticatio
 
     func outlookSend(account: EmailAccount, draft: EmailDraft) async throws {
         let token = try await accessToken(for: account)
-        if let tid = draft.inReplyToThreadId {
-            var req = URLRequest(url: URL(string: "https://graph.microsoft.com/v1.0/me/messages/\(tid)/reply")!)
+        // /reply requires the individual message ID — NOT the conversationId stored in threadId
+        if let msgId = draft.replyToMessageId ?? draft.inReplyToThreadId {
+            var req = URLRequest(url: URL(string: "https://graph.microsoft.com/v1.0/me/messages/\(msgId)/reply")!)
             req.httpMethod = "POST"
             req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try JSONSerialization.data(withJSONObject: ["comment": draft.body])
-            _ = try await URLSession.shared.data(for: req)
+            let (_, resp) = try await URLSession.shared.data(for: req)
+            if let http = resp as? HTTPURLResponse, !(200..<300 ~= http.statusCode) {
+                throw AccountError.httpError(http.statusCode)
+            }
             return
         }
         let body: [String: Any] = [
@@ -449,7 +461,7 @@ final class EmailAccountsManager: NSObject, ObservableObject, ASWebAuthenticatio
 
     // ── Parsing helpers ────────────────────────────────────────────────
 
-    private func parseGmailMessage(_ msg: [String: Any], threadId: String, accountId: UUID, accountEmail: String) -> UnifiedEmail? {
+    nonisolated private func parseGmailMessage(_ msg: [String: Any], threadId: String, accountId: UUID, accountEmail: String) -> UnifiedEmail? {
         guard let msgId = msg["id"] as? String else { return nil }
         let payload = msg["payload"] as? [String: Any] ?? [:]
         let headers = (payload["headers"] as? [[String: Any]] ?? []).reduce(into: [String: String]()) {
@@ -470,7 +482,7 @@ final class EmailAccountsManager: NSObject, ObservableObject, ASWebAuthenticatio
         )
     }
 
-    private func parseOutlookMessage(_ msg: [String: Any], accountId: UUID) -> UnifiedEmail? {
+    nonisolated private func parseOutlookMessage(_ msg: [String: Any], accountId: UUID) -> UnifiedEmail? {
         guard let msgId = msg["id"] as? String else { return nil }
         let threadId = msg["conversationId"] as? String ?? msgId
         let subject  = msg["subject"] as? String ?? "(no subject)"
@@ -495,7 +507,7 @@ final class EmailAccountsManager: NSObject, ObservableObject, ASWebAuthenticatio
         )
     }
 
-    private func extractGmailBody(payload: [String: Any]) -> String {
+    nonisolated private func extractGmailBody(payload: [String: Any]) -> String {
         if let bd = (payload["body"] as? [String: Any])?["data"] as? String { return decodeBase64URL(bd) }
         let parts = payload["parts"] as? [[String: Any]] ?? []
         for part in parts {
@@ -509,13 +521,13 @@ final class EmailAccountsManager: NSObject, ObservableObject, ASWebAuthenticatio
         return ""
     }
 
-    private func decodeBase64URL(_ s: String) -> String {
+    nonisolated private func decodeBase64URL(_ s: String) -> String {
         var b64 = s.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
         while b64.count % 4 != 0 { b64 += "=" }
         return String(data: Data(base64Encoded: b64) ?? Data(), encoding: .utf8) ?? ""
     }
 
-    private func stripHTML(_ html: String) -> String {
+    nonisolated private func stripHTML(_ html: String) -> String {
         guard let d = html.data(using: .utf8),
               let attr = try? NSAttributedString(data: d,
                   options: [.documentType: NSAttributedString.DocumentType.html,
@@ -526,7 +538,7 @@ final class EmailAccountsManager: NSObject, ObservableObject, ASWebAuthenticatio
         return attr.string
     }
 
-    private func extractDisplayName(from: String) -> String {
+    nonisolated private func extractDisplayName(from: String) -> String {
         if let range = from.range(of: "<") {
             return String(from[from.startIndex..<range.lowerBound])
                 .trimmingCharacters(in: .whitespaces)
@@ -535,7 +547,7 @@ final class EmailAccountsManager: NSObject, ObservableObject, ASWebAuthenticatio
         return from
     }
 
-    private func parseRFC2822Date(_ s: String) -> Date? {
+    nonisolated private func parseRFC2822Date(_ s: String) -> Date? {
         let fmts = ["EEE, dd MMM yyyy HH:mm:ss Z", "dd MMM yyyy HH:mm:ss Z", "EEE, d MMM yyyy HH:mm:ss Z"]
         let df = DateFormatter(); df.locale = Locale(identifier: "en_US_POSIX")
         for fmt in fmts { df.dateFormat = fmt; if let d = df.date(from: s) { return d } }
@@ -544,16 +556,21 @@ final class EmailAccountsManager: NSObject, ObservableObject, ASWebAuthenticatio
 
     private func buildGmailRFC2822(from: String, draft: EmailDraft) -> String {
         let cc = draft.cc.isEmpty ? "" : "Cc: \(draft.cc)\r\n"
-        return "From: \(from)\r\nTo: \(draft.to)\r\n\(cc)Subject: \(draft.subject)\r\nContent-Type: text/plain; charset=utf-8\r\nMIME-Version: 1.0\r\n\r\n\(draft.body)"
+        var replyHeaders = ""
+        if let msgId = draft.replyToMessageId {
+            let bracketed = msgId.hasPrefix("<") ? msgId : "<\(msgId)>"
+            replyHeaders = "In-Reply-To: \(bracketed)\r\nReferences: \(bracketed)\r\n"
+        }
+        return "From: \(from)\r\nTo: \(draft.to)\r\n\(cc)Subject: \(draft.subject)\r\n\(replyHeaders)Content-Type: text/plain; charset=utf-8\r\nMIME-Version: 1.0\r\n\r\n\(draft.body)"
     }
 
     // ── Keychain helpers ───────────────────────────────────────────────
 
-    private func keychainService(for accountId: UUID) -> String {
+    nonisolated private func keychainService(for accountId: UUID) -> String {
         "com.nexa.email.\(accountId.uuidString)"
     }
 
-    func saveToKeychain(accountId: UUID, key: String, value: String) {
+    nonisolated func saveToKeychain(accountId: UUID, key: String, value: String) {
         let service = keychainService(for: accountId)
         let data = value.data(using: .utf8)!
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
@@ -564,7 +581,7 @@ final class EmailAccountsManager: NSObject, ObservableObject, ASWebAuthenticatio
         SecItemAdd(attrs as CFDictionary, nil)
     }
 
-    func loadFromKeychain(accountId: UUID, key: String) -> String? {
+    nonisolated func loadFromKeychain(accountId: UUID, key: String) -> String? {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                     kSecAttrService as String: keychainService(for: accountId),
                                     kSecAttrAccount as String: key,
@@ -596,7 +613,7 @@ final class EmailAccountsManager: NSObject, ObservableObject, ASWebAuthenticatio
 
     // ── Misc helpers ───────────────────────────────────────────────────
 
-    private func encodeForm(_ params: [String: String]) -> Data? {
+    nonisolated private func encodeForm(_ params: [String: String]) -> Data? {
         params.map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")" }
               .joined(separator: "&")
               .data(using: .utf8)

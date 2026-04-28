@@ -3449,6 +3449,8 @@ struct ContentView: View {
     @State private var lastProposedTaskItems: [TaskConfirmationItem] = []
     @State private var showTaskDetailSheet = false
     @State private var showNotificationAlert = false
+    @State private var pendingEmailTask: TaskItem? = nil
+    @State private var showEmailTaskConfirm = false
     @State private var showCalendarAlert = false
     @State private var lastIntentSource: String = "fallback"
     @State private var lastIntentReason: String = "not-run"
@@ -3489,6 +3491,7 @@ struct ContentView: View {
     @StateObject private var skillsManager = SkillsManager.shared
     @StateObject private var skillsStore   = SkillsStore.shared
     @StateObject private var emailStore = EmailStore.shared
+    @StateObject private var emailMonitor = EmailMonitor.shared
     @StateObject private var sharedContentProcessor = SharedContentProcessor.shared
     @State private var showNotificationList = false
     @State private var showSavedItemsSheet = false
@@ -3497,6 +3500,7 @@ struct ContentView: View {
     @State private var selectedHistorySession: ChatSessionArchive? = nil
     @State private var currentSessionID: UUID = UUID()
     @State private var showEmailInbox = false
+    @State private var emailTriageMessageId: UUID? = nil
     @State private var selectedTaskForDetail: TaskItem?
     @State private var pendingDetectedReceipts: [DetectedReceipt] = []
     @State private var showReceiptImportReviewSheet = false
@@ -3622,6 +3626,16 @@ struct ContentView: View {
                 #endif
                 Task { await checkForNewPhotoReceipts() }
 
+                // Start email monitoring — delay the initial check so the UI
+                // finishes rendering before any email network work begins.
+                if skillsManager.isEnabled(.email) {
+                    emailMonitor.startMonitoring()
+                    Task.detached(priority: .background) { [weak emailMonitor] in
+                        try? await Task.sleep(nanoseconds: 10_000_000_000) // 10 s
+                        await emailMonitor?.checkNow()
+                    }
+                }
+
                 // Show What's New sheet when the app version changes
                 let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
                 if !currentVersion.isEmpty && currentVersion != lastSeenAppVersion {
@@ -3644,6 +3658,13 @@ struct ContentView: View {
                 sharedContentProcessor.refreshPendingCount()
                 Task { await injectSharedItemsIntoChat() }
             }
+            .onReceive(NotificationCenter.default.publisher(for: .nexaEmailActionReady)) { note in
+                let count = note.userInfo?["count"] as? Int ?? 0
+                injectEmailTriageMessage(count: count)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .nexaAddTaskFromEmail)) { note in
+                handleAddTaskFromEmail(userInfo: note.userInfo)
+            }
             .onChange(of: scenePhase) { newPhase in
                 if newPhase == .active {
                      checkAgentTasks(at: Date())
@@ -3657,6 +3678,12 @@ struct ContentView: View {
                      Task { await injectSharedItemsIntoChat() }
                      if skillsManager.isEnabled(.email) {
                          Task { await emailStore.refresh() }
+                         // Delay monitor check so higher-priority foreground tasks
+                         // (refreshSystemTasks, injectSharedItems, etc.) complete first.
+                         Task.detached(priority: .background) { [weak emailMonitor] in
+                             try? await Task.sleep(nanoseconds: 5_000_000_000) // 5 s
+                             await emailMonitor?.checkNow()
+                         }
                      }
                      // Refresh user-defined skills from the server
                      if !authManager.email.isEmpty {
@@ -3697,7 +3724,8 @@ struct ContentView: View {
                     useAzure: useAzure,
                     azureEndpoint: azureEndpoint,
                     agentName: agentName,
-                    userName: userName.isEmpty ? nil : userName
+                    userName: userName.isEmpty ? nil : userName,
+                    accessToken: authManager.accessToken
                 )
             }
             .sheet(isPresented: $showTrackingSheet) {
@@ -3884,6 +3912,23 @@ struct ContentView: View {
                 Button("OK", role: .cancel) {}
             }, message: {
                 Text("I couldn't schedule a start-date reminder. Check notification permissions.")
+            })
+            .alert("Add Task?", isPresented: $showEmailTaskConfirm, actions: {
+                Button("Add") {
+                    if let t = pendingEmailTask {
+                        tasks.append(t)
+                        reprioritize()
+                        let fmt = DateFormatter()
+                        fmt.dateStyle = .medium; fmt.timeStyle = .none
+                        let note = "📅 Task added: **\(t.title)** — \(fmt.string(from: t.dueDate))"
+                        messages.append(.init(isUser: false, text: note, responseTitle: "Task Scheduled"))
+                        if messages.count > 250 { messages.removeFirst(messages.count - 250) }
+                    }
+                    pendingEmailTask = nil
+                }
+                Button("Cancel", role: .cancel) { pendingEmailTask = nil }
+            }, message: {
+                Text(emailTaskConfirmMessage)
             })
             .sheet(isPresented: $showingOverdueSheet) {
                 OverdueTasksSheet(
@@ -5062,12 +5107,16 @@ struct TasksListSheet: View {
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        printFilteredTaskList()
-                    } label: {
-                        Image(systemName: "printer")
+                    HStack {
+                        Button {
+                            printFilteredTaskList()
+                        } label: {
+                            Image(systemName: "printer")
+                        }
+                        .accessibilityLabel("Print Task List")
+                        Button("Done") { dismiss() }
+                            .fontWeight(.semibold)
                     }
-                    .accessibilityLabel("Print Task List")
                 }
             }
             .onAppear {
@@ -6424,6 +6473,94 @@ extension ContentView {
     }
 
     // MARK: - Share Extension injection
+
+    // MARK: - Email triage helpers
+
+    /// Called once per batch of newly actionable emails. Guards against repeat injections.
+    private func injectEmailTriageMessage(count: Int) {
+        guard emailTriageMessageId == nil else { return }   // already injected
+        guard count > 0 else { return }
+
+        let noun   = count == 1 ? "email needs" : "emails need"
+        let text   = "📬 \(count) \(noun) your attention. Tap **Review Emails** to see what requires action."
+        let msg    = ChatMessage(isUser: false, text: text, responseTitle: "Email Triage")
+        emailTriageMessageId = msg.id
+        messages.append(msg)
+
+        // Cap chat history
+        if messages.count > 250 { messages.removeFirst(messages.count - 250) }
+    }
+
+    /// Handlers the nexaAddTaskFromEmail notification posted by EmailTriageView's Schedule action.
+    private var emailTaskConfirmMessage: String {
+        guard let t = pendingEmailTask else { return "" }
+        let fmt = DateFormatter()
+        fmt.dateStyle = .long; fmt.timeStyle = .none
+        return "\"\(t.title)\"\nDate: \(fmt.string(from: t.dueDate))"
+    }
+
+    /// Handles the nexaAddTaskFromEmail notification posted by EmailTriageView's Schedule action.
+    private func handleAddTaskFromEmail(userInfo: [AnyHashable: Any]?) {
+        guard let info = userInfo,
+              let title = info["title"] as? String else { return }
+
+        let dateStr = info["dateString"] as? String ?? ""
+        let eventDate = parseEmailTaskDate(dateStr) ?? Date().addingTimeInterval(60 * 60 * 24)
+
+        let task = TaskItem(
+            title: title,
+            tag: "Email",
+            startDate: eventDate,
+            dueDate: eventDate,
+            priority: 1
+        )
+
+        pendingEmailTask = task
+        showEmailTaskConfirm = true
+
+        if let replyBody    = info["replyBody"]    as? String, !replyBody.isEmpty,
+           let replyTo      = info["replyTo"]      as? String,
+           let replySubject = info["replySubject"] as? String,
+           let providerRaw  = info["provider"]     as? String,
+           let threadId     = info["threadId"]     as? String,
+           let provider     = EmailProvider(rawValue: providerRaw) {
+
+            let draft = EmailDraft(
+                to: replyTo,
+                cc: "",
+                subject: replySubject,
+                body: replyBody,
+                inReplyToThreadId: threadId,
+                provider: provider,
+                isReply: true
+            )
+            NotificationCenter.default.post(
+                name: .nexaOpenEmailDraft,
+                object: nil,
+                userInfo: ["draft": draft]
+            )
+        }
+    }
+
+    /// Parse a date string returned by the triage AI into a concrete Date.
+    private func parseEmailTaskDate(_ raw: String) -> Date? {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !s.isEmpty else { return nil }
+        let cal = Calendar.current
+        let now = Date()
+        if s == "today"    { return now }
+        if s == "tomorrow" { return cal.date(byAdding: .day, value: 1, to: now) }
+        let fmts = ["yyyy-MM-dd", "MM/dd/yyyy", "dd MMM yyyy", "MMM dd, yyyy",
+                    "MMMM dd, yyyy", "MMMM d, yyyy", "MMM d yyyy"]
+        let df = DateFormatter()
+        df.locale   = Locale(identifier: "en_US_POSIX")
+        df.timeZone = TimeZone.current
+        for fmt in fmts {
+            df.dateFormat = fmt
+            if let d = df.date(from: raw.trimmingCharacters(in: .whitespacesAndNewlines)) { return d }
+        }
+        return nil
+    }
 
     /// Drains the App-Group queue and injects each shared item directly into
     /// the chat as a user message, then calls handleIntent so the Nexa agent
@@ -10272,8 +10409,12 @@ extension ContentView {
         let appTasks = tasks.filter {
             $0.type == .app && ($0.externalId == nil || $0.externalId?.isEmpty == true)
         }
-        if let data = try? JSONEncoder().encode(appTasks) {
-            UserDefaults.standard.set(data, forKey: "saved_tasks")
+        // Encode + write off-main so this never blocks UIKit gestures
+        Task.detached(priority: .background) {
+            guard let data = try? JSONEncoder().encode(appTasks) else { return }
+            await MainActor.run {
+                UserDefaults.standard.set(data, forKey: "saved_tasks")
+            }
         }
     }
 

@@ -73,6 +73,11 @@ struct UnifiedEmail: Identifiable, Codable, Hashable {
     var aiSummary: String?            // AI-generated one-liner
     var aiPriorityReason: String?     // why the AI assigned this priority
     var labels: [String]              // Gmail labels / Outlook categories
+    var isActionRequired: Bool = false   // AI flagged as needing user action
+    var isTriaged: Bool = false          // triage AI has already evaluated this email
+    var requiresReply: Bool = false      // action needs a reply; false = action-only (no reply chip)
+    var aiDraftBody: String?             // AI pre-generated reply draft body
+    var isReplied: Bool = false          // user has sent a reply via the app
 
     // Convenience
     var fromInitials: String {
@@ -119,7 +124,8 @@ struct EmailDraft: Codable {
     var cc: String
     var subject: String
     var body: String
-    var inReplyToThreadId: String?
+    var inReplyToThreadId: String?   // Gmail: threadId for thread grouping in API body
+    var replyToMessageId: String?    // Outlook: individual message ID for /reply endpoint; Gmail: In-Reply-To header
     var provider: EmailProvider
     var isReply: Bool
 }
